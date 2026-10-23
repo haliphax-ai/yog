@@ -1,11 +1,24 @@
 {
   "name": "fuse-overlay-harness",
   "version": "0.1.0",
-  "description": "V\bAgent harness with virtual filesystem",
-  "main": "index.ts",
+  "description": "Agent harness with virtual filesystem",
+  "type": "module",
+  "main": "src/index.ts",
   "scripts": {
-    "test": "vitest run --reporter=dot --silent ."
+    "start": "node src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --reporter=dot --silent=true .",
+    "test:mount": "node scripts/mount-test.ts"
   },
   "author": "haliphax <haliphax@gmail.com>",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "fuse-native": "^2.2.6",
+    "openai": "^7.43.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
 }
