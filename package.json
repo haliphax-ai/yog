@@ -1,0 +1,11 @@
+{
+  "name": "fuse-overlay-harness",
+  "version": "0.1.0",
+  "description": "V\bAgent harness with virtual filesystem",
+  "main": "index.ts",
+  "scripts": {
+    "test": "vitest run --reporter=dot --silent ."
+  },
+  "author": "haliphax <haliphax@gmail.com>",
+  "license": "MIT"
+}
