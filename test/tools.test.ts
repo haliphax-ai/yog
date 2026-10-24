@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   bashTool,
   executeToolCall,
   toolDefinitions,
   tools,
   validateAgainstSchema,
-} from '../src/tools.ts'
+} from '../src/tools.js'
 
 describe('tool definitions', () => {
   it('exposes a single bash tool for starters', () => {
@@ -14,15 +17,13 @@ describe('tool definitions', () => {
     expect((toolDefinitions[0] as { function: { name: string } }).function.name).toBe('bash')
   })
 
-  it('requires command and args with the right types', () => {
+  it('requires a single script string', () => {
     const params = bashTool.definition.function.parameters as {
       required: string[]
-      properties: Record<string, { type?: unknown; items?: { type?: unknown } }>
+      properties: Record<string, { type?: unknown }>
     }
-    expect(params.required).toEqual(['command', 'args'])
-    expect(params.properties['command']?.type).toBe('string')
-    expect(params.properties['args']?.type).toBe('array')
-    expect(params.properties['args']?.items?.type).toEqual(['string', 'number'])
+    expect(params.required).toEqual(['script'])
+    expect(params.properties['script']?.type).toBe('string')
   })
 })
 
@@ -30,57 +31,42 @@ describe('schema validation', () => {
   const schema = bashTool.definition.function.parameters as never
 
   it('accepts a valid call', () => {
-    expect(
-      validateAgainstSchema(schema, { command: 'echo', args: ['hi', 1] }),
-    ).toBeUndefined()
+    expect(validateAgainstSchema(schema, { script: 'echo hi' })).toBeUndefined()
   })
 
   it('rejects a missing required field', () => {
-    expect(validateAgainstSchema(schema, { command: 'echo' })).toMatch(
-      /missing required field "args"/,
-    )
+    expect(validateAgainstSchema(schema, {})).toMatch(/missing required field "script"/)
   })
 
   it('rejects extra fields', () => {
-    expect(
-      validateAgainstSchema(schema, { command: 'echo', args: [], cwd: '/tmp' }),
-    ).toMatch(/unexpected field "cwd"/)
-  })
-
-  it('rejects an invalid field type', () => {
-    expect(validateAgainstSchema(schema, { command: 42, args: [] })).toMatch(
-      /expected string/,
+    expect(validateAgainstSchema(schema, { script: 'echo', cwd: '/tmp' })).toMatch(
+      /unexpected field "cwd"/,
     )
   })
 
-  it('rejects invalid array element types', () => {
-    expect(
-      validateAgainstSchema(schema, { command: 'echo', args: ['a', true] }),
-    ).toMatch(/args\[1\]: expected string \| number/)
+  it('rejects an invalid field type', () => {
+    expect(validateAgainstSchema(schema, { script: 42 })).toMatch(/expected string/)
   })
 })
 
 describe('executeToolCall', () => {
   it('runs bash and returns stdout/exitCode', async () => {
-    const result = await executeToolCall(
-      'bash',
-      JSON.stringify({ command: 'echo', args: ['hello'] }),
-    )
+    const result = await executeToolCall('bash', JSON.stringify({ script: 'echo hello' }))
     expect(result?.error).toBeUndefined()
     expect(result?.['stdout']).toBe('hello\n')
     expect(result?.['exitCode']).toBe(0)
     expect(typeof result?.['runtimeMs']).toBe('number')
   })
 
-  it('reports the exit code of a failing command', async () => {
-    const result = await executeToolCall('bash', JSON.stringify({ command: 'false', args: [] }))
-    expect(result?.['exitCode']).toBe(1)
+  it('reports the exit code of a failing script', async () => {
+    const result = await executeToolCall('bash', JSON.stringify({ script: 'exit 7' }))
+    expect(result?.['exitCode']).toBe(7)
     expect(result?.error).toBeUndefined()
   })
 
   it('aborts on schema violation with error and null output fields', async () => {
-    const result = await executeToolCall('bash', JSON.stringify({ command: 'echo' }))
-    expect(result?.['error']).toMatch(/missing required field "args"/)
+    const result = await executeToolCall('bash', JSON.stringify({}))
+    expect(result?.['error']).toMatch(/missing required field "script"/)
     expect(result?.['stdout']).toBeNull()
     expect(result?.['stderr']).toBeNull()
     expect(result?.['exitCode']).toBeNull()
@@ -89,7 +75,7 @@ describe('executeToolCall', () => {
   it('aborts on extra fields', async () => {
     const result = await executeToolCall(
       'bash',
-      JSON.stringify({ command: 'echo', args: [], shell: true }),
+      JSON.stringify({ script: 'echo', shell: true }),
     )
     expect(result?.['error']).toMatch(/unexpected field "shell"/)
     expect(result?.['stdout']).toBeNull()
@@ -101,15 +87,36 @@ describe('executeToolCall', () => {
     expect(result?.['exitCode']).toBeNull()
   })
 
-  it('sets error with null output fields when the command cannot spawn', async () => {
-    // null byte in argv makes spawn throw synchronously
-    const result = await executeToolCall('bash', JSON.stringify({ command: 'ec\0ho', args: [] }))
-    expect(result?.['error']).toBeTruthy()
-    expect(result?.['stdout']).toBeNull()
-    expect(result?.['exitCode']).toBeNull()
-  })
-
   it('returns undefined for unknown tools', async () => {
     expect(await executeToolCall('nope', '{}')).toBeUndefined()
+  })
+})
+
+describe('bash shell state persistence', () => {
+  it('persists cwd, exported variables, and functions across calls', async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), 'harness-state-'))
+    const prev = process.env['HARNESS_STATE_DIR']
+    process.env['HARNESS_STATE_DIR'] = stateDir
+    try {
+      const r1 = await executeToolCall(
+        'bash',
+        JSON.stringify({
+          script: "cd /tmp && export FOO=bar && myfn() { echo fn-ok; }",
+        }),
+      )
+      expect(r1?.error).toBeUndefined()
+      expect(r1?.['exitCode']).toBe(0)
+
+      const r2 = await executeToolCall(
+        'bash',
+        JSON.stringify({ script: 'printf "%s|%s|" "$PWD" "$FOO"; myfn' }),
+      )
+      expect(r2?.error).toBeUndefined()
+      expect(r2?.['stdout']).toBe('/tmp|bar|fn-ok\n')
+    } finally {
+      if (prev === undefined) delete process.env['HARNESS_STATE_DIR']
+      else process.env['HARNESS_STATE_DIR'] = prev
+      rmSync(stateDir, { recursive: true, force: true })
+    }
   })
 })

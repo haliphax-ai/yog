@@ -38,8 +38,14 @@ in-memory list:
 
 A single model tool for starters, `bash`:
 
-- **input**: `command: string`, `args: (string | number)[]` (both required;
-  no extra fields allowed).
+- **input**: `script: string` (required; no extra fields allowed). The
+  script runs via `eval` inside a wrapper shell, giving it full bash syntax —
+  pipelines, redirection, builtins, functions — and **persistent shell state**:
+  cwd, exported variables, and shell functions carry over between calls.
+  The agent rc (`BASH_ENV`, falling back to `~/.bashrc`) is sourced before
+  each script as the home baseline, and the resulting state is snapshotted
+  (`export -p` + `declare -f` + `pwd -P`) into the state dir (default
+  `.harness/`, override with `HARNESS_STATE_DIR`) after every call.
 - **output**: `stdout: string | null`, `stderr: string | null`,
   `runtimeMs: number | null`, `exitCode: number | null`.
 
@@ -50,6 +56,17 @@ Every response also carries `error?: string`:
 - thrown exceptions are caught and reported the same way;
 - otherwise `error` is absent and the output fields map to the executed
   process (null only if the process could not be spawned).
+
+### Virtual filesystem action log
+
+Every mutation of `sys/tool` is logged to **stderr** via `console.error`, so
+observers can see the descriptor being acted on:
+
+- append: `{ action: 'append' }`
+- destructive rewrite: `{ action: 'replace', items: [...] }` (contents after
+  the action)
+- standalone truncate: `{ action: 'truncate', items: [...] }`
+- rejected delete: `{ action: 'unlink', error: 'EPERM' }`
 
 ## Environment requirements
 

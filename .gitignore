@@ -2,3 +2,4 @@ node_modules/
 *.log
 sys/
 sys-test/
+.harness/

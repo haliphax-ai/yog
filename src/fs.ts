@@ -128,13 +128,17 @@ export function createOps(store: ListStore): FuseOps {
           // splitItems of '' yields no items, so an append open with no
           // writes is a no-op.
           store.append(text)
+          console.error({ action: 'append' })
         } else if (handle.mode === 'replace') {
           // Commit a rewrite only when something was actually written or the
           // open was destructive (O_TRUNC flag or a trailing SETATTR(0)).
           // Read-only handles never reach here.
           const destructive = handle.truncPending || pendingTruncate
           pendingTruncate = false
-          if (handle.chunks.length > 0 || destructive) store.replace(text)
+          if (handle.chunks.length > 0 || destructive) {
+            store.replace(text)
+            console.error({ action: 'replace', items: store.items })
+          }
         }
         // mode === 'read': never commits.
       }
@@ -150,6 +154,7 @@ export function createOps(store: ListStore): FuseOps {
         } else {
           // Standalone truncate-to-zero clears the list immediately.
           store.replace('')
+          console.error({ action: 'truncate', items: store.items })
         }
       }
       cb(0)
@@ -161,6 +166,7 @@ export function createOps(store: ListStore): FuseOps {
         return
       }
       // The list is never deletable — deletion always fails.
+      console.error({ action: 'unlink', error: 'EPERM' })
       cb(EPERM)
     },
   }

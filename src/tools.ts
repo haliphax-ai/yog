@@ -121,30 +121,86 @@ function describe(value: unknown): string {
   return typeof value
 }
 
+/**
+ * Wrapper that gives each bash tool call a persistent shell home:
+ *
+ *  - restore the previous call's cwd and exported vars/functions
+ *  - source the agent's rc (BASH_ENV, falling back to ~/.bashrc) so every
+ *    call starts from the full-fledged home environment
+ *  - run the requested script as `bash -c "$1"` (argv, no string surgery)
+ *  - persist cwd + `export -p` + `declare -f` atomically for the next call
+ *
+ * The script arrives as $1; the wrapper's own restore/capture never interfere
+ * with the script's stdout/stderr/exit code.
+ */
+const WRAPPER = `set +e
+
+HARNESS_STATE_DIR="\${HARNESS_STATE_DIR:-.harness}"
+HARNESS_RC="\${HARNESS_RC:-\${BASH_ENV:-}}"
+if [ -z "$HARNESS_RC" ] && [ -f "$HOME/.bashrc" ]; then
+  HARNESS_RC="$HOME/.bashrc"
+fi
+
+__h_capture() {
+  mkdir -p "$HARNESS_STATE_DIR"
+  pwd -P > "$HARNESS_STATE_DIR/cwd.tmp" 2>/dev/null && mv -f "$HARNESS_STATE_DIR/cwd.tmp" "$HARNESS_STATE_DIR/cwd" 2>/dev/null
+  {
+    export -p
+    declare -f
+  } > "$HARNESS_STATE_DIR/env.tmp" 2>/dev/null && mv -f "$HARNESS_STATE_DIR/env.tmp" "$HARNESS_STATE_DIR/env" 2>/dev/null
+}
+
+__h_finish() {
+  local __h_rc=$?
+  __h_capture
+  trap - EXIT
+  exit "$__h_rc"
+}
+
+trap __h_finish EXIT
+
+if [ -f "$HARNESS_STATE_DIR/env" ]; then
+  # shellcheck disable=SC1090
+  source "$HARNESS_STATE_DIR/env" >/dev/null 2>&1 || true
+fi
+
+if [ -f "$HARNESS_STATE_DIR/cwd" ]; then
+  __h_cwd=$(cat "$HARNESS_STATE_DIR/cwd" 2>/dev/null)
+  if [ -n "$__h_cwd" ] && [ -d "$__h_cwd" ]; then
+    cd -- "$__h_cwd" 2>/dev/null
+  fi
+fi
+
+if [ -n "$HARNESS_RC" ] && [ -f "$HARNESS_RC" ]; then
+  # shellcheck disable=SC1090
+  source "$HARNESS_RC" >/dev/null || true
+fi
+
+# The script runs in THIS shell, so its cd/export/functions mutate the very
+# state we capture on EXIT — a child bash would throw all of it away.
+eval "$1"
+`
+
 export const bashTool: ToolSpec = {
   definition: {
     type: 'function',
     function: {
       name: 'bash',
       description:
-        'Run a command with the given arguments. ' +
-        'stdout/stderr/exitCode map to the invoked executable and are null ' +
-        'if the call failed schema validation or threw an exception ' +
-        '(in which case `error` explains why).',
+        'Run a bash script in a persistent shell environment. ' +
+        'cwd, exported variables, and shell functions persist between calls; ' +
+        'the agent rc (BASH_ENV or ~/.bashrc) is sourced as the baseline. ' +
+        'stdout/stderr/exitCode map to the shell process; they are null (with ' +
+        '`error` set) if the call failed validation or threw.',
       parameters: {
         type: 'object',
         properties: {
-          command: {
+          script: {
             type: 'string',
-            description: 'The executable to run.',
-          },
-          args: {
-            type: 'array',
-            description: 'Arguments passed to the executable.',
-            items: { type: ['string', 'number'] },
+            description: 'A bash script to execute.',
           },
         },
-        required: ['command', 'args'],
+        required: ['script'],
         additionalProperties: false,
       },
     },
@@ -159,11 +215,10 @@ export const bashTool: ToolSpec = {
   },
 
   async run(args): Promise<BashResult> {
-    const command = String(args['command'])
-    const rawArgs = args['args'] as (string | number)[]
+    const script = String(args['script'])
 
     const start = performance.now()
-    const outcome = await exec(command, rawArgs)
+    const outcome = await execBash(script)
     const runtimeMs = Math.round(performance.now() - start)
     if (outcome.spawnError !== undefined) {
       return { stdout: null, stderr: null, runtimeMs, exitCode: null, error: outcome.spawnError }
@@ -184,11 +239,14 @@ interface ExecOutcome {
   spawnError?: string
 }
 
-function exec(command: string, args: (string | number)[]): Promise<ExecOutcome> {
+function execBash(script: string): Promise<ExecOutcome> {
   return new Promise((resolve) => {
     let child
     try {
-      child = spawn(command, args.map(String), { shell: false })
+      child = spawn('bash', ['-c', WRAPPER, 'harness', script], {
+        cwd: process.cwd(),
+        env: process.env,
+      })
     } catch (err) {
       resolve({
         stdout: '',
