@@ -883,4 +883,35 @@ describe("flush commits buffered writes before release", () => {
     });
     expect(list.items).toEqual(["new"]);
   });
+
+  it("an early empty flush is a no-op; later writes still commit", async () => {
+    const list = new ListDescriptor();
+    const registry = new DescriptorRegistry([["/list", list]]);
+    const ops = registry.buildOps();
+
+    // O_APPEND (0x400) | O_WRONLY (1)
+    const fd = await new Promise<number>((resolve) => {
+      ops.open!("/list", 0x401, (e, f) => resolve(e === 0 ? (f ?? -1) : -1));
+    });
+
+    // Kernel page-cache writeback can deliver FLUSH before the WRITE.
+    await new Promise<void>((resolve) => {
+      ops.flush!("/list", fd, () => resolve());
+    });
+    expect(list.items).toEqual([]);
+
+    const buf = Buffer.from("gamma\n");
+    await new Promise<void>((resolve) => {
+      ops.write!("/list", fd, buf, 6, 0, () => resolve());
+    });
+    await new Promise<void>((resolve) => {
+      ops.flush!("/list", fd, () => resolve());
+    });
+    expect(list.items).toEqual(["gamma"]);
+
+    await new Promise<void>((resolve) => {
+      ops.release!("/list", fd, () => resolve());
+    });
+    expect(list.items).toEqual(["gamma"]);
+  });
 });

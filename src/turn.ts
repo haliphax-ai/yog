@@ -8,11 +8,17 @@ import type { ToolRegistry } from "./tools/index.ts";
  * without tools. This is the loop every agent run funnels through as the
  * harness grows.
  */
+export interface TurnOptions {
+  /** Abort the in-flight model stream (used for graceful SIGINT/SIGTERM). */
+  signal?: AbortSignal;
+}
+
 export async function runTurn(
   client: OpenAI,
   modelId: string,
   messages: ChatCompletionMessageParam[],
   tools: ToolRegistry,
+  opts: TurnOptions = {},
 ): Promise<void> {
   // Bound the tool-call loop so a misbehaving model cannot spin forever.
   for (let round = 0; round < 16; round++) {
@@ -21,6 +27,7 @@ export async function runTurn(
       messages,
       tools: tools.definitions,
       stream: true,
+      ...(opts.signal ? { signal: opts.signal } : {}),
     });
 
     const toolCalls = new Map<number, { id: string; name: string; args: string }>();

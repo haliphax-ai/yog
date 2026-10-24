@@ -226,8 +226,8 @@ interface OpenFile {
   mode: WriteMode;
   truncPending: boolean;
   chunks: Buffer[];
-  /** Whether buffered writes have already been committed (flush/release). */
-  committed?: boolean;
+  /** How many chunks have already been committed (flush/release). */
+  committedChunks: number;
 }
 
 /**
@@ -316,28 +316,31 @@ export class DescriptorRegistry {
   }
 
   /**
-   * Commit an open file handle's buffered writes exactly once. Called from
-   * both `flush` (which the kernel awaits before close() returns, making
-   * subsequent reads deterministic) and `release` (safety net for any path
-   * that skips flush). The `committed` guard prevents double-commit from a
-   * flush followed by a release.
+   * Commit an open file handle's buffered writes. Called from both `flush`
+   * and `release`. The kernel does not guarantee that FLUSH arrives after the
+   * WRITEs (with page-cache writeback a flush can precede the writes), so we
+   * commit only what is new since the last commit (`committedChunks`) and
+   * leave the rest for a later flush/release — this makes an early empty
+   * flush a no-op instead of a premature commit.
    */
   private commitOpen(o: OpenFile): void {
-    if (o.committed) return;
-    o.committed = true;
-    const text = Buffer.concat(o.chunks).toString("utf8");
+    if (o.committedChunks >= o.chunks.length) return;
+    const total = Buffer.concat(o.chunks);
+    const fresh = Buffer.concat(o.chunks.slice(o.committedChunks));
     if (o.mode === "append") {
+      const text = fresh.toString("utf8");
       const rc = o.file.onWrite?.("append", text);
       if (rc === undefined || rc >= 0) o.file.commit?.("append", text);
     } else if (o.mode === "replace") {
       const destructive = o.truncPending || this.pendingTruncate;
       this.pendingTruncate = false;
       if (o.chunks.length > 0 || destructive) {
-        const rc = o.file.onWrite?.("replace", text);
-        if (rc === undefined || rc >= 0) o.file.commit?.("replace", text);
+        const rc = o.file.onWrite?.("replace", total.toString("utf8"));
+        if (rc === undefined || rc >= 0) o.file.commit?.("replace", total.toString("utf8"));
       }
     }
     // mode === 'read': never commits.
+    o.committedChunks = o.chunks.length;
   }
 
   /**
@@ -442,6 +445,7 @@ export class DescriptorRegistry {
           mode,
           truncPending: (flags & O_TRUNC) !== 0,
           chunks: [],
+          committedChunks: 0,
         });
         cb(0, fd);
       },
@@ -463,6 +467,7 @@ export class DescriptorRegistry {
           mode: "replace",
           truncPending: true,
           chunks: [],
+          committedChunks: 0,
         });
         cb(0, fd);
       },

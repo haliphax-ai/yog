@@ -15,6 +15,25 @@ import { runTurn } from "./turn.ts";
 
 const USAGE = 'usage: npm start -- <modelId> "<prompt>"';
 
+/**
+ * Termination handling. The first SIGINT/SIGTERM aborts the in-flight model
+ * stream and proceeds through the normal bounded teardown; a second signal
+ * (or a stalled teardown) force-exits so the process never wedges.
+ */
+const abortController = new AbortController();
+let exitRequested = false;
+
+function requestExit(signal: NodeJS.Signals): void {
+  if (exitRequested) {
+    console.error(`forced exit after repeated ${signal}`);
+    process.exit(130);
+  }
+  exitRequested = true;
+  console.error(`received ${signal}; aborting turn and tearing down`);
+  abortController.abort();
+  setTimeout(() => process.exit(130), 3000).unref();
+}
+
 async function main(): Promise<void> {
   const [modelId, ...promptParts] = process.argv.slice(2);
   if (!modelId || promptParts.length === 0) {
@@ -44,10 +63,14 @@ async function main(): Promise<void> {
 
   let code = 0;
   try {
-    await runTurn(client, modelId, messages, tools);
+    await runTurn(client, modelId, messages, tools, { signal: abortController.signal });
   } catch (err) {
-    console.error(err instanceof Error ? (err.stack ?? err.message) : String(err));
-    code = 1;
+    if (abortController.signal.aborted) {
+      code = 130;
+    } else {
+      console.error(err instanceof Error ? (err.stack ?? err.message) : String(err));
+      code = 1;
+    }
   } finally {
     // Teardown is best-effort and bounded: a hung unmount or an open stream
     // handle must not keep the harness alive after the answer is delivered.
@@ -56,6 +79,9 @@ async function main(): Promise<void> {
     setTimeout(() => process.exit(code), 250).unref();
   }
 }
+
+process.on("SIGINT", () => requestExit("SIGINT"));
+process.on("SIGTERM", () => requestExit("SIGTERM"));
 
 main().catch((err) => {
   console.error(err instanceof Error ? (err.stack ?? err.message) : String(err));
