@@ -837,3 +837,50 @@ describe("folder onRead hook", () => {
     expect(err).toBe(EACCES);
   });
 });
+
+describe("flush commits buffered writes before release", () => {
+  it("commits append writes on flush and release does not double-commit", async () => {
+    const list = new ListDescriptor();
+    const registry = new DescriptorRegistry([["/list", list]]);
+    const ops = registry.buildOps();
+
+    // O_APPEND (0x400) | O_WRONLY (1)
+    const fd = await new Promise<number>((resolve) => {
+      ops.open!("/list", 0x401, (e, f) => resolve(e === 0 ? (f ?? -1) : -1));
+    });
+    const buf = Buffer.from("gamma\n");
+    await new Promise<void>((resolve) => {
+      ops.write!("/list", fd, buf, 6, 0, () => resolve());
+    });
+
+    await new Promise<void>((resolve) => {
+      ops.flush!("/list", fd, () => resolve());
+    });
+    expect(list.items).toEqual(["gamma"]);
+
+    await new Promise<void>((resolve) => {
+      ops.release!("/list", fd, () => resolve());
+    });
+    expect(list.items).toEqual(["gamma"]);
+  });
+
+  it("flush commits a destructive replace while the handle is open", async () => {
+    const list = new ListDescriptor();
+    list.commit("replace", "old\n");
+    const registry = new DescriptorRegistry([["/list", list]]);
+    const ops = registry.buildOps();
+
+    const fd = await new Promise<number>((resolve) => {
+      ops.open!("/list", 1, (e, f) => resolve(e === 0 ? (f ?? -1) : -1));
+    });
+    const buf = Buffer.from("new\n");
+    await new Promise<void>((resolve) => {
+      ops.write!("/list", fd, buf, 4, 0, () => resolve());
+    });
+
+    await new Promise<void>((resolve) => {
+      ops.flush!("/list", fd, () => resolve());
+    });
+    expect(list.items).toEqual(["new"]);
+  });
+});

@@ -226,6 +226,8 @@ interface OpenFile {
   mode: WriteMode;
   truncPending: boolean;
   chunks: Buffer[];
+  /** Whether buffered writes have already been committed (flush/release). */
+  committed?: boolean;
 }
 
 /**
@@ -311,6 +313,31 @@ export class DescriptorRegistry {
       parent = intermediate;
     }
     return { parent, name: segments[segments.length - 1] as string };
+  }
+
+  /**
+   * Commit an open file handle's buffered writes exactly once. Called from
+   * both `flush` (which the kernel awaits before close() returns, making
+   * subsequent reads deterministic) and `release` (safety net for any path
+   * that skips flush). The `committed` guard prevents double-commit from a
+   * flush followed by a release.
+   */
+  private commitOpen(o: OpenFile): void {
+    if (o.committed) return;
+    o.committed = true;
+    const text = Buffer.concat(o.chunks).toString("utf8");
+    if (o.mode === "append") {
+      const rc = o.file.onWrite?.("append", text);
+      if (rc === undefined || rc >= 0) o.file.commit?.("append", text);
+    } else if (o.mode === "replace") {
+      const destructive = o.truncPending || this.pendingTruncate;
+      this.pendingTruncate = false;
+      if (o.chunks.length > 0 || destructive) {
+        const rc = o.file.onWrite?.("replace", text);
+        if (rc === undefined || rc >= 0) o.file.commit?.("replace", text);
+      }
+    }
+    // mode === 'read': never commits.
   }
 
   /**
@@ -501,23 +528,17 @@ export class DescriptorRegistry {
         cb(len);
       },
 
+      flush: (_path, fd, cb) => {
+        const o = this.open.get(fd);
+        if (o) this.commitOpen(o);
+        cb(0);
+      },
+
       release: (_path, fd, cb) => {
         const o = this.open.get(fd);
         if (o) {
           this.open.delete(fd);
-          const text = Buffer.concat(o.chunks).toString("utf8");
-          if (o.mode === "append") {
-            const rc = o.file.onWrite?.("append", text);
-            if (rc === undefined || rc >= 0) o.file.commit?.("append", text);
-          } else if (o.mode === "replace") {
-            const destructive = o.truncPending || this.pendingTruncate;
-            this.pendingTruncate = false;
-            if (o.chunks.length > 0 || destructive) {
-              const rc = o.file.onWrite?.("replace", text);
-              if (rc === undefined || rc >= 0) o.file.commit?.("replace", text);
-            }
-          }
-          // mode === 'read': never commits.
+          this.commitOpen(o);
         }
         cb(0);
       },
