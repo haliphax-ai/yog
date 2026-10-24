@@ -177,7 +177,6 @@ export function createOps(store: ListStore): FuseOps {
         return
       }
       // The list is never deletable — deletion always fails.
-      console.error({ action: 'unlink', error: 'EPERM' })
       cb(EPERM)
     },
   }
