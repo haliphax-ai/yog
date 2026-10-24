@@ -188,11 +188,11 @@ If mounting fails, the harness logs a warning and continues without `./sys`.
 ## Scripts
 
 - `npm test` — vitest unit tests (store, schema validation, tool execution,
-  descriptor registry)
-- `npm run test:mount` — live FUSE mount integration tests (vitest, in
-  `test/mount.test.ts`). Runs only when `TEST_FUSE=1` is set **and**
-  `/dev/fuse` is present; fails loudly if the variable is set but the device
-  is missing, and is skipped otherwise.
+  descriptor registry); excludes the `mount`-tagged suite.
+- `npm run test:mount` — runs **only** the `mount`-tagged live FUSE mount
+  integration tests (`test/mount.test.ts`). Requires `/dev/fuse`; fails
+  loudly if the device is missing. Excluded from `npm test` and the pre-push
+  hook by tag.
 - `npm run typecheck` — `tsc --noEmit` (TypeScript 7.x)
 - `npm start -- <modelId> "<prompt>"` — run the harness (Node ≥ 22.18 for
   native TypeScript type stripping)

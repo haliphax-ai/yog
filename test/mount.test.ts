@@ -2,13 +2,12 @@
 // it mounts a virtual filesystem and performs actual syscalls through it, so
 // it requires a FUSE device and mount privileges.
 //
-// The suite runs only when BOTH conditions hold:
-//   - `TEST_FUSE=1` is set (explicit opt-in), and
-//   - `/dev/fuse` is present in this environment.
-// If `TEST_FUSE=1` is set but the device is missing, the file fails loudly
-// instead of silently skipping. Run it explicitly with:
+// The suite is tagged `mount` and is therefore excluded from the default
+// `npm test` run (which filters tags out). Run it explicitly with:
 //
 //   npm run test:mount
+//
+// If `/dev/fuse` is missing, the suite fails loudly instead of skipping.
 //
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
@@ -29,23 +28,18 @@ import { DescriptorRegistry } from "../src/fs/index.ts";
 const mnt = "./sys-test";
 const file = `${mnt}/list`;
 
-const forced = process.env.TEST_FUSE === "1";
 const devFusePresent = existsSync("/dev/fuse");
 
-// Explicitly requested but impossible to run: fail rather than skip quietly.
-if (forced && !devFusePresent) {
-  throw new Error(
-    "TEST_FUSE=1 requires /dev/fuse, but the FUSE device is not present in this environment.",
-  );
-}
-
-const runMountTests = forced && devFusePresent;
-
-describe.skipIf(!runMountTests)("live FUSE mount", () => {
+describe("live FUSE mount", { tags: ["mount"] }, () => {
   let list: ListDescriptor;
   let fuse: Awaited<ReturnType<typeof mountSys>> | undefined;
 
   beforeAll(async () => {
+    if (!devFusePresent) {
+      throw new Error(
+        "mount-tagged tests require /dev/fuse, but the FUSE device is not present in this environment.",
+      );
+    }
     list = new ListDescriptor();
     const descriptors = new DescriptorRegistry([["/list", list]]);
     fuse = await mountSys(descriptors.buildOps(), mnt, {

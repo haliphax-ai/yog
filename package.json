@@ -7,8 +7,8 @@
   "scripts": {
     "start": "node src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --reporter=dot --silent=true .",
-    "test:mount": "TEST_FUSE=1 vitest run test/mount.test.ts",
+    "test": "vitest run --reporter=dot --silent=true --tagsFilter \"!mount\" .",
+    "test:mount": "vitest run --tagsFilter mount test/mount.test.ts",
     "prepare": "husky"
   },
   "nano-staged": {

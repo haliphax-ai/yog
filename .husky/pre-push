@@ -1,1 +1,1 @@
-npx vitest run --reporter=dot --changed --silent
+npx vitest run --reporter=dot --changed --silent --tagsFilter "!mount"
