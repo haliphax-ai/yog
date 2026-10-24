@@ -145,6 +145,9 @@ __h_capture() {
   mkdir -p "$HARNESS_STATE_DIR"
   pwd -P > "$HARNESS_STATE_DIR/cwd.tmp" 2>/dev/null && mv -f "$HARNESS_STATE_DIR/cwd.tmp" "$HARNESS_STATE_DIR/cwd" 2>/dev/null
   {
+    # No filtering here: the spawn env was already minimal, so this snapshot
+    # contains only what the agent itself set — killing anything with a
+    # "token"-looking name would destroy agent-owned state for no benefit.
     export -p
     declare -f
   } > "$HARNESS_STATE_DIR/env.tmp" 2>/dev/null && mv -f "$HARNESS_STATE_DIR/env.tmp" "$HARNESS_STATE_DIR/env" 2>/dev/null
@@ -180,6 +183,31 @@ fi
 # state we capture on EXIT — a child bash would throw all of it away.
 eval "$1"
 `
+
+/**
+ * The bash tool is spawned with a near-empty environment — just the plumbing
+ * the shell needs to boot (HOME, a fixed PATH, TERM, TZ) and our own
+ * HARNESS_* / BASH_ENV pointers. Everything else the model sees comes from the
+ * agent's home rc (BASH_ENV, falling back to ~/.bashrc), which the operator
+ * controls. Host env — including credentials — never reaches the tool, and
+ * the persisted shell-state snapshot therefore only ever reflects what the
+ * agent itself set. No name/value pattern matching is needed; there is
+ * nothing to hide because nothing was passed.
+ */
+function buildToolEnv(): Record<string, string> {
+  const out: Record<string, string> = {
+    HOME: process.env['HOME'] ?? '/root',
+    PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    TERM: process.env['TERM'] ?? 'dumb',
+    TZ: process.env['TZ'] ?? 'UTC',
+  }
+  // Plumbing, not data: the shell-home pointer and our own state-dir/rc overrides.
+  for (const key of ['BASH_ENV', 'HARNESS_STATE_DIR', 'HARNESS_RC']) {
+    const value = process.env[key]
+    if (value) out[key] = value
+  }
+  return out
+}
 
 export const bashTool: ToolSpec = {
   definition: {
@@ -245,7 +273,7 @@ function execBash(script: string): Promise<ExecOutcome> {
     try {
       child = spawn('bash', ['-c', WRAPPER, 'harness', script], {
         cwd: process.cwd(),
-        env: process.env,
+        env: buildToolEnv(),
       })
     } catch (err) {
       resolve({

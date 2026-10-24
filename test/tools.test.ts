@@ -92,6 +92,59 @@ describe('executeToolCall', () => {
   })
 })
 
+describe('host environment hiding', () => {
+  it('does not expose host secrets to tool children', async () => {
+    process.env['OPENAI_API_KEY'] = 'sk-super-secret'
+    process.env['GH_TOKEN'] = 'ghp_super-secret'
+    try {
+      const result = await executeToolCall(
+        'bash',
+        JSON.stringify({ script: 'env | sort' }),
+      )
+      expect(result?.error).toBeUndefined()
+      const envOut = String(result?.['stdout'])
+      // secrets gone
+      expect(envOut).not.toContain('OPENAI_API_KEY')
+      expect(envOut).not.toContain('GH_TOKEN')
+      expect(envOut).not.toContain('sk-super-secret')
+      // essentials kept
+      expect(envOut).toMatch(/^HOME=/m)
+      expect(envOut).toMatch(/^PATH=/m)
+      // host env beyond the minimal allowlist is not passed through
+      expect(envOut).not.toContain('GEMINI_TOKEN')
+      expect(envOut).not.toContain('OPENROUTER_TOKEN')
+      expect(envOut).not.toContain('NODE_VERSION')
+    } finally {
+      delete process.env['OPENAI_API_KEY']
+      delete process.env['GH_TOKEN']
+    }
+  })
+
+  it('preserves agent-set variables even when their names look secret-ish', async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), 'harness-state-'))
+    const prev = process.env['HARNESS_STATE_DIR']
+    process.env['HARNESS_STATE_DIR'] = stateDir
+    try {
+      const setResult = await executeToolCall(
+        'bash',
+        JSON.stringify({ script: 'export MY_API_TOKEN=abc123' }),
+      )
+      expect(setResult?.error).toBeUndefined()
+
+      const getResult = await executeToolCall(
+        'bash',
+        JSON.stringify({ script: 'printf "%s" "$MY_API_TOKEN"' }),
+      )
+      expect(getResult?.error).toBeUndefined()
+      expect(getResult?.['stdout']).toBe('abc123')
+    } finally {
+      if (prev === undefined) delete process.env['HARNESS_STATE_DIR']
+      else process.env['HARNESS_STATE_DIR'] = prev
+      rmSync(stateDir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('bash shell state persistence', () => {
   it('persists cwd, exported variables, and functions across calls', async () => {
     const stateDir = mkdtempSync(join(tmpdir(), 'harness-state-'))

@@ -46,6 +46,13 @@ A single model tool for starters, `bash`:
   each script as the home baseline, and the resulting state is snapshotted
   (`export -p` + `declare -f` + `pwd -P`) into the state dir (default
   `.harness/`, override with `HARNESS_STATE_DIR`) after every call.
+
+  **Host env is hidden from the tool**: children are spawned with a minimal
+  env — `HOME`, a fixed `PATH`, `TERM`, `TZ`, plus `BASH_ENV` and
+  `HARNESS_*` plumbing. Everything else the model sees comes from the agent's
+  home rc, which the operator controls. The shell-state snapshot therefore
+  reflects only what the agent itself set; no secret filtering happens at
+  capture time (an agent-set `MY_API_TOKEN` persists fine).
 - **output**: `stdout: string | null`, `stderr: string | null`,
   `runtimeMs: number | null`, `exitCode: number | null`.
 
