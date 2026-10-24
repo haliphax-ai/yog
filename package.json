@@ -10,7 +10,7 @@
     "test": "vitest run --reporter=dot --silent=true --tagsFilter \"!mount\" .",
     "test:mount": "vitest run --tagsFilter mount test/mount.test.ts",
     "depcruise": "dependency-cruiser src test --config .dependency-cruiser.cjs",
-    "depcruise:graph": "dependency-cruiser src --output-type dot",
+    "depcruise:graph": "dependency-cruiser src --output-type mermaid",
     "prepare": "husky"
   },
   "nano-staged": {
