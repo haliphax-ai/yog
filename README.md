@@ -41,6 +41,9 @@ place a model id in a `model` file (host cwd) to override it.
   are assigned at registration time, not inside the descriptor.
 - `src/fs/list.ts` — the list descriptor (`ListDescriptor`) backing the
   `sys/list` file.
+- `src/host/index.ts` — host proxy: the only sanctioned path for descriptors
+  and tools to touch the host filesystem (direct `node:fs` imports elsewhere
+  are blocked by dependency-cruiser).
 - `src/tools/index.ts` — shared harness-tool plumbing: `ToolResult`,
   `ToolSpec<TArgs, TResult>`, JSON-schema validation, and the `ToolRegistry`.
 - `src/tools/bash.ts` — the `bash` harness tool (persistent shell state, env
@@ -193,6 +196,8 @@ If mounting fails, the harness logs a warning and continues without `./sys`.
   integration tests (`test/mount.test.ts`). Requires `/dev/fuse`; fails
   loudly if the device is missing. Excluded from `npm test` and the pre-push
   hook by tag.
+- `npm run depcruise` — architecture lint via dependency-cruiser (enforces
+  the layered module rules; runs in the pre-commit hook)
 - `npm run typecheck` — `tsc --noEmit` (TypeScript 7.x)
 - `npm start -- <modelId> "<prompt>"` — run the harness (Node ≥ 22.18 for
   native TypeScript type stripping)

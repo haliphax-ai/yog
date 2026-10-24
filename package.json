@@ -9,6 +9,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --reporter=dot --silent=true --tagsFilter \"!mount\" .",
     "test:mount": "vitest run --tagsFilter mount test/mount.test.ts",
+    "depcruise": "dependency-cruiser src test --config .dependency-cruiser.cjs",
+    "depcruise:graph": "dependency-cruiser src --output-type dot | dot -T svg > docs/architecture.svg",
     "prepare": "husky"
   },
   "nano-staged": {
@@ -25,7 +27,9 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@swc/core": "^1.16.20",
     "@types/node": "^26.6.5",
+    "dependency-cruiser": "^18.7.0",
     "husky": "^9.1.7",
     "nano-staged": "^1.0.2",
     "oxfmt": "^0.74.0",
