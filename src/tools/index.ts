@@ -1,7 +1,7 @@
 import type {
   ChatCompletionFunctionTool,
   ChatCompletionTool,
-} from 'openai/resources/chat/completions/completions.mjs'
+} from "openai/resources/chat/completions/completions.mjs";
 
 /**
  * Shared plumbing for harness tools.
@@ -18,31 +18,31 @@ import type {
  * when the tool itself throws.
  */
 export interface ToolResult {
-  error?: string
-  [key: string]: unknown
+  error?: string;
+  [key: string]: unknown;
 }
 
 export interface ToolSpec<
   TArgs extends Record<string, unknown> = Record<string, unknown>,
   TResult extends ToolResult = ToolResult,
 > {
-  definition: ChatCompletionFunctionTool
+  definition: ChatCompletionFunctionTool;
   /** Validate the raw (JSON-parsed) arguments; return an error string to abort. */
-  validate(args: unknown): string | undefined
+  validate(args: unknown): string | undefined;
   /** Response shape used when the call is aborted (validation error / exception). */
-  failure(error: string): TResult
-  run(args: TArgs): Promise<TResult>
+  failure(error: string): TResult;
+  run(args: TArgs): Promise<TResult>;
 }
 
 export type SchemaNode = {
-  type?: string | string[]
-  properties?: Record<string, SchemaNode>
-  required?: string[]
-  items?: SchemaNode
-  additionalProperties?: boolean | SchemaNode
-  enum?: unknown[]
-  [key: string]: unknown
-}
+  type?: string | string[];
+  properties?: Record<string, SchemaNode>;
+  required?: string[];
+  items?: SchemaNode;
+  additionalProperties?: boolean | SchemaNode;
+  enum?: unknown[];
+  [key: string]: unknown;
+};
 
 /**
  * Validate `args` against a JSON schema (subset: object/string/number/integer/
@@ -52,77 +52,77 @@ export type SchemaNode = {
 export function validateAgainstSchema(
   schema: SchemaNode,
   args: unknown,
-  path = '',
+  path = "",
 ): string | undefined {
-  if (typeof schema !== 'object' || schema === null) return undefined
+  if (typeof schema !== "object" || schema === null) return undefined;
   const types =
-    schema.type === undefined ? [] : Array.isArray(schema.type) ? schema.type : [schema.type]
+    schema.type === undefined ? [] : Array.isArray(schema.type) ? schema.type : [schema.type];
 
   if (schema.enum !== undefined && !schema.enum.includes(args)) {
-    return `${path || 'arguments'}: value ${JSON.stringify(args)} is not one of ${JSON.stringify(schema.enum)}`
+    return `${path || "arguments"}: value ${JSON.stringify(args)} is not one of ${JSON.stringify(schema.enum)}`;
   }
 
   if (types.length > 0 && !types.some((t) => matchesType(t, args))) {
-    return `${path || 'arguments'}: expected ${types.join(' | ')}, got ${describe(args)}`
+    return `${path || "arguments"}: expected ${types.join(" | ")}, got ${describe(args)}`;
   }
 
-  if (matchesType('object', args) && schema.properties !== undefined) {
-    const obj = args as Record<string, unknown>
-    const known = Object.keys(schema.properties)
-    const errors: string[] = []
+  if (matchesType("object", args) && schema.properties !== undefined) {
+    const obj = args as Record<string, unknown>;
+    const known = Object.keys(schema.properties);
+    const errors: string[] = [];
 
     for (const key of schema.required ?? []) {
-      if (!(key in obj)) errors.push(`missing required field "${key}"`)
+      if (!(key in obj)) errors.push(`missing required field "${key}"`);
     }
     for (const key of Object.keys(obj)) {
-      if (!known.includes(key)) errors.push(`unexpected field "${key}"`)
+      if (!known.includes(key)) errors.push(`unexpected field "${key}"`);
     }
     for (const [key, sub] of Object.entries(schema.properties)) {
       if (key in obj) {
-        const err = validateAgainstSchema(sub, obj[key], path ? `${path}.${key}` : key)
-        if (err) errors.push(err)
+        const err = validateAgainstSchema(sub, obj[key], path ? `${path}.${key}` : key);
+        if (err) errors.push(err);
       }
     }
 
-    if (errors.length > 0) return errors.join('; ')
+    if (errors.length > 0) return errors.join("; ");
   }
 
-  if (matchesType('array', args) && schema.items !== undefined) {
-    const arr = args as unknown[]
+  if (matchesType("array", args) && schema.items !== undefined) {
+    const arr = args as unknown[];
     for (let i = 0; i < arr.length; i++) {
-      const err = validateAgainstSchema(schema.items, arr[i], `${path}[${i}]`)
-      if (err) return err
+      const err = validateAgainstSchema(schema.items, arr[i], `${path}[${i}]`);
+      if (err) return err;
     }
   }
 
-  return undefined
+  return undefined;
 }
 
 function matchesType(type: string, value: unknown): boolean {
   switch (type) {
-    case 'object':
-      return typeof value === 'object' && value !== null && !Array.isArray(value)
-    case 'array':
-      return Array.isArray(value)
-    case 'string':
-      return typeof value === 'string'
-    case 'number':
-      return typeof value === 'number' && Number.isFinite(value)
-    case 'integer':
-      return typeof value === 'number' && Number.isInteger(value)
-    case 'boolean':
-      return typeof value === 'boolean'
-    case 'null':
-      return value === null
+    case "object":
+      return typeof value === "object" && value !== null && !Array.isArray(value);
+    case "array":
+      return Array.isArray(value);
+    case "string":
+      return typeof value === "string";
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+    case "integer":
+      return typeof value === "number" && Number.isInteger(value);
+    case "boolean":
+      return typeof value === "boolean";
+    case "null":
+      return value === null;
     default:
-      return true
+      return true;
   }
 }
 
 function describe(value: unknown): string {
-  if (Array.isArray(value)) return 'array'
-  if (value === null) return 'null'
-  return typeof value
+  if (Array.isArray(value)) return "array";
+  if (value === null) return "null";
+  return typeof value;
 }
 
 /**
@@ -130,22 +130,22 @@ function describe(value: unknown): string {
  * implementing `ToolSpec` and calling `registry.add(tool)`.
  */
 export class ToolRegistry {
-  private readonly tools = new Map<string, ToolSpec>()
+  private readonly tools = new Map<string, ToolSpec>();
 
   constructor(tools: ToolSpec[] = []) {
-    for (const tool of tools) this.add(tool)
+    for (const tool of tools) this.add(tool);
   }
 
   add(tool: ToolSpec): void {
-    this.tools.set(tool.definition.function.name, tool)
+    this.tools.set(tool.definition.function.name, tool);
   }
 
   has(name: string): boolean {
-    return this.tools.has(name)
+    return this.tools.has(name);
   }
 
   get definitions(): ChatCompletionTool[] {
-    return [...this.tools.values()].map((t) => t.definition)
+    return [...this.tools.values()].map((t) => t.definition);
   }
 
   /**
@@ -154,25 +154,25 @@ export class ToolRegistry {
    * response. Returns undefined when the tool name is unknown.
    */
   async execute(name: string, rawArgs: string | null): Promise<ToolResult | undefined> {
-    const tool = this.tools.get(name)
-    if (!tool) return undefined
+    const tool = this.tools.get(name);
+    if (!tool) return undefined;
 
-    let parsed: unknown
+    let parsed: unknown;
     try {
-      parsed = rawArgs === null || rawArgs.trim() === '' ? {} : JSON.parse(rawArgs)
+      parsed = rawArgs === null || rawArgs.trim() === "" ? {} : JSON.parse(rawArgs);
     } catch (err) {
-      return tool.failure(`invalid JSON arguments: ${(err as Error).message}`)
+      return tool.failure(`invalid JSON arguments: ${(err as Error).message}`);
     }
 
-    const validationError = tool.validate(parsed)
+    const validationError = tool.validate(parsed);
     if (validationError) {
-      return tool.failure(validationError)
+      return tool.failure(validationError);
     }
 
     try {
-      return await tool.run(parsed as Record<string, unknown>)
+      return await tool.run(parsed as Record<string, unknown>);
     } catch (err) {
-      return tool.failure(err instanceof Error ? err.message : String(err))
+      return tool.failure(err instanceof Error ? err.message : String(err));
     }
   }
 }

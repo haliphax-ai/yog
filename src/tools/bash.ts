@@ -1,20 +1,15 @@
-import { spawn } from 'node:child_process'
-import {
-  type SchemaNode,
-  type ToolResult,
-  type ToolSpec,
-  validateAgainstSchema,
-} from './index.ts'
+import { spawn } from "node:child_process";
+import { type SchemaNode, type ToolResult, type ToolSpec, validateAgainstSchema } from "./index.ts";
 
 export interface BashResult extends ToolResult {
-  stdout: string | null
-  stderr: string | null
-  runtimeMs: number | null
-  exitCode: number | null
+  stdout: string | null;
+  stderr: string | null;
+  runtimeMs: number | null;
+  exitCode: number | null;
 }
 
 export interface BashArgs extends Record<string, unknown> {
-  script: string
+  script: string;
 }
 
 /**
@@ -76,7 +71,7 @@ fi
 # The script runs in THIS shell, so its cd/export/functions mutate the very
 # state we capture on EXIT — a child bash would throw all of it away.
 eval "$1"
-`
+`;
 
 /**
  * The bash tool is spawned with a near-empty environment — just the plumbing
@@ -90,115 +85,115 @@ eval "$1"
  */
 function buildToolEnv(): Record<string, string> {
   const out: Record<string, string> = {
-    HOME: process.env['HOME'] ?? '/root',
-    PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-    TERM: process.env['TERM'] ?? 'dumb',
-    TZ: process.env['TZ'] ?? 'UTC',
+    HOME: process.env["HOME"] ?? "/root",
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    TERM: process.env["TERM"] ?? "dumb",
+    TZ: process.env["TZ"] ?? "UTC",
+  };
+  for (const key of ["BASH_ENV", "HARNESS_STATE_DIR", "HARNESS_RC"]) {
+    const value = process.env[key];
+    if (value) out[key] = value;
   }
-  for (const key of ['BASH_ENV', 'HARNESS_STATE_DIR', 'HARNESS_RC']) {
-    const value = process.env[key]
-    if (value) out[key] = value
-  }
-  return out
+  return out;
 }
 
 interface ExecOutcome {
-  stdout: string
-  stderr: string
-  exitCode: number | null
-  spawnError?: string
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  spawnError?: string;
 }
 
 function execBash(script: string): Promise<ExecOutcome> {
   return new Promise((resolve) => {
-    let child
+    let child;
     try {
-      child = spawn('bash', ['-c', WRAPPER, 'harness', script], {
+      child = spawn("bash", ["-c", WRAPPER, "harness", script], {
         cwd: process.cwd(),
         env: buildToolEnv(),
-      })
+      });
     } catch (err) {
       resolve({
-        stdout: '',
-        stderr: '',
+        stdout: "",
+        stderr: "",
         exitCode: null,
         spawnError: err instanceof Error ? err.message : String(err),
-      })
-      return
+      });
+      return;
     }
 
-    const out: Buffer[] = []
-    const errOut: Buffer[] = []
-    child.stdout?.on('data', (d: Buffer) => out.push(d))
-    child.stderr?.on('data', (d: Buffer) => errOut.push(d))
+    const out: Buffer[] = [];
+    const errOut: Buffer[] = [];
+    child.stdout?.on("data", (d: Buffer) => out.push(d));
+    child.stderr?.on("data", (d: Buffer) => errOut.push(d));
 
-    let settled = false
+    let settled = false;
     const settle = (outcome: ExecOutcome) => {
       if (!settled) {
-        settled = true
-        resolve(outcome)
+        settled = true;
+        resolve(outcome);
       }
-    }
+    };
 
-    child.on('error', (err) => {
-      settle({ stdout: '', stderr: '', exitCode: null, spawnError: err.message })
-    })
+    child.on("error", (err) => {
+      settle({ stdout: "", stderr: "", exitCode: null, spawnError: err.message });
+    });
 
-    child.on('close', (code) => {
+    child.on("close", (code) => {
       settle({
-        stdout: Buffer.concat(out).toString('utf8'),
-        stderr: Buffer.concat(errOut).toString('utf8'),
+        stdout: Buffer.concat(out).toString("utf8"),
+        stderr: Buffer.concat(errOut).toString("utf8"),
         exitCode: code,
-      })
-    })
-  })
+      });
+    });
+  });
 }
 
 export const bashTool: ToolSpec<BashArgs, BashResult> = {
   definition: {
-    type: 'function',
+    type: "function",
     function: {
-      name: 'bash',
+      name: "bash",
       description:
-        'Run a bash script in a persistent shell environment. ' +
-        'cwd, exported variables, and shell functions persist between calls; ' +
-        'the agent rc (BASH_ENV or ~/.bashrc) is sourced as the baseline. ' +
-        'stdout/stderr/exitCode map to the shell process; they are null (with ' +
-        '`error` set) if the call failed validation or threw.',
+        "Run a bash script in a persistent shell environment. " +
+        "cwd, exported variables, and shell functions persist between calls; " +
+        "the agent rc (BASH_ENV or ~/.bashrc) is sourced as the baseline. " +
+        "stdout/stderr/exitCode map to the shell process; they are null (with " +
+        "`error` set) if the call failed validation or threw.",
       parameters: {
-        type: 'object',
+        type: "object",
         properties: {
           script: {
-            type: 'string',
-            description: 'A bash script to execute.',
+            type: "string",
+            description: "A bash script to execute.",
           },
         },
-        required: ['script'],
+        required: ["script"],
         additionalProperties: false,
       },
     },
   },
 
   validate(args: unknown): string | undefined {
-    return validateAgainstSchema(this.definition.function.parameters as SchemaNode, args)
+    return validateAgainstSchema(this.definition.function.parameters as SchemaNode, args);
   },
 
   failure(error: string): BashResult {
-    return { stdout: null, stderr: null, runtimeMs: null, exitCode: null, error }
+    return { stdout: null, stderr: null, runtimeMs: null, exitCode: null, error };
   },
 
   async run(args): Promise<BashResult> {
-    const start = performance.now()
-    const outcome = await execBash(args.script)
-    const runtimeMs = Math.round(performance.now() - start)
+    const start = performance.now();
+    const outcome = await execBash(args.script);
+    const runtimeMs = Math.round(performance.now() - start);
     if (outcome.spawnError !== undefined) {
-      return { stdout: null, stderr: null, runtimeMs, exitCode: null, error: outcome.spawnError }
+      return { stdout: null, stderr: null, runtimeMs, exitCode: null, error: outcome.spawnError };
     }
     return {
       stdout: outcome.stdout,
       stderr: outcome.stderr,
       runtimeMs,
       exitCode: outcome.exitCode,
-    }
+    };
   },
-}
+};

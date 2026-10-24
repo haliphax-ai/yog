@@ -1,11 +1,7 @@
-import type Fuse from 'fuse-native'
-import type { FuseOps } from 'fuse-native'
+import type Fuse from "fuse-native";
+import type { FuseOps } from "fuse-native";
 
-type FuseCtor = new (
-  mnt: string,
-  ops: FuseOps,
-  opts?: Record<string, unknown>,
-) => Fuse
+type FuseCtor = new (mnt: string, ops: FuseOps, opts?: Record<string, unknown>) => Fuse;
 
 /**
  * Mount the virtual filesystem exposing a set of descriptor ops. Resolves
@@ -16,11 +12,11 @@ type FuseCtor = new (
  */
 export async function mountSys(
   ops: FuseOps,
-  mnt = './sys',
+  mnt = "./sys",
   extraOpts: Record<string, unknown> = {},
 ): Promise<Fuse> {
-  const mod = (await import('fuse-native')) as unknown as { default: FuseCtor }
-  const FuseCtor = mod.default
+  const mod = (await import("fuse-native")) as unknown as { default: FuseCtor };
+  const FuseCtor = mod.default;
 
   const fuse = new FuseCtor(mnt, ops, {
     mkdir: true,
@@ -31,17 +27,17 @@ export async function mountSys(
     // the harness user and remains writable.
     defaultPermissions: true,
     ...extraOpts,
-  })
+  });
 
   return new Promise((resolve, reject) => {
-    fuse.mount((err) => (err ? reject(err) : resolve(fuse)))
-  })
+    fuse.mount((err) => (err ? reject(err) : resolve(fuse)));
+  });
 }
 
 /** Unmount, ignoring unmount failures (e.g. FUSE unavailable in this container). */
 export function unmountSys(fuse: Fuse | undefined): Promise<void> {
-  if (!fuse) return Promise.resolve()
+  if (!fuse) return Promise.resolve();
   return new Promise((resolve) => {
-    fuse.unmount(() => resolve())
-  })
+    fuse.unmount(() => resolve());
+  });
 }

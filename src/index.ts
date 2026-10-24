@@ -7,69 +7,66 @@
  * chat completion with tools against the given model, exiting when the stream
  * ends.
  */
-import OpenAI from 'openai'
-import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions/completions.mjs'
-import { ListDescriptor } from './fs/list.ts'
-import { DescriptorRegistry } from './fs/index.ts'
-import { mountSys, unmountSys } from './mount.ts'
-import { ToolRegistry } from './tools/index.ts'
-import { bashTool } from './tools/bash.ts'
-import { runTurn } from './turn.ts'
+import OpenAI from "openai";
+import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
+import { ListDescriptor } from "./fs/list.ts";
+import { DescriptorRegistry } from "./fs/index.ts";
+import { mountSys, unmountSys } from "./mount.ts";
+import { ToolRegistry } from "./tools/index.ts";
+import { bashTool } from "./tools/bash.ts";
+import { runTurn } from "./turn.ts";
 
-const USAGE = 'usage: npm start -- <modelId> "<prompt>"'
+const USAGE = 'usage: npm start -- <modelId> "<prompt>"';
 
 async function main(): Promise<void> {
-  const [modelId, ...promptParts] = process.argv.slice(2)
+  const [modelId, ...promptParts] = process.argv.slice(2);
   if (!modelId || promptParts.length === 0) {
-    console.error(USAGE)
-    process.exit(1)
+    console.error(USAGE);
+    process.exit(1);
   }
-  const prompt = promptParts.join(' ')
+  const prompt = promptParts.join(" ");
 
   // Env vars are used when set, for OpenAI-compatible proxies; otherwise the
   // SDK defaults (OPENAI_BASE_URL / OPENAI_API_KEY) apply.
   const client = new OpenAI({
-    ...(process.env['OPENAI_BASE_URL'] ? { baseURL: process.env['OPENAI_BASE_URL'] } : {}),
-    ...(process.env['OPENAI_API_KEY'] ? { apiKey: process.env['OPENAI_API_KEY'] } : {}),
-  })
+    ...(process.env["OPENAI_BASE_URL"] ? { baseURL: process.env["OPENAI_BASE_URL"] } : {}),
+    ...(process.env["OPENAI_API_KEY"] ? { apiKey: process.env["OPENAI_API_KEY"] } : {}),
+  });
 
   // Tool registry — the harness-wide set of model-facing tools.
-  const tools = new ToolRegistry([bashTool])
+  const tools = new ToolRegistry([bashTool]);
 
   // The virtual filesystem: a registry of permanent descriptors. Paths are
   // assigned here, at registration time — not inside the descriptor.
-  const list = new ListDescriptor()
-  const descriptors = new DescriptorRegistry([['/list', list]])
-  let fuse: Awaited<ReturnType<typeof mountSys>> | undefined
+  const list = new ListDescriptor();
+  const descriptors = new DescriptorRegistry([["/list", list]]);
+  let fuse: Awaited<ReturnType<typeof mountSys>> | undefined;
   try {
-    fuse = await mountSys(descriptors.buildOps())
+    fuse = await mountSys(descriptors.buildOps());
   } catch (err) {
     console.error(
       `warning: could not mount ./sys (${(err as Error).message}); continuing without the virtual filesystem`,
-    )
+    );
   }
 
-  const messages: ChatCompletionMessageParam[] = [{ role: 'user', content: prompt }]
+  const messages: ChatCompletionMessageParam[] = [{ role: "user", content: prompt }];
 
-  let code = 0
+  let code = 0;
   try {
-    await runTurn(client, modelId, messages, tools)
+    await runTurn(client, modelId, messages, tools);
   } catch (err) {
-    console.error(err instanceof Error ? err.stack ?? err.message : String(err))
-    code = 1
+    console.error(err instanceof Error ? (err.stack ?? err.message) : String(err));
+    code = 1;
   } finally {
     // Teardown is best-effort and bounded: a hung unmount or an open stream
     // handle must not keep the harness alive after the answer is delivered.
-    await Promise.race([
-      unmountSys(fuse),
-      new Promise((resolve) => setTimeout(resolve, 1500)),
-    ])
-    process.exitCode = code
-    setTimeout(() => process.exit(code), 250).unref()
+    await Promise.race([unmountSys(fuse), new Promise((resolve) => setTimeout(resolve, 1500))]);
+    process.exitCode = code;
+    setTimeout(() => process.exit(code), 250).unref();
   }
 }
 
 main().catch((err) => {
-  console.error(err instanceof Error ? err.stack ?? err.message : String(err))
-  process.exit(1)
-})
+  console.error(err instanceof Error ? (err.stack ?? err.message) : String(err));
+  process.exit(1);
+});
