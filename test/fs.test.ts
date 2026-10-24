@@ -7,8 +7,12 @@ import {
   DescriptorRegistry,
   DIR_MODE,
   EACCES,
+  EEXIST,
+  EINVAL,
   EISDIR,
   ENOENT,
+  ENOTDIR,
+  ENOTEMPTY,
   EPERM,
   FILE_MODE,
 } from "../src/fs/index.ts";
@@ -373,6 +377,7 @@ describe("rename behavior (emergent from descriptors)", () => {
     expect(notified).toBe(true);
     expect(registry.has("/dest/a")).toBe(true);
   });
+});
 
 describe("node lifecycle hooks", () => {
   it("fires onRead when content is read", async () => {
@@ -554,6 +559,280 @@ describe("shared child hooks", () => {
 
     const err = await new Promise<number | null>((resolve) => {
       ops.rename!("/secret", "/list", (e) => resolve(e));
+    });
+    expect(err).toBe(EACCES);
+  });
+});
+
+describe("mkdir", () => {
+  it("creates a folder child under a writable parent", async () => {
+    const registry = new DescriptorRegistry([
+      ["/sessions", new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite })],
+    ]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.mkdir!("/sessions/s1", 0o755, (e) => resolve(e));
+    });
+    expect(err).toBe(0);
+    expect(registry.has("/sessions/s1")).toBe(true);
+    const st = await new Promise<{ mode?: number }>((resolve) => {
+      ops.getattr!("/sessions/s1", (e, s) => resolve(e ? {} : (s ?? {})));
+    });
+    expect(st.mode).toBe(0o40755);
+  });
+
+  it("returns EEXIST when the child already exists", async () => {
+    const registry = new DescriptorRegistry([
+      ["/dir", new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite })],
+    ]);
+    registry.add("/dir/x", fileDescriptor(DescriptorFlags.CanRead, ""));
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.mkdir!("/dir/x", 0o755, (e) => resolve(e));
+    });
+    expect(err).toBe(EEXIST);
+  });
+
+  it("denies mkdir under a non-writable parent", async () => {
+    const registry = new DescriptorRegistry([
+      ["/dir", new DescriptorFolder({ flags: DescriptorFlags.CanRead })],
+    ]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.mkdir!("/dir/x", 0o755, (e) => resolve(e));
+    });
+    expect(err).toBe(EACCES);
+  });
+
+  it("fires onChildCreate on the parent", async () => {
+    const created: string[] = [];
+    const folder = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    folder.onChildCreate = (name) => {
+      created.push(name);
+      return 0;
+    };
+    const registry = new DescriptorRegistry([["/dir", folder]]);
+    const ops = registry.buildOps();
+    await new Promise<void>((resolve) => {
+      ops.mkdir!("/dir/new", 0o755, () => resolve());
+    });
+    expect(created).toEqual(["new"]);
+  });
+});
+
+describe("rmdir", () => {
+  it("removes an empty folder child", async () => {
+    const registry = new DescriptorRegistry([
+      ["/dir", new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite })],
+    ]);
+    registry.add("/dir/empty", new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanRemove }));
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rmdir!("/dir/empty", (e) => resolve(e));
+    });
+    expect(err).toBe(0);
+    expect(registry.has("/dir/empty")).toBe(false);
+  });
+
+  it("refuses to remove a non-empty folder", async () => {
+    const folder = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite | DescriptorFlags.CanRemove,
+    });
+    folder.add("x", fileDescriptor(DescriptorFlags.CanRead, ""));
+    const registry = new DescriptorRegistry([["/dir", folder]]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rmdir!("/dir", (e) => resolve(e));
+    });
+    expect(err).toBe(ENOTEMPTY);
+  });
+
+  it("returns ENOTDIR for a file", async () => {
+    const registry = new DescriptorRegistry([
+      ["/f", fileDescriptor(DescriptorFlags.CanRemove, "")],
+    ]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rmdir!("/f", (e) => resolve(e));
+    });
+    expect(err).toBe(ENOTDIR);
+  });
+
+  it("denies rmdir without CanRemove on the folder", async () => {
+    const registry = new DescriptorRegistry([
+      ["/dir", new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite })],
+    ]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rmdir!("/dir", (e) => resolve(e));
+    });
+    expect(err).toBe(EPERM);
+  });
+
+  it("fires onDelete on the folder and onChildDelete on its parent", async () => {
+    let deleted = false;
+    let notified = false;
+    const child = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanRemove });
+    child.onDelete = () => {
+      deleted = true;
+      return 0;
+    };
+    const parent = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    parent.onChildDelete = () => {
+      notified = true;
+      return 0;
+    };
+    parent.add("sub", child);
+    const registry = new DescriptorRegistry([["/dir", parent]]);
+    const ops = registry.buildOps();
+    await new Promise<void>((resolve) => {
+      ops.rmdir!("/dir/sub", () => resolve());
+    });
+    expect(deleted).toBe(true);
+    expect(notified).toBe(true);
+  });
+});
+
+describe("unlink vs folders", () => {
+  it("returns EISDIR when unlinking a folder", async () => {
+    const registry = new DescriptorRegistry([
+      ["/dir", new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanRemove })],
+    ]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.unlink!("/dir", (e) => resolve(e));
+    });
+    expect(err).toBe(EISDIR);
+    expect(registry.has("/dir")).toBe(true);
+  });
+});
+
+describe("folder rename guards", () => {
+  it("notifies the source folder via onChildRename when a child leaves", async () => {
+    let left = false;
+    const srcFolder = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    srcFolder.onChildRename = () => {
+      left = true;
+      return 0;
+    };
+    const movable = fileDescriptor(DescriptorFlags.CanRead | DescriptorFlags.CanRename, "x");
+    srcFolder.add("m", movable);
+    const registry = new DescriptorRegistry([
+      ["/src", srcFolder],
+      ["/dest", new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite })],
+    ]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/src/m", "/dest", (e) => resolve(e));
+    });
+    expect(err).toBe(0);
+    expect(left).toBe(true);
+    expect(registry.has("/dest/m")).toBe(true);
+    expect(registry.has("/src/m")).toBe(false);
+  });
+
+  it("denies nesting a folder inside itself", async () => {
+    const outer = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite | DescriptorFlags.CanRename,
+    });
+    const inner = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    outer.add("inner", inner);
+    const registry = new DescriptorRegistry([["/outer", outer]]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/outer", "/outer/inner", (e) => resolve(e));
+    });
+    expect(err).toBe(EINVAL);
+  });
+
+  it("replaces an empty destination folder that declares CanOverwrite", async () => {
+    const source = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite | DescriptorFlags.CanRename,
+    });
+    source.add("item", fileDescriptor(DescriptorFlags.CanRead, "v"));
+    const target = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite | DescriptorFlags.CanOverwrite,
+    });
+    const registry = new DescriptorRegistry([
+      ["/src", source],
+      ["/dst", target],
+    ]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/src", "/dst", (e) => resolve(e));
+    });
+    expect(err).toBe(0);
+    expect(registry.has("/src")).toBe(false);
+    expect(registry.has("/dst/item")).toBe(true);
+    expect(registry.has("/dst")).toBe(true);
+  });
+
+  it("refuses to replace a non-empty destination folder", async () => {
+    const source = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite | DescriptorFlags.CanRename,
+    });
+    const target = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite | DescriptorFlags.CanOverwrite,
+    });
+    target.add("keep", fileDescriptor(DescriptorFlags.CanRead, "v"));
+    const registry = new DescriptorRegistry([
+      ["/src", source],
+      ["/dst", target],
+    ]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/src", "/dst", (e) => resolve(e));
+    });
+    expect(err).toBe(ENOTEMPTY);
+  });
+
+  it("runs onOverwrite on a folder target when declared", async () => {
+    let called = false;
+    const source = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite | DescriptorFlags.CanRename,
+    });
+    const target = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    target.onOverwrite = () => {
+      called = true;
+      return 0;
+    };
+    const registry = new DescriptorRegistry([
+      ["/src", source],
+      ["/dst", target],
+    ]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/src", "/dst", (e) => resolve(e));
+    });
+    expect(err).toBe(0);
+    expect(called).toBe(true);
+    expect(registry.has("/src")).toBe(false);
+  });
+});
+
+describe("folder onRead hook", () => {
+  it("fires onRead on readdir", async () => {
+    let reads = 0;
+    const folder = new DescriptorFolder({ flags: DescriptorFlags.CanRead });
+    folder.onRead = () => {
+      reads++;
+      return 0;
+    };
+    const registry = new DescriptorRegistry([["/dir", folder]]);
+    const ops = registry.buildOps();
+    await new Promise<void>((resolve) => {
+      ops.readdir!("/dir", () => resolve());
+    });
+    expect(reads).toBe(1);
+  });
+
+  it("onRead can refuse readdir", async () => {
+    const folder = new DescriptorFolder({ flags: DescriptorFlags.CanRead });
+    folder.onRead = () => EACCES;
+    const registry = new DescriptorRegistry([["/dir", folder]]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.readdir!("/dir", (e) => resolve(e));
     });
     expect(err).toBe(EACCES);
   });

@@ -1,4 +1,11 @@
-import { type DescriptorFile, DescriptorFlags, EACCES, FILE_MODE } from "./index.ts";
+import {
+  type DescriptorChild,
+  type DescriptorFile,
+  DescriptorFlags,
+  EACCES,
+  EISDIR,
+  FILE_MODE,
+} from "./index.ts";
 
 /**
  * The list descriptor.
@@ -43,7 +50,10 @@ export class ListDescriptor implements DescriptorFile {
   }
 
   /** Accept rename-overwrite: replace the list contents with the source file's content. */
-  onOverwrite(source: DescriptorFile): number {
+  onOverwrite(source: DescriptorChild): number {
+    if (source.kind !== "file") {
+      return EISDIR;
+    }
     if ((source.flags & DescriptorFlags.CanRead) === 0 || !source.render) {
       return EACCES;
     }

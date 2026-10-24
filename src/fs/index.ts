@@ -32,6 +32,7 @@ export const ENOTDIR = -20;
 export const EISDIR = -21;
 export const EINVAL = -22;
 export const ENOSYS = -38;
+export const ENOTEMPTY = -39;
 
 /**
  * Mount root mode. 0755: the kernel does not pre-empt mutations, so the
@@ -118,6 +119,13 @@ export interface DescriptorNode {
    * parent. Return a negative errno to refuse the deletion.
    */
   onDelete?(): number | void;
+  /**
+   * Optional housekeeping hook invoked when this node is the target of a
+   * rename-overwrite (a source node is renamed onto it). Files typically adopt
+   * the source content; folders are replaced by the source folder. Return
+   * 0/undefined to accept, or a negative errno to refuse.
+   */
+  onOverwrite?(source: DescriptorChild): number | void;
 }
 
 /**
@@ -137,13 +145,6 @@ export interface DescriptorFile extends DescriptorNode {
   commit?(kind: Exclude<WriteMode, "read">, text: string): void;
   /** Reset to empty content (required when CanWrite). */
   reset?(): void;
-  /**
-   * Optional custom handler for rename-overwrite. If defined, the registry
-   * calls it instead of checking the CanOverwrite flag; return 0/undefined
-   * to accept (the source node is then removed), or a negative errno to
-   * refuse.
-   */
-  onOverwrite?(source: DescriptorFile): number | void;
 }
 
 /**
@@ -155,6 +156,14 @@ export class DescriptorFolder implements DescriptorNode {
   readonly kind = "folder" as const;
   readonly mode: number;
   readonly flags: DescriptorFlags;
+
+  /** Generic node hooks — inherited from DescriptorNode, declared here so the class type carries them. */
+  onRename?(): number | void;
+  onRead?(): number | void;
+  onWrite?(kind: Exclude<WriteMode, "read">, text: string): number | void;
+  onTruncate?(): number | void;
+  onDelete?(): number | void;
+  onOverwrite?(source: DescriptorChild): number | void;
 
   /**
    * Optional housekeeping hook invoked when a child of this folder is renamed
@@ -304,6 +313,21 @@ export class DescriptorRegistry {
     return { parent, name: segments[segments.length - 1] as string };
   }
 
+  /**
+   * Whether `descendantPath` sits at or below `ancestorPath` in the node tree
+   * (used to keep folder renames from nesting a folder inside itself).
+   */
+  private isInside(ancestorPath: string, descendantPath: string): boolean {
+    const a = normalizePath(ancestorPath).split("/").filter(Boolean);
+    const d = normalizePath(descendantPath).split("/").filter(Boolean);
+    if (a.length === 0) return true;
+    if (d.length < a.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== d[i]) return false;
+    }
+    return true;
+  }
+
   /** Build the flat FUSE operation set backed by the registered descriptors. */
   buildOps(): FuseOps {
     return {
@@ -354,6 +378,11 @@ export class DescriptorRegistry {
         }
         if ((node.flags & DescriptorFlags.CanRead) === 0) {
           cb(EACCES);
+          return;
+        }
+        const rc = node.onRead?.();
+        if (rc !== undefined && rc < 0) {
+          cb(rc);
           return;
         }
         cb(null, [...node.children().keys()]);
@@ -409,6 +438,36 @@ export class DescriptorRegistry {
           chunks: [],
         });
         cb(0, fd);
+      },
+
+      mkdir: (path, mode, cb) => {
+        const slot = this.resolveSlot(normalizePath(path));
+        if (!slot) {
+          cb(ENOENT);
+          return;
+        }
+        if (slot.parent.get(slot.name)) {
+          cb(EEXIST);
+          return;
+        }
+        if (slot.parent !== this.root && (slot.parent.flags & DescriptorFlags.CanWrite) === 0) {
+          cb(EACCES);
+          return;
+        }
+        const dirMode = ((mode & 0o7777) | 0o40000) >>> 0;
+        const folder = new DescriptorFolder({ mode: dirMode });
+        const childRc = slot.parent.onChildCreate?.(slot.name, folder);
+        if (childRc !== undefined && childRc < 0) {
+          cb(childRc);
+          return;
+        }
+        const writeRc = slot.parent.onWrite?.("append", slot.name);
+        if (writeRc !== undefined && writeRc < 0) {
+          cb(writeRc);
+          return;
+        }
+        slot.parent.add(slot.name, folder);
+        cb(0);
       },
 
       read: (_path, fd, buf, len, pos, cb) => {
@@ -511,12 +570,24 @@ export class DescriptorRegistry {
           return;
         }
 
+        const srcParent = srcFound.parent;
+        const srcName = srcFound.name;
+
+        // Renaming a node onto itself is a no-op.
+        if (srcNorm === destNorm) {
+          cb(0);
+          return;
+        }
+
         const destNode = this.resolve(destNorm);
         const destSlot = this.resolveSlot(destNorm);
         if (!destSlot) {
           cb(ENOENT);
           return;
         }
+
+        // The source folder is notified before it loses the child.
+        const leave = (): number | void => srcParent.onChildRename?.(srcName, srcFound.node);
 
         // Rename-overwrite: destination is an existing file descriptor. The
         // registry handles CanOverwrite unless the descriptor defines its own
@@ -527,10 +598,6 @@ export class DescriptorRegistry {
             return;
           }
           const target = destNode;
-          if (target.kind !== "file") {
-            cb(EISDIR);
-            return;
-          }
           if (target.onOverwrite) {
             const rc = target.onOverwrite(srcFound.node);
             if (rc !== undefined && rc < 0) {
@@ -552,19 +619,121 @@ export class DescriptorRegistry {
             }
             target.commit("replace", srcFound.node.render());
           }
-          srcFound.parent.remove(srcFound.name);
+          const lr = leave();
+          if (lr !== undefined && lr < 0) {
+            cb(lr);
+            return;
+          }
+          srcParent.remove(srcName);
           cb(0);
           return;
         }
 
-        // Rename into a directory: becomes that directory's child.
+        // Destination slot is occupied by a folder.
         if (destNode && destNode.kind === "folder") {
+          // A folder source must never be nested inside itself or a descendant.
+          if (srcFound.node.kind === "folder") {
+            if (this.isInside(srcNorm, destNorm)) {
+              cb(EINVAL);
+              return;
+            }
+            // If the destination folder opts into overwrite (onOverwrite handler
+            // or CanOverwrite flag), replace it with the source folder. A custom
+            // handler decides for itself; flag-based replacement requires the
+            // destination to be empty.
+            const hasOverwriteHandler = Boolean(destNode.onOverwrite);
+            const wantsReplace =
+              hasOverwriteHandler || (destNode.flags & DescriptorFlags.CanOverwrite) !== 0;
+            if (!wantsReplace) {
+              if ((srcFound.node.flags & DescriptorFlags.CanRename) === 0) {
+                cb(EPERM);
+                return;
+              }
+              if (destNode !== this.root && (destNode.flags & DescriptorFlags.CanWrite) === 0) {
+                cb(EACCES);
+                return;
+              }
+              if (destNode.has(srcName) && srcParent !== destNode) {
+                cb(EEXIST);
+                return;
+              }
+              const rc = srcFound.node.onRename?.();
+              if (rc !== undefined && rc < 0) {
+                cb(rc);
+                return;
+              }
+              const lr = leave();
+              if (lr !== undefined && lr < 0) {
+                cb(lr);
+                return;
+              }
+              const childRc = destNode.onChildRename?.(srcName, srcFound.node);
+              if (childRc !== undefined && childRc < 0) {
+                cb(childRc);
+                return;
+              }
+              destNode.add(srcName, srcFound.node);
+              srcParent.remove(srcName);
+              cb(0);
+              return;
+            }
+            if ((srcFound.node.flags & DescriptorFlags.CanRename) === 0) {
+              cb(EPERM);
+              return;
+            }
+            if (hasOverwriteHandler) {
+              const hrc = destNode.onOverwrite?.(srcFound.node);
+              if (hrc !== undefined && hrc < 0) {
+                cb(hrc);
+                return;
+              }
+            } else if (destNode.children().size > 0) {
+              cb(ENOTEMPTY);
+              return;
+            }
+            const delChildRc = destSlot.parent.onChildDelete?.(destSlot.name, destNode);
+            if (delChildRc !== undefined && delChildRc < 0) {
+              cb(delChildRc);
+              return;
+            }
+            const delRc = destNode.onDelete?.();
+            if (delRc !== undefined && delRc < 0) {
+              cb(delRc);
+              return;
+            }
+            const srcRc = srcFound.node.onRename?.();
+            if (srcRc !== undefined && srcRc < 0) {
+              cb(srcRc);
+              return;
+            }
+            const lr = leave();
+            if (lr !== undefined && lr < 0) {
+              cb(lr);
+              return;
+            }
+            const childRc = destSlot.parent.onChildRename?.(destSlot.name, srcFound.node);
+            if (childRc !== undefined && childRc < 0) {
+              cb(childRc);
+              return;
+            }
+            destSlot.parent.remove(destSlot.name);
+            destSlot.parent.add(destSlot.name, srcFound.node);
+            srcParent.remove(srcName);
+            cb(0);
+            return;
+          }
+
+          // File source: becomes that directory's child.
           if ((srcFound.node.flags & DescriptorFlags.CanRename) === 0) {
             cb(EPERM);
             return;
           }
-          if ((destNode.flags & DescriptorFlags.CanWrite) === 0) {
+          if (destNode !== this.root && (destNode.flags & DescriptorFlags.CanWrite) === 0) {
             cb(EACCES);
+            return;
+          }
+          if (destNode.has(srcName) && srcParent !== destNode) {
+            cb(EEXIST);
             return;
           }
           const rc = srcFound.node.onRename?.();
@@ -572,24 +741,33 @@ export class DescriptorRegistry {
             cb(rc);
             return;
           }
-          const childRc = destNode.onChildRename?.(srcFound.name, srcFound.node);
+          const lr = leave();
+          if (lr !== undefined && lr < 0) {
+            cb(lr);
+            return;
+          }
+          const childRc = destNode.onChildRename?.(srcName, srcFound.node);
           if (childRc !== undefined && childRc < 0) {
             cb(childRc);
             return;
           }
-          destNode.add(srcFound.name, srcFound.node);
-          srcFound.parent.remove(srcFound.name);
+          destNode.add(srcName, srcFound.node);
+          srcParent.remove(srcName);
           cb(0);
           return;
         }
 
         // Pure repositioning: destination slot is empty. The registry handles
         // CanRename; the node may run its own onRename housekeeping.
+        if (srcFound.node.kind === "folder" && this.isInside(srcNorm, destNorm)) {
+          cb(EINVAL);
+          return;
+        }
         if ((srcFound.node.flags & DescriptorFlags.CanRename) === 0) {
           cb(EPERM);
           return;
         }
-        if ((destSlot.parent.flags & DescriptorFlags.CanWrite) === 0) {
+        if (destSlot.parent !== this.root && (destSlot.parent.flags & DescriptorFlags.CanWrite) === 0) {
           cb(EACCES);
           return;
         }
@@ -598,13 +776,18 @@ export class DescriptorRegistry {
           cb(rc);
           return;
         }
+        const lr = leave();
+        if (lr !== undefined && lr < 0) {
+          cb(lr);
+          return;
+        }
         const childRc = destSlot.parent.onChildRename?.(destSlot.name, srcFound.node);
         if (childRc !== undefined && childRc < 0) {
           cb(childRc);
           return;
         }
         destSlot.parent.add(destSlot.name, srcFound.node);
-        srcFound.parent.remove(srcFound.name);
+        srcParent.remove(srcName);
         cb(0);
       },
 
@@ -612,6 +795,11 @@ export class DescriptorRegistry {
         const found = this.resolveParent(normalizePath(path));
         if (!found) {
           cb(ENOENT);
+          return;
+        }
+        // unlink removes files only; folders are removed via rmdir.
+        if (found.node.kind === "folder") {
+          cb(EISDIR);
           return;
         }
         // A descriptor governs its own removability via its capability flags.
@@ -627,6 +815,45 @@ export class DescriptorRegistry {
         const rc = found.node.onDelete?.();
         if (rc !== undefined && rc < 0) {
           cb(rc);
+          return;
+        }
+        found.parent.remove(found.name);
+        cb(0);
+      },
+
+      rmdir: (path, cb) => {
+        const found = this.resolveParent(normalizePath(path));
+        if (!found) {
+          cb(ENOENT);
+          return;
+        }
+        // rmdir removes folders only; files are removed via unlink.
+        if (found.node.kind !== "folder") {
+          cb(ENOTDIR);
+          return;
+        }
+        if (found.node.children().size > 0) {
+          cb(ENOTEMPTY);
+          return;
+        }
+        // A descriptor governs its own removability via its capability flags.
+        if ((found.node.flags & DescriptorFlags.CanRemove) === 0) {
+          cb(EPERM);
+          return;
+        }
+        const childRc = found.parent.onChildDelete?.(found.name, found.node);
+        if (childRc !== undefined && childRc < 0) {
+          cb(childRc);
+          return;
+        }
+        const rc = found.node.onDelete?.();
+        if (rc !== undefined && rc < 0) {
+          cb(rc);
+          return;
+        }
+        const writeRc = found.parent.onWrite?.("replace", found.name);
+        if (writeRc !== undefined && writeRc < 0) {
+          cb(writeRc);
           return;
         }
         found.parent.remove(found.name);
