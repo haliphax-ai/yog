@@ -81,8 +81,8 @@ try {
   const stillThere = await readdir(mnt);
   check("list survives failed delete", stillThere.includes("list"), JSON.stringify(stillThere));
 
-  // The mount directory is 0555 + default_permissions: creating any new entry
-  // must fail at the VFS with EACCES before reaching our handlers.
+  // The mount root is writable; the registry itself denies creating any
+  // non-registered entry (EACCES).
   log("create sibling ...");
   {
     let createErr: unknown = null;

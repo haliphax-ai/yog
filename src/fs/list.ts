@@ -1,4 +1,4 @@
-import { type DescriptorFile, DescriptorFlags, FILE_MODE } from "./index.ts";
+import { type DescriptorFile, DescriptorFlags, EACCES, FILE_MODE } from "./index.ts";
 
 /**
  * The list descriptor.
@@ -11,7 +11,7 @@ import { type DescriptorFile, DescriptorFlags, FILE_MODE } from "./index.ts";
 export class ListDescriptor implements DescriptorFile {
   readonly kind = "file" as const;
   readonly mode = FILE_MODE;
-  readonly flags = DescriptorFlags.Readable | DescriptorFlags.Writable;
+  readonly flags = DescriptorFlags.CanRead | DescriptorFlags.CanWrite;
 
   #items: string[] = [];
 
@@ -43,8 +43,8 @@ export class ListDescriptor implements DescriptorFile {
   }
 
   /** Accept rename-overwrite: replace the list contents with the source file's content. */
-  onRenameOverwrite(source: DescriptorFile): number {
-    if ((source.flags & DescriptorFlags.Readable) === 0 || !source.render) {
+  onOverwrite(source: DescriptorFile): number {
+    if ((source.flags & DescriptorFlags.CanRead) === 0 || !source.render) {
       return EACCES;
     }
     this.commit("replace", source.render());

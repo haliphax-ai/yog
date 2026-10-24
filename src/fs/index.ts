@@ -33,8 +33,12 @@ export const EISDIR = -21;
 export const EINVAL = -22;
 export const ENOSYS = -38;
 
-/** Mount root: read/traverse-only under default_permissions. */
-export const DIR_MODE = 0o40555;
+/**
+ * Mount root mode. 0755: the kernel does not pre-empt mutations, so the
+ * descriptor registry is the sole guard for every mutating op (create,
+ * unlink, rename, …) — behavior emerges from registered descriptors.
+ */
+export const DIR_MODE = 0o40755;
 /** Base mode for regular-file descriptors (owner read/write, world read). */
 export const FILE_MODE = 0o100644;
 
@@ -54,11 +58,15 @@ export const DescriptorFlags = {
   /** No optional capabilities — permanent, non-readable, non-writable. */
   None: 0,
   /** Content may be read. */
-  Readable: 1 << 0,
+  CanRead: 1 << 0,
   /** Content may be written (append/replace/truncate). */
-  Writable: 1 << 1,
+  CanWrite: 1 << 1,
   /** The node may be unlinked (removed) from its parent folder. */
-  Removable: 1 << 2,
+  CanRemove: 1 << 2,
+  /** The node may be renamed (moved) within the mount. */
+  CanRename: 1 << 3,
+  /** The node accepts being overwritten by another node's rename (unless onOverwrite is defined). */
+  CanOverwrite: 1 << 4,
 } as const;
 
 export type DescriptorFlags = (typeof DescriptorFlags)[keyof typeof DescriptorFlags];
@@ -86,12 +94,10 @@ export interface DescriptorNode {
   /** Current size in bytes (0 when unspecified). */
   readonly size?: number;
   /**
-   * Optional declaration that this node may be repositioned within the mount
-   * (rename/move). Presence of the method grants permission; return a
-   * negative errno to refuse a particular move. This is how rename capability
-   * is declared — no flag needed.
+   * Optional housekeeping hook invoked when this node is renamed within the
+   * mount. Return a negative errno to refuse the rename.
    */
-  allowRename?(): number | void;
+  onRename?(): number | void;
 }
 
 /**
@@ -101,24 +107,23 @@ export interface DescriptorNode {
  */
 export interface DescriptorFile extends DescriptorNode {
   readonly kind: "file";
-  /** Content served for reads (required when Readable). */
+  /** Content served for reads (required when CanRead). */
   render?(): string;
   /**
-   * Apply a committed mutation (required when Writable). `kind` is 'append'
+   * Apply a committed mutation (required when CanWrite). `kind` is 'append'
    * for O_APPEND opens and 'replace' for destructive writes; `text` is the
    * fully buffered bytes.
    */
   commit?(kind: Exclude<WriteMode, "read">, text: string): void;
-  /** Reset to empty content (required when Writable). */
+  /** Reset to empty content (required when CanWrite). */
   reset?(): void;
   /**
-   * Optional declaration that this descriptor accepts having another node
-   * renamed onto it (POSIX rename-overwrite). The registry calls this before
-   * committing; return 0/undefined to accept (the source node is then
-   * removed), or a negative errno to refuse. Implementations decide what
-   * "accept" means — typically committing the source's content.
+   * Optional custom handler for rename-overwrite. If defined, the registry
+   * calls it instead of checking the CanOverwrite flag; return 0/undefined
+   * to accept (the source node is then removed), or a negative errno to
+   * refuse.
    */
-  onRenameOverwrite?(source: DescriptorFile): number | void;
+  onOverwrite?(source: DescriptorFile): number | void;
 }
 
 /**
@@ -131,11 +136,17 @@ export class DescriptorFolder implements DescriptorNode {
   readonly mode: number;
   readonly flags: DescriptorFlags;
 
+  /**
+   * Optional housekeeping hook invoked when a child of this folder is renamed
+   * (within or out of this folder). Return a negative errno to refuse.
+   */
+  onChildRename?(name: string, child: DescriptorChild): number | void;
+
   #children = new Map<string, DescriptorChild>();
 
   constructor(opts: { mode?: number; flags?: DescriptorFlags } = {}) {
     this.mode = opts.mode ?? DIR_MODE;
-    this.flags = opts.flags ?? DescriptorFlags.Readable;
+    this.flags = opts.flags ?? DescriptorFlags.CanRead;
   }
 
   get size(): number {
@@ -307,7 +318,7 @@ export class DescriptorRegistry {
           cb(ENOTDIR);
           return;
         }
-        if ((node.flags & DescriptorFlags.Readable) === 0) {
+        if ((node.flags & DescriptorFlags.CanRead) === 0) {
           cb(EACCES);
           return;
         }
@@ -327,11 +338,11 @@ export class DescriptorRegistry {
         const acc = flags & 3;
         const mode: WriteMode =
           acc === 0 ? "read" : (flags & O_APPEND) !== 0 ? "append" : "replace";
-        if (mode === "read" && (node.flags & DescriptorFlags.Readable) === 0) {
+        if (mode === "read" && (node.flags & DescriptorFlags.CanRead) === 0) {
           cb(EACCES, 0);
           return;
         }
-        if (mode !== "read" && (node.flags & DescriptorFlags.Writable) === 0) {
+        if (mode !== "read" && (node.flags & DescriptorFlags.CanWrite) === 0) {
           cb(EACCES, 0);
           return;
         }
@@ -352,7 +363,7 @@ export class DescriptorRegistry {
           cb(EACCES, 0);
           return;
         }
-        if ((node.flags & DescriptorFlags.Writable) === 0) {
+        if ((node.flags & DescriptorFlags.CanWrite) === 0) {
           cb(EACCES, 0);
           return;
         }
@@ -423,7 +434,7 @@ export class DescriptorRegistry {
           cb(EISDIR);
           return;
         }
-        if ((node.flags & DescriptorFlags.Writable) === 0) {
+        if ((node.flags & DescriptorFlags.CanWrite) === 0) {
           cb(EACCES);
           return;
         }
@@ -460,22 +471,38 @@ export class DescriptorRegistry {
         }
 
         // Rename-overwrite: destination is an existing file descriptor. The
-        // destination decides whether it accepts (and how) via its own hook —
-        // nothing here assumes which descriptors exist.
+        // registry handles CanOverwrite unless the descriptor defines its own
+        // onOverwrite handler.
         if (destNode && destNode.kind === "file") {
           if (srcFound.node.kind !== "file") {
             cb(EISDIR);
             return;
           }
           const target = destNode;
-          if (target.kind !== "file" || !target.onRenameOverwrite) {
-            cb(EPERM);
+          if (target.kind !== "file") {
+            cb(EISDIR);
             return;
           }
-          const rc = target.onRenameOverwrite(srcFound.node);
-          if (rc !== undefined && rc < 0) {
-            cb(rc);
-            return;
+          if (target.onOverwrite) {
+            const rc = target.onOverwrite(srcFound.node);
+            if (rc !== undefined && rc < 0) {
+              cb(rc);
+              return;
+            }
+          } else {
+            if ((target.flags & DescriptorFlags.CanOverwrite) === 0) {
+              cb(EPERM);
+              return;
+            }
+            if ((srcFound.node.flags & DescriptorFlags.CanRead) === 0 || !srcFound.node.render) {
+              cb(EACCES);
+              return;
+            }
+            if (!target.commit) {
+              cb(EACCES);
+              return;
+            }
+            target.commit("replace", srcFound.node.render());
           }
           srcFound.parent.remove(srcFound.name);
           cb(0);
@@ -484,13 +511,22 @@ export class DescriptorRegistry {
 
         // Rename into a directory: becomes that directory's child.
         if (destNode && destNode.kind === "folder") {
-          if (typeof srcFound.node.allowRename !== "function") {
+          if ((srcFound.node.flags & DescriptorFlags.CanRename) === 0) {
             cb(EPERM);
             return;
           }
-          const rc = srcFound.node.allowRename();
+          if ((destNode.flags & DescriptorFlags.CanWrite) === 0) {
+            cb(EACCES);
+            return;
+          }
+          const rc = srcFound.node.onRename?.();
           if (rc !== undefined && rc < 0) {
             cb(rc);
+            return;
+          }
+          const childRc = destNode.onChildRename?.(srcFound.name, srcFound.node);
+          if (childRc !== undefined && childRc < 0) {
+            cb(childRc);
             return;
           }
           destNode.add(srcFound.name, srcFound.node);
@@ -499,15 +535,24 @@ export class DescriptorRegistry {
           return;
         }
 
-        // Pure repositioning: destination slot is empty. Capability is
-        // declared by the presence of allowRename on the node itself.
-        if (typeof srcFound.node.allowRename !== "function") {
+        // Pure repositioning: destination slot is empty. The registry handles
+        // CanRename; the node may run its own onRename housekeeping.
+        if ((srcFound.node.flags & DescriptorFlags.CanRename) === 0) {
           cb(EPERM);
           return;
         }
-        const rc = srcFound.node.allowRename();
+        if ((destSlot.parent.flags & DescriptorFlags.CanWrite) === 0) {
+          cb(EACCES);
+          return;
+        }
+        const rc = srcFound.node.onRename?.();
         if (rc !== undefined && rc < 0) {
           cb(rc);
+          return;
+        }
+        const childRc = destSlot.parent.onChildRename?.(destSlot.name, srcFound.node);
+        if (childRc !== undefined && childRc < 0) {
+          cb(childRc);
           return;
         }
         destSlot.parent.add(destSlot.name, srcFound.node);
@@ -522,7 +567,7 @@ export class DescriptorRegistry {
           return;
         }
         // A descriptor governs its own removability via its capability flags.
-        if ((found.node.flags & DescriptorFlags.Removable) === 0) {
+        if ((found.node.flags & DescriptorFlags.CanRemove) === 0) {
           cb(EPERM);
           return;
         }

@@ -63,14 +63,18 @@ in-memory list:
   on close.
 - **delete** (`rm`) — always fails; the list is never removable.
 
-Permission model (enforced by the VFS via `default_permissions`):
+Permission model (enforced by the registry; the mount root is `0755` so the
+kernel does not pre-empt mutations):
 
-- The mount directory is `0555` — read/traverse only. Creating or removing
-  *any* entry (including `list`) fails with `EACCES` at the kernel before
-  reaching the handlers; `ls -l` visibly shows `dr-xr-xr-x`.
-- `list` itself is `0644`, owned by the harness user — so appends and
-  destructive rewrites work, but the descriptor can never be deleted or
-  shadowed by a sibling file.
+- The `DescriptorRegistry` is the sole guard: creating non-registered entries,
+  unlinking, renaming, and overwriting all resolve against the registered
+  descriptors and their capability flags (`Readable`, `Writable`,
+  `Removable`, `CanRename`, `CanOverwrite`) and optional
+  `onRename`/`onOverwrite`/`onChildRename` hooks. No hardcoded paths.
+- `list` is `0644`, owned by the harness user — appends and destructive
+  rewrites work; it is not `Removable` and not `CanRename`, so it can never
+  be deleted or moved away. It declares `onOverwrite` so
+  rename-as-replace content can be written into it.
 
 ## Tools
 

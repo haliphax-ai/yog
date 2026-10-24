@@ -13,11 +13,14 @@ import {
   FILE_MODE,
 } from "../src/fs/index.ts";
 
-/** A file descriptor with controllable flags, simple string content, and optional rename hooks. */
+/** A file descriptor with controllable flags, simple string content, and optional hooks. */
 function fileDescriptor(
   flags: DescriptorFlags,
   content = "",
-  hooks: { allowRename?: () => number | void; onRenameOverwrite?: () => number | void } = {},
+  hooks: {
+    onRename?: () => number | void;
+    onOverwrite?: (source: DescriptorFile) => number | void;
+  } = {},
 ): DescriptorFile {
   return {
     kind: "file",
@@ -105,7 +108,7 @@ describe("DescriptorRegistry path hierarchy", () => {
 });
 
 describe("DescriptorFlags gating", () => {
-  it("denies reads on a non-Readable file", async () => {
+  it("denies reads on a non-CanRead file", async () => {
     const registry = new DescriptorRegistry([
       ["/perm", fileDescriptor(DescriptorFlags.None, "secret")],
     ]);
@@ -116,9 +119,9 @@ describe("DescriptorFlags gating", () => {
     expect(err).toBe(EACCES);
   });
 
-  it("denies writes on a non-Writable file", async () => {
+  it("denies writes on a non-CanWrite file", async () => {
     const registry = new DescriptorRegistry([
-      ["/ro", fileDescriptor(DescriptorFlags.Readable, "hello")],
+      ["/ro", fileDescriptor(DescriptorFlags.CanRead, "hello")],
     ]);
     const ops = registry.buildOps();
     const err = await new Promise<number | null>((resolve) => {
@@ -127,9 +130,9 @@ describe("DescriptorFlags gating", () => {
     expect(err).toBe(EACCES);
   });
 
-  it("allows reads on a Readable file", async () => {
+  it("allows reads on a CanRead file", async () => {
     const registry = new DescriptorRegistry([
-      ["/ro", fileDescriptor(DescriptorFlags.Readable, "hello")],
+      ["/ro", fileDescriptor(DescriptorFlags.CanRead, "hello")],
     ]);
     const ops = registry.buildOps();
     const fd = await new Promise<number>((resolve) => {
@@ -138,9 +141,9 @@ describe("DescriptorFlags gating", () => {
     expect(fd).toBeGreaterThanOrEqual(1000);
   });
 
-  it("allows writes on a Writable file", async () => {
+  it("allows writes on a CanWrite file", async () => {
     const registry = new DescriptorRegistry([
-      ["/rw", fileDescriptor(DescriptorFlags.Readable | DescriptorFlags.Writable, "")],
+      ["/rw", fileDescriptor(DescriptorFlags.CanRead | DescriptorFlags.CanWrite, "")],
     ]);
     const ops = registry.buildOps();
     const fd = await new Promise<number>((resolve) => {
@@ -151,9 +154,9 @@ describe("DescriptorFlags gating", () => {
 });
 
 describe("DescriptorFlags unlink behavior", () => {
-  it("denies unlink for a descriptor without Removable", async () => {
+  it("denies unlink for a descriptor without CanRemove", async () => {
     const registry = new DescriptorRegistry([
-      ["/perm", fileDescriptor(DescriptorFlags.Readable, "x")],
+      ["/perm", fileDescriptor(DescriptorFlags.CanRead, "x")],
     ]);
     const ops = registry.buildOps();
     const err = await new Promise<number | null>((resolve) => {
@@ -163,9 +166,9 @@ describe("DescriptorFlags unlink behavior", () => {
     expect(registry.has("/perm")).toBe(true);
   });
 
-  it("allows unlink for a Removable descriptor", async () => {
+  it("allows unlink for a CanRemove descriptor", async () => {
     const registry = new DescriptorRegistry([
-      ["/mutable", fileDescriptor(DescriptorFlags.Removable, "x")],
+      ["/mutable", fileDescriptor(DescriptorFlags.CanRemove, "x")],
     ]);
     const ops = registry.buildOps();
     const err = await new Promise<number | null>((resolve) => {
@@ -175,9 +178,9 @@ describe("DescriptorFlags unlink behavior", () => {
     expect(registry.has("/mutable")).toBe(false);
   });
 
-  it("removes a Removable child from a folder via unlink", async () => {
+  it("removes a CanRemove child from a folder via unlink", async () => {
     const sessions = new DescriptorFolder();
-    sessions.add("s1", fileDescriptor(DescriptorFlags.Removable, "x"));
+    sessions.add("s1", fileDescriptor(DescriptorFlags.CanRemove, "x"));
     const registry = new DescriptorRegistry([["/sessions", sessions]]);
     const ops = registry.buildOps();
     const err = await new Promise<number | null>((resolve) => {
@@ -199,7 +202,7 @@ describe("DescriptorFlags unlink behavior", () => {
 });
 
 describe("rename behavior (emergent from descriptors)", () => {
-  it("renames a file onto list and replaces its content (list declares onRenameOverwrite)", async () => {
+  it("renames a file onto list and replaces its content (list declares onOverwrite)", async () => {
     const list = new ListDescriptor();
     const registry = new DescriptorRegistry([["/list", list]]);
     const ops = registry.buildOps();
@@ -208,7 +211,7 @@ describe("rename behavior (emergent from descriptors)", () => {
     list.commit("replace", "old\n");
 
     // create a scratch file with fresh content
-    const scratch = fileDescriptor(DescriptorFlags.Readable, "fresh\n");
+    const scratch = fileDescriptor(DescriptorFlags.CanRead, "fresh\n");
     registry.add("/scratch", scratch);
 
     const err = await new Promise<number | null>((resolve) => {
@@ -219,10 +222,28 @@ describe("rename behavior (emergent from descriptors)", () => {
     expect(registry.has("/scratch")).toBe(false);
   });
 
-  it("denies rename-overwrite onto a file that does not declare onRenameOverwrite", async () => {
+  it("allows overwrite via CanOverwrite when target has no onOverwrite", async () => {
+    const target = fileDescriptor(
+      DescriptorFlags.CanRead | DescriptorFlags.CanWrite | DescriptorFlags.CanOverwrite,
+      "old",
+    );
     const registry = new DescriptorRegistry([
-      ["/scratch", fileDescriptor(DescriptorFlags.Readable, "x")],
-      ["/target", fileDescriptor(DescriptorFlags.Readable | DescriptorFlags.Writable, "y")],
+      ["/scratch", fileDescriptor(DescriptorFlags.CanRead, "new")],
+      ["/target", target],
+    ]);
+    const ops = registry.buildOps();
+
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/scratch", "/target", (e) => resolve(e));
+    });
+    expect(err).toBe(0);
+    expect(registry.has("/scratch")).toBe(false);
+  });
+
+  it("denies rename-overwrite onto a file without CanOverwrite and no onOverwrite", async () => {
+    const registry = new DescriptorRegistry([
+      ["/scratch", fileDescriptor(DescriptorFlags.CanRead, "x")],
+      ["/target", fileDescriptor(DescriptorFlags.CanRead | DescriptorFlags.CanWrite, "y")],
     ]);
     const ops = registry.buildOps();
 
@@ -232,7 +253,33 @@ describe("rename behavior (emergent from descriptors)", () => {
     expect(err).toBe(EPERM);
   });
 
-  it("denies renaming the list node itself (no allowRename)", async () => {
+  it("uses onOverwrite when declared, overriding CanOverwrite", async () => {
+    let called = false;
+    const target = fileDescriptor(
+      DescriptorFlags.CanRead | DescriptorFlags.CanWrite,
+      "old",
+      {
+        onOverwrite: () => {
+          called = true;
+          return 0;
+        },
+      },
+    );
+    const registry = new DescriptorRegistry([
+      ["/scratch", fileDescriptor(DescriptorFlags.CanRead, "new")],
+      ["/target", target],
+    ]);
+    const ops = registry.buildOps();
+
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/scratch", "/target", (e) => resolve(e));
+    });
+    expect(err).toBe(0);
+    expect(called).toBe(true);
+    expect(registry.has("/scratch")).toBe(false);
+  });
+
+  it("denies renaming the list node itself (no CanRename)", async () => {
     const list = new ListDescriptor();
     const registry = new DescriptorRegistry([["/list", list]]);
     const ops = registry.buildOps();
@@ -244,10 +291,8 @@ describe("rename behavior (emergent from descriptors)", () => {
     expect(registry.has("/list")).toBe(true);
   });
 
-  it("repositions a file that declares allowRename within the mount", async () => {
-    const movable = fileDescriptor(DescriptorFlags.Readable, "x", {
-      allowRename: () => 0,
-    });
+  it("repositions a file with CanRename within the mount", async () => {
+    const movable = fileDescriptor(DescriptorFlags.CanRead | DescriptorFlags.CanRename, "x");
     const registry = new DescriptorRegistry([["/a", movable]]);
     const ops = registry.buildOps();
 
@@ -259,9 +304,9 @@ describe("rename behavior (emergent from descriptors)", () => {
     expect(registry.has("/b")).toBe(true);
   });
 
-  it("denies repositioning a file that does not declare allowRename", async () => {
+  it("denies repositioning a file without CanRename", async () => {
     const registry = new DescriptorRegistry([
-      ["/a", fileDescriptor(DescriptorFlags.Readable, "x")],
+      ["/a", fileDescriptor(DescriptorFlags.CanRead, "x")],
     ]);
     const ops = registry.buildOps();
 
@@ -272,10 +317,61 @@ describe("rename behavior (emergent from descriptors)", () => {
     expect(registry.has("/a")).toBe(true);
   });
 
-  it("denies repositioning into a missing parent", async () => {
-    const movable = fileDescriptor(DescriptorFlags.Readable, "x", {
-      allowRename: () => 0,
+  it("runs onRename housekeeping on the moved node", async () => {
+    let renamed = false;
+    const movable = fileDescriptor(DescriptorFlags.CanRead | DescriptorFlags.CanRename, "x", {
+      onRename: () => {
+        renamed = true;
+        return 0;
+      },
     });
+    const registry = new DescriptorRegistry([["/a", movable]]);
+    const ops = registry.buildOps();
+
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/a", "/b", (e) => resolve(e));
+    });
+    expect(err).toBe(0);
+    expect(renamed).toBe(true);
+  });
+
+  it("allows onRename to refuse a move", async () => {
+    const movable = fileDescriptor(DescriptorFlags.CanRead | DescriptorFlags.CanRename, "x", {
+      onRename: () => EPERM,
+    });
+    const registry = new DescriptorRegistry([["/a", movable]]);
+    const ops = registry.buildOps();
+
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/a", "/b", (e) => resolve(e));
+    });
+    expect(err).toBe(EPERM);
+    expect(registry.has("/a")).toBe(true);
+  });
+
+  it("runs onChildRename on the destination folder", async () => {
+    let notified = false;
+    const destFolder = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    destFolder.onChildRename = (_name, _child) => {
+      notified = true;
+      return 0;
+    };
+    const registry = new DescriptorRegistry([
+      ["/a", fileDescriptor(DescriptorFlags.CanRead | DescriptorFlags.CanRename, "x")],
+      ["/dest", destFolder],
+    ]);
+    const ops = registry.buildOps();
+
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/a", "/dest", (e) => resolve(e));
+    });
+    expect(err).toBe(0);
+    expect(notified).toBe(true);
+    expect(registry.has("/dest/a")).toBe(true);
+  });
+
+  it("denies repositioning into a missing parent", async () => {
+    const movable = fileDescriptor(DescriptorFlags.CanRead | DescriptorFlags.CanRename, "x");
     const registry = new DescriptorRegistry([["/a", movable]]);
     const ops = registry.buildOps();
 
@@ -308,7 +404,7 @@ describe("rename behavior (emergent from descriptors)", () => {
     expect(err).toBe(EISDIR);
   });
 
-  it("denies renaming a non-Readable source onto list", async () => {
+  it("denies renaming a non-CanRead source onto list", async () => {
     const registry = new DescriptorRegistry([
       ["/list", new ListDescriptor()],
       ["/secret", fileDescriptor(DescriptorFlags.None, "hidden")],
