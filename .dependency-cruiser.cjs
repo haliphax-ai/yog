@@ -8,13 +8,15 @@
  *   src/turn.ts       orchestration — knows the ToolRegistry, never the VFS/entry
  *   src/mount.ts      pure FUSE bridge — no internal dependencies
  *   src/host/         host proxy — the ONLY module allowed to touch node:fs
+ *                     and node:child_process
  *   src/fs/**         leaf domain: descriptors (may use host for out-of-VFS action)
  *   src/tools/**      leaf domain: harness tools (may use host for out-of-VFS action)
  *   test/**           may import any src/**, never the reverse
  *
- * Key invariant: descriptors and tools reach the host filesystem only through
- * src/host/ — direct node:fs imports anywhere in src/ other than host are a
- * rule violation.
+ * Key invariant: descriptors and tools reach the host (filesystem AND
+ * subprocess spawning) only through src/host/ — direct node:fs /
+ * node:child_process imports anywhere in src/ other than host are rule
+ * violations.
  */
 module.exports = {
   options: {
@@ -88,6 +90,15 @@ module.exports = {
       severity: "error",
       from: { path: "^src/(?!host/)" },
       to: { path: "^(node:)?fs(/promises)?$" },
+    },
+
+    // Subprocess spawning likewise happens ONLY through src/host/ (the spawn
+    // passthrough), so process execution is governable in one place.
+    {
+      name: "subprocess-only-via-host",
+      severity: "error",
+      from: { path: "^src/(?!host/)" },
+      to: { path: "^(node:)?child_process$" },
     },
 
     // Production code never imports tests.

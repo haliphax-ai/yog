@@ -12,6 +12,7 @@ import {
   readdir,
   rename,
   rm as hostRm,
+  spawn,
   stat,
   writeFile,
 } from "../src/host/index.ts";
@@ -95,4 +96,31 @@ describe("host proxy", () => {
     const s = await stat(p);
     expect(s.mode & 0o777).toBe(0o600);
   });
+
+  it("spawn runs a subprocess and captures stdout", async () => {
+    const child = spawn(process.execPath, ["-e", "process.stdout.write('hi-from-sub')"], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const { code, stdout } = await collect(child);
+    expect(code).toBe(0);
+    expect(stdout).toBe("hi-from-sub");
+  });
+
+  it("spawn surfaces a non-zero exit code", async () => {
+    const child = spawn(process.execPath, ["-e", "process.exit(3)"], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const { code } = await collect(child);
+    expect(code).toBe(3);
+  });
 });
+
+/** Run a child to completion, returning its exit code and captured stdout. */
+function collect(child: ReturnType<typeof spawn>): Promise<{ code: number | null; stdout: string }> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    child.stdout?.on("data", (c: Buffer) => chunks.push(c));
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stdout: Buffer.concat(chunks).toString("utf8") }));
+  });
+}

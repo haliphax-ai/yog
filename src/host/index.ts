@@ -14,6 +14,11 @@
  */
 import * as fsp from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
+import {
+  spawn as nodeSpawn,
+  type ChildProcess,
+  type SpawnOptions,
+} from "node:child_process";
 
 /** Copy a file, failing if the destination exists (mirrors `cp -n`). */
 export function copyFile(src: string, dest: string, flags = 0): Promise<void> {
@@ -77,3 +82,18 @@ export function chmod(path: string, mode: number): Promise<void> {
 
 /** Re-export fs constants so callers need not import node:fs for flags. */
 export { fsConstants };
+
+/**
+ * Spawn a subprocess. This is the only sanctioned way descriptors and tools
+ * may launch child processes; direct `node:child_process` imports elsewhere
+ * are blocked by dependency-cruiser. It is a faithful passthrough to
+ * `child_process.spawn`, so process plumbing (stdio, env, cwd, detached, …)
+ * works exactly as with node's API.
+ */
+export function spawn(
+  command: string,
+  args?: readonly string[],
+  options?: SpawnOptions,
+): ChildProcess {
+  return nodeSpawn(command, args ? [...args] : undefined, options);
+}

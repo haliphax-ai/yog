@@ -42,8 +42,9 @@ place a model id in a `model` file (host cwd) to override it.
 - `src/fs/list.ts` — the list descriptor (`ListDescriptor`) backing the
   `sys/list` file.
 - `src/host/index.ts` — host proxy: the only sanctioned path for descriptors
-  and tools to touch the host filesystem (direct `node:fs` imports elsewhere
-  are blocked by dependency-cruiser).
+  and tools to touch the host — filesystem **and** subprocess spawning
+  (direct `node:fs` / `node:child_process` imports elsewhere are blocked by
+  dependency-cruiser).
 - `src/tools/index.ts` — shared harness-tool plumbing: `ToolResult`,
   `ToolSpec<TArgs, TResult>`, JSON-schema validation, and the `ToolRegistry`.
 - `src/tools/bash.ts` — the `bash` harness tool (persistent shell state, env
