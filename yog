@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+model="nvidia/nemotron-3-ultra-550b-a55b:free"
+[[ -f "model" ]] && model="$(cat model)"
+
+exec docker run --name yog --rm \
+  --security-opt seccomp=unconfined \
+  --security-opt apparmor=yog \
+  --device /dev/fuse \
+  --cap-add SYS_ADMIN \
+  -e OPENAI_BASE_URL -e OPENAI_API_KEY \
+  -t yog "$model" "$@"
