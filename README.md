@@ -21,10 +21,11 @@ npm start -- <modelId> "<prompt>"
   feeds results back until the model answers without tools.
 - `src/mount.ts` — mount/unmount helpers (accepts any `FuseOps`).
 - `src/fs/index.ts` — shared descriptor-tool plumbing: `DescriptorFile`
-  interface + `DescriptorFs` base class (open/create fd handling, write
-  buffering, commit-on-release, truncate, unlink denial, errno constants).
-- `src/fs/list.ts` — the list descriptor (`ListDescriptor`) and
-  `createListOps` for the `sys/list` file.
+  interface + `DescriptorRegistry` (open/create fd handling, write buffering,
+  commit-on-release, truncate, unlink denial, errno constants). Registry paths
+  are assigned at registration time, not inside the descriptor.
+- `src/fs/list.ts` — the list descriptor (`ListDescriptor`) backing the
+  `sys/list` file.
 - `src/tools/index.ts` — shared harness-tool plumbing: `ToolResult`,
   `ToolSpec<TArgs, TResult>`, JSON-schema validation, and the `ToolRegistry`.
 - `src/tools/bash.ts` — the `bash` harness tool (persistent shell state, env
@@ -33,12 +34,12 @@ npm start -- <modelId> "<prompt>"
 
 ### Adding a new descriptor tool
 
-Implement `DescriptorFile` (name, mode, size, `render`, `commit`, `reset`) and
-build ops via a `DescriptorFs`:
+Implement `DescriptorFile` (mode, size, `render`, `commit`, `reset`) and
+register it — with its mount path — on a `DescriptorRegistry`:
 
 ```ts
-const fs = new DescriptorFs([myDescriptor])
-// mountSys(fs.buildOps())
+const descriptors = new DescriptorRegistry([['/myfile', myDescriptor]])
+// mountSys(descriptors.buildOps())
 ```
 
 ### Adding a new harness tool

@@ -9,7 +9,8 @@
  */
 import OpenAI from 'openai'
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions/completions.mjs'
-import { ListDescriptor, createListOps } from './fs/list.ts'
+import { ListDescriptor } from './fs/list.ts'
+import { DescriptorRegistry } from './fs/index.ts'
 import { mountSys, unmountSys } from './mount.ts'
 import { ToolRegistry } from './tools/index.ts'
 import { bashTool } from './tools/bash.ts'
@@ -35,11 +36,13 @@ async function main(): Promise<void> {
   // Tool registry — the harness-wide set of model-facing tools.
   const tools = new ToolRegistry([bashTool])
 
-  // The virtual filesystem: a single permanent descriptor, `sys/list`.
+  // The virtual filesystem: a registry of permanent descriptors. Paths are
+  // assigned here, at registration time — not inside the descriptor.
   const list = new ListDescriptor()
+  const descriptors = new DescriptorRegistry([['/list', list]])
   let fuse: Awaited<ReturnType<typeof mountSys>> | undefined
   try {
-    fuse = await mountSys(createListOps(list))
+    fuse = await mountSys(descriptors.buildOps())
   } catch (err) {
     console.error(
       `warning: could not mount ./sys (${(err as Error).message}); continuing without the virtual filesystem`,

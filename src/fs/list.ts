@@ -1,19 +1,17 @@
-import type { FuseOps } from 'fuse-native'
 import {
-  DescriptorFs,
   type DescriptorFile,
   FILE_MODE,
 } from './index.ts'
 
 /**
- * The list descriptor — `sys/list`.
+ * The list descriptor.
  *
  * The file content is the in-memory list rendered one item per line. Writes
  * are interpreted as either an append (add items) or a destructive rewrite
- * (replace the whole list), decided by the open flags at open time.
+ * (replace the whole list), decided by the open flags at open time. Its mount
+ * path is assigned by the registry at registration time (e.g. `/list`).
  */
 export class ListDescriptor implements DescriptorFile {
-  readonly name = 'list'
   readonly mode = FILE_MODE
 
   #items: string[] = []
@@ -52,9 +50,4 @@ function splitItems(text: string): string[] {
   const lines = cleaned.split('\n')
   if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
   return lines
-}
-
-/** Build the FUSE ops for the list descriptor (`sys/list`). */
-export function createListOps(list: ListDescriptor): FuseOps {
-  return new DescriptorFs([list]).buildOps()
 }

@@ -2,7 +2,8 @@
 import { readFile, writeFile, appendFile, rm, readdir, stat, open } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import { mountSys, unmountSys } from '../src/mount.ts'
-import { ListDescriptor, createListOps } from '../src/fs/list.ts'
+import { ListDescriptor } from '../src/fs/list.ts'
+import { DescriptorRegistry } from '../src/fs/index.ts'
 
 const mnt = './sys-test'
 const file = `${mnt}/list`
@@ -21,7 +22,8 @@ function check(name: string, cond: boolean, detail = ''): void {
 
 try {
   log('mounting...')
-  const fuse = await mountSys(createListOps(list), mnt, {
+  const descriptors = new DescriptorRegistry([['/list', list]])
+  const fuse = await mountSys(descriptors.buildOps(), mnt, {
     // set FUSE_DEBUG=1 to see raw FUSE opcodes on stderr
     debug: process.env['FUSE_DEBUG'] === '1',
   })

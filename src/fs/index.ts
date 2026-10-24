@@ -4,11 +4,11 @@ import type { FuseOps } from 'fuse-native'
  * Shared plumbing for FUSE descriptor tools.
  *
  * A descriptor is a virtual file the harness exposes through the mount. To add
- * a new descriptor, implement `DescriptorFile` and register it with a
- * `DescriptorFs` — the FUSE wiring (attribute reporting, open/create fd
- * handling, write buffering, commit-on-release, truncate, unlink denial) is
- * handled here, so a new tool only supplies its content and mutation
- * semantics.
+ * a new descriptor, implement `DescriptorFile` and register it (with its
+ * mount path) on a `DescriptorRegistry` — the FUSE wiring (attribute
+ * reporting, open/create fd handling, write buffering, commit-on-release,
+ * truncate, unlink denial, errno constants) is handled here, so a new tool
+ * only supplies its content and mutation semantics.
  */
 
 export const EPERM = -1
@@ -32,13 +32,19 @@ export type WriteMode = 'read' | 'append' | 'replace'
 const O_APPEND = 0x400
 const O_TRUNC = 0x200
 
+/** Normalize a mount path to a canonical leading-slash form. */
+function normalizePath(path: string): string {
+  const p = path.startsWith('/') ? path : `/${path}`
+  return p.replace(/\/+$/, '') || '/'
+}
+
 /**
  * A single virtual file exposed by a descriptor tool. Implementations decide
- * what the file contains and how writes are applied.
+ * what the file contains and how writes are applied. The mount path is NOT
+ * part of the descriptor — it is assigned by the registry at registration
+ * time.
  */
 export interface DescriptorFile {
-  /** Bare name as it appears in the mount root (e.g. "list"). */
-  readonly name: string
   /** POSIX mode bits (include S_IFREG). */
   readonly mode: number
   /** Current size in bytes. */
@@ -61,14 +67,33 @@ interface OpenFile {
   chunks: Buffer[]
 }
 
-export class DescriptorFs {
-  private readonly entries = new Map<string, DescriptorFile>()
+/**
+ * Registry of FUSE descriptors keyed by mount path. Paths are assigned here,
+ * at registration time, not inside the descriptor itself — mirroring how
+ * harness tools are registered by name.
+ */
+export class DescriptorRegistry {
+  private readonly descriptors = new Map<string, DescriptorFile>()
   private readonly open = new Map<number, OpenFile>()
   private nextFd = 1000
   private pendingTruncate = false
 
-  constructor(files: DescriptorFile[]) {
-    for (const file of files) this.entries.set(file.name, file)
+  constructor(entries: readonly (readonly [string, DescriptorFile])[] = []) {
+    for (const [path, descriptor] of entries) this.add(path, descriptor)
+  }
+
+  /** Register a descriptor at the given mount path (leading slash optional). */
+  add(path: string, descriptor: DescriptorFile): void {
+    this.descriptors.set(normalizePath(path), descriptor)
+  }
+
+  has(path: string): boolean {
+    return this.descriptors.has(normalizePath(path))
+  }
+
+  /** Registered descriptors keyed by their normalized mount paths. */
+  get entries(): ReadonlyMap<string, DescriptorFile> {
+    return this.descriptors
   }
 
   /** Build the flat FUSE operation set backed by the registered descriptors. */
@@ -85,7 +110,7 @@ export class DescriptorFs {
           })
           return
         }
-        const file = this.byPath(path)
+        const file = this.descriptors.get(normalizePath(path))
         if (!file) {
           cb(ENOENT)
           return
@@ -104,11 +129,14 @@ export class DescriptorFs {
           cb(ENOTDIR)
           return
         }
-        cb(null, [...this.entries.keys()])
+        cb(
+          null,
+          [...this.descriptors.keys()].map((p) => p.slice(1)),
+        )
       },
 
       open: (path, flags, cb) => {
-        const file = this.byPath(path)
+        const file = this.descriptors.get(normalizePath(path))
         if (!file) {
           cb(ENOENT, 0)
           return
@@ -128,7 +156,7 @@ export class DescriptorFs {
 
       create: (path, _mode, cb) => {
         // Only registered descriptors may be (re)created.
-        const file = this.byPath(path)
+        const file = this.descriptors.get(normalizePath(path))
         if (!file) {
           cb(EACCES, 0)
           return
@@ -183,7 +211,7 @@ export class DescriptorFs {
 
       truncate: (path, size, cb) => {
         if (size === 0) {
-          const file = this.byPath(path)
+          const file = this.descriptors.get(normalizePath(path))
           if (file) {
             if (this.open.size > 0) {
               // Truncate belonging to an open handle: defer to release so
@@ -198,7 +226,7 @@ export class DescriptorFs {
       },
 
       unlink: (path, cb) => {
-        if (!this.byPath(path)) {
+        if (!this.descriptors.has(normalizePath(path))) {
           cb(ENOENT)
           return
         }
@@ -206,10 +234,5 @@ export class DescriptorFs {
         cb(EPERM)
       },
     }
-  }
-
-  private byPath(path: string): DescriptorFile | undefined {
-    if (!path.startsWith('/')) return undefined
-    return this.entries.get(path.slice(1))
   }
 }
