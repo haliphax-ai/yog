@@ -1,4 +1,4 @@
-import { type DescriptorFile, FILE_MODE } from "./index.ts";
+import { type DescriptorFile, DescriptorFlags, FILE_MODE } from "./index.ts";
 
 /**
  * The list descriptor.
@@ -11,6 +11,7 @@ import { type DescriptorFile, FILE_MODE } from "./index.ts";
 export class ListDescriptor implements DescriptorFile {
   readonly kind = "file" as const;
   readonly mode = FILE_MODE;
+  readonly flags = DescriptorFlags.None;
 
   #items: string[] = [];
 

@@ -33,6 +33,20 @@ export const OWNER_GID = process.getgid?.() ?? 0;
 /** Open access mode classification. */
 export type WriteMode = "read" | "append" | "replace";
 
+/**
+ * Bit flags describing a descriptor's capabilities. A descriptor advertises
+ * what it allows; absence of a flag means the default (permanent) behavior.
+ * Const-object form (not a TS enum) so it survives Node's strip-only TS mode.
+ */
+export const DescriptorFlags = {
+  /** No optional capabilities — permanent, non-removable. */
+  None: 0,
+  /** The descriptor may be unlinked (removed) from its parent folder. */
+  Removable: 1 << 0,
+} as const;
+
+export type DescriptorFlags = (typeof DescriptorFlags)[keyof typeof DescriptorFlags];
+
 /** Normalize a mount path to a canonical leading-slash form. */
 function normalizePath(path: string): string {
   const p = path.startsWith("/") ? path : `/${path}`;
@@ -47,6 +61,8 @@ export interface DescriptorFile {
   readonly kind: "file";
   /** POSIX mode bits (include S_IFREG). */
   readonly mode: number;
+  /** Capability bit flags. */
+  readonly flags: DescriptorFlags;
   /** Current size in bytes. */
   readonly size: number;
   /** Content served for reads. */
@@ -68,11 +84,13 @@ export interface DescriptorFile {
 export class DescriptorFolder {
   readonly kind = "folder" as const;
   readonly mode: number;
+  readonly flags: DescriptorFlags;
 
   #children = new Map<string, DescriptorNode>();
 
-  constructor(opts: { mode?: number } = {}) {
+  constructor(opts: { mode?: number; flags?: DescriptorFlags } = {}) {
     this.mode = opts.mode ?? DIR_MODE;
+    this.flags = opts.flags ?? DescriptorFlags.None;
   }
 
   get size(): number {
@@ -165,6 +183,24 @@ export class DescriptorRegistry {
       node = node.get(segment);
     }
     return node;
+  }
+
+  /** Resolve the parent folder and child name for a normalized path. */
+  private resolveParent(
+    path: string,
+  ): { parent: DescriptorFolder; name: string; node: DescriptorNode } | undefined {
+    const segments = path.split("/").filter(Boolean);
+    if (segments.length === 0) return undefined;
+    let parent: DescriptorFolder = this.root;
+    for (let i = 0; i < segments.length - 1; i++) {
+      const intermediate = parent.get(segments[i] as string);
+      if (!intermediate || intermediate.kind !== "folder") return undefined;
+      parent = intermediate;
+    }
+    const name = segments[segments.length - 1] as string;
+    const node = parent.get(name);
+    if (!node) return undefined;
+    return { parent, name, node };
   }
 
   /** Build the flat FUSE operation set backed by the registered descriptors. */
@@ -318,13 +354,18 @@ export class DescriptorRegistry {
       },
 
       unlink: (path, cb) => {
-        const node = this.resolve(normalizePath(path));
-        if (!node) {
+        const found = this.resolveParent(normalizePath(path));
+        if (!found) {
           cb(ENOENT);
           return;
         }
-        // Descriptors are permanent — deletion always fails.
-        cb(EPERM);
+        // A descriptor governs its own removability via its capability flags.
+        if ((found.node.flags & DescriptorFlags.Removable) === 0) {
+          cb(EPERM);
+          return;
+        }
+        found.parent.remove(found.name);
+        cb(0);
       },
     };
   }

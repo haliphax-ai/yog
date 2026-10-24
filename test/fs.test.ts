@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { ListDescriptor } from "../src/fs/list.ts";
-import { DescriptorFolder, DescriptorRegistry, DIR_MODE, FILE_MODE } from "../src/fs/index.ts";
+import {
+  type DescriptorFile,
+  DescriptorFlags,
+  DescriptorFolder,
+  DescriptorRegistry,
+  DIR_MODE,
+  ENOENT,
+  EPERM,
+  FILE_MODE,
+} from "../src/fs/index.ts";
 
 describe("DescriptorFolder", () => {
   it("starts empty", () => {
@@ -72,5 +81,73 @@ describe("DescriptorRegistry path hierarchy", () => {
   it("rejects registering the root", () => {
     const registry = new DescriptorRegistry();
     expect(() => registry.add("/", new ListDescriptor())).toThrow(/root/);
+  });
+});
+
+describe("DescriptorFlags unlink behavior", () => {
+  function removableFile(): DescriptorFile {
+    return {
+      kind: "file",
+      mode: FILE_MODE,
+      flags: DescriptorFlags.Removable,
+      size: 0,
+      render: () => "",
+      commit: () => {},
+      reset: () => {},
+    };
+  }
+
+  function permanentFile(): DescriptorFile {
+    return {
+      kind: "file",
+      mode: FILE_MODE,
+      flags: DescriptorFlags.None,
+      size: 0,
+      render: () => "",
+      commit: () => {},
+      reset: () => {},
+    };
+  }
+
+  it("denies unlink for a descriptor without Removable", async () => {
+    const registry = new DescriptorRegistry([["/perm", permanentFile()]]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.unlink!("/perm", (e) => resolve(e));
+    });
+    expect(err).toBe(EPERM);
+    expect(registry.has("/perm")).toBe(true);
+  });
+
+  it("allows unlink for a Removable descriptor", async () => {
+    const registry = new DescriptorRegistry([["/mutable", removableFile()]]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.unlink!("/mutable", (e) => resolve(e));
+    });
+    expect(err).toBe(0);
+    expect(registry.has("/mutable")).toBe(false);
+  });
+
+  it("removes a Removable child from a folder via unlink", async () => {
+    const sessions = new DescriptorFolder();
+    sessions.add("s1", removableFile());
+    const registry = new DescriptorRegistry([["/sessions", sessions]]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.unlink!("/sessions/s1", (e) => resolve(e));
+    });
+    expect(err).toBe(0);
+    expect(registry.has("/sessions/s1")).toBe(false);
+    expect(registry.has("/sessions")).toBe(true);
+  });
+
+  it("returns ENOENT for unknown unlink targets", async () => {
+    const registry = new DescriptorRegistry();
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.unlink!("/nope", (e) => resolve(e));
+    });
+    expect(err).toBe(ENOENT);
   });
 });
