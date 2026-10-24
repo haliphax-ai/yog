@@ -14,6 +14,19 @@ npm start -- <modelId> "<prompt>"
 - Uses `OPENAI_BASE_URL` / `OPENAI_API_KEY` environment variables when set
   (compatible-proxy support), otherwise the SDK defaults.
 
+### Docker
+
+Build the image and run through the bundled launcher, which loads the `yog`
+AppArmor profile and forwards `OPENAI_BASE_URL` / `OPENAI_API_KEY`:
+
+```sh
+docker build -t yog .
+./yog "<prompt>"
+```
+
+`./yog` defaults the model to `nvidia/nemotron-3-ultra-550b-a55b:free`;
+place a model id in a `model` file (host cwd) to override it.
+
 ## Layout
 
 - `src/index.ts` — CLI entry: parses `modelId` + `prompt`, mounts `./sys`,
@@ -32,6 +45,10 @@ npm start -- <modelId> "<prompt>"
 - `src/tools/bash.ts` — the `bash` harness tool (persistent shell state, env
   hiding).
 - `src/fuse-native.d.ts` — ambient typings for the untyped `fuse-native` package.
+- `Dockerfile` — container image: node:24, a non-root `agent` user, and the
+  `fuse`/CLI packages.
+- `yog` — Docker launcher: builds the run with the `yog` AppArmor profile,
+  the FUSE device, `SYS_ADMIN`, and unconfined seccomp.
 
 ### Adding a new descriptor tool
 
@@ -69,13 +86,15 @@ kernel does not pre-empt mutations):
 
 - The `DescriptorRegistry` is the sole guard: creating non-registered entries,
   unlinking, renaming, and overwriting all resolve against the registered
-  descriptors and their capability flags (`Readable`, `Writable`,
-  `Removable`, `CanRename`, `CanOverwrite`) and optional
-  `onRename`/`onOverwrite`/`onChildRename` hooks. No hardcoded paths.
+  descriptors and their capability flags (`CanRead`, `CanWrite`,
+  `CanRemove`, `CanRename`, `CanOverwrite`) and optional lifecycle hooks
+  (`onRead`, `onWrite`, `onTruncate`, `onDelete`, `onRename`,
+  `onOverwrite`, `onChildCreate`, `onChildDelete`, `onChildRename`). No
+  hardcoded paths.
 - `list` is `0644`, owned by the harness user — appends and destructive
-  rewrites work; it is not `Removable` and not `CanRename`, so it can never
-  be deleted or moved away. It declares `onOverwrite` so
-  rename-as-replace content can be written into it.
+  rewrites work; it lacks `CanRemove` and `CanRename`, so it can never be
+  deleted or moved away. It declares `onOverwrite` so rename-as-replace
+  content can be written into it.
 
 ## Tools
 
@@ -120,15 +139,38 @@ observers can see the descriptor being acted on:
 
 ## Environment requirements
 
-The `fuse-native` addon needs:
+The `fuse-native` addon needs a FUSE device and mount privileges:
 
-1. `/dev/fuse` in the container: `docker run --device /dev/fuse ...`
-2. mount capability: `--cap-add SYS_ADMIN` (and typically running as root,
-   or an installed setuid `fusermount`)
-3. the `fuse` (libfuse2) package so `fusermount` exists
+- `/dev/fuse` must be present in the container: `--device /dev/fuse`.
+- Mounting requires `--cap-add SYS_ADMIN`, and the `fuse` (libfuse2)
+  package so the setuid `fusermount` helper exists — both are set up by the
+  image. The container runs as the non-root `agent` user; mounts go through
+  `fusermount`.
+- On hosts enforcing AppArmor/seccomp, the default profiles block mount
+  syscalls. The image is therefore run with:
 
-`fuse-native` bundles its own `libfuse.so`, but the addon's `DT_NEEDED` entry
-is `libfuse.so.2`; if no system libfuse2 is installed, provide it:
+  ```sh
+  docker run --device /dev/fuse \
+    --cap-add SYS_ADMIN \
+    --security-opt seccomp=unconfined \
+    --security-opt apparmor=yog \
+    ...
+  ```
+
+  `apparmor=yog` references an AppArmor profile named `yog` that must be
+  loaded on the host (e.g. `sudo apparmor_parser -r -W /path/to/yog.profile`)
+  before the container starts.
+
+All of the above is wired into the bundled `yog` launcher:
+
+```sh
+docker build -t yog .
+./yog "<prompt>"
+```
+
+For a bare local run (no container), `fuse-native` bundles its own
+`libfuse.so`, but the addon's `DT_NEEDED` entry is `libfuse.so.2`; if no
+system libfuse2 is installed, provide it:
 
 ```sh
 LD_LIBRARY_PATH=$PWD/node_modules/fuse-native/prebuilds/linux-x64 npm start -- ...
