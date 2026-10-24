@@ -199,8 +199,9 @@ If mounting fails, the harness logs a warning and continues without `./sys`.
   hook by tag.
 - `npm run depcruise` — architecture lint via dependency-cruiser (enforces
   the layered module rules; runs in the pre-commit hook)
-- `npm run depcruise:graph` — render the module dependency graph to
-  `docs/architecture.svg` (requires graphviz `dot`; manual, not in the hook)
+- `npm run depcruise:graph` — emit the module dependency graph as DOT to
+  stdout (manual, not in the hook); pipe it wherever you like, e.g.
+  `npm run depcruise:graph | dot -T svg > docs/architecture.svg`
 - `npm run typecheck` — `tsc --noEmit` (TypeScript 7.x)
 - `npm start -- <modelId> "<prompt>"` — run the harness (Node ≥ 22.18 for
   native TypeScript type stripping)
