@@ -59,8 +59,6 @@ export const DescriptorFlags = {
   Writable: 1 << 1,
   /** The node may be unlinked (removed) from its parent folder. */
   Removable: 1 << 2,
-  /** The node may be renamed (moved) within the mount. */
-  Renamable: 1 << 3,
 } as const;
 
 export type DescriptorFlags = (typeof DescriptorFlags)[keyof typeof DescriptorFlags];
@@ -87,6 +85,13 @@ export interface DescriptorNode {
   readonly flags: DescriptorFlags;
   /** Current size in bytes (0 when unspecified). */
   readonly size?: number;
+  /**
+   * Optional declaration that this node may be repositioned within the mount
+   * (rename/move). Presence of the method grants permission; return a
+   * negative errno to refuse a particular move. This is how rename capability
+   * is declared — no flag needed.
+   */
+  allowRename?(): number | void;
 }
 
 /**
@@ -106,6 +111,14 @@ export interface DescriptorFile extends DescriptorNode {
   commit?(kind: Exclude<WriteMode, "read">, text: string): void;
   /** Reset to empty content (required when Writable). */
   reset?(): void;
+  /**
+   * Optional declaration that this descriptor accepts having another node
+   * renamed onto it (POSIX rename-overwrite). The registry calls this before
+   * committing; return 0/undefined to accept (the source node is then
+   * removed), or a negative errno to refuse. Implementations decide what
+   * "accept" means — typically committing the source's content.
+   */
+  onRenameOverwrite?(source: DescriptorFile): number | void;
 }
 
 /**
@@ -229,6 +242,21 @@ export class DescriptorRegistry {
     const node = parent.get(name);
     if (!node) return undefined;
     return { parent, name, node };
+  }
+
+  /** Resolve the destination folder+name for a normalized path (child may not exist). */
+  private resolveSlot(
+    path: string,
+  ): { parent: DescriptorFolder; name: string } | undefined {
+    const segments = path.split("/").filter(Boolean);
+    if (segments.length === 0) return undefined;
+    let parent: DescriptorFolder = this.root;
+    for (let i = 0; i < segments.length - 1; i++) {
+      const intermediate = parent.get(segments[i] as string);
+      if (!intermediate || intermediate.kind !== "folder") return undefined;
+      parent = intermediate;
+    }
+    return { parent, name: segments[segments.length - 1] as string };
   }
 
   /** Build the flat FUSE operation set backed by the registered descriptors. */
@@ -418,42 +446,71 @@ export class DescriptorRegistry {
         const srcNorm = normalizePath(src);
         const destNorm = normalizePath(dest);
 
-        // The list descriptor itself may never be renamed away.
-        if (srcNorm === "/list") {
-          cb(EPERM);
-          return;
-        }
-
-        // Renaming a new name onto an existing descriptor is only supported
-        // for the list descriptor, and is treated as writing fresh content.
-        if (destNorm !== "/list") {
-          cb(EPERM);
-          return;
-        }
-
         const srcFound = this.resolveParent(srcNorm);
-        const destFound = this.resolveParent(destNorm);
         if (!srcFound) {
           cb(ENOENT);
           return;
         }
-        if (!destFound) {
+
+        const destNode = this.resolve(destNorm);
+        const destSlot = this.resolveSlot(destNorm);
+        if (!destSlot) {
           cb(ENOENT);
           return;
         }
-        if (srcFound.node.kind !== "file" || destFound.node.kind !== "file") {
-          cb(EISDIR);
+
+        // Rename-overwrite: destination is an existing file descriptor. The
+        // destination decides whether it accepts (and how) via its own hook —
+        // nothing here assumes which descriptors exist.
+        if (destNode && destNode.kind === "file") {
+          if (srcFound.node.kind !== "file") {
+            cb(EISDIR);
+            return;
+          }
+          const target = destNode;
+          if (target.kind !== "file" || !target.onRenameOverwrite) {
+            cb(EPERM);
+            return;
+          }
+          const rc = target.onRenameOverwrite(srcFound.node);
+          if (rc !== undefined && rc < 0) {
+            cb(rc);
+            return;
+          }
+          srcFound.parent.remove(srcFound.name);
+          cb(0);
           return;
         }
-        if ((srcFound.node.flags & DescriptorFlags.Readable) === 0 || !srcFound.node.render) {
-          cb(EACCES);
+
+        // Rename into a directory: becomes that directory's child.
+        if (destNode && destNode.kind === "folder") {
+          if (typeof srcFound.node.allowRename !== "function") {
+            cb(EPERM);
+            return;
+          }
+          const rc = srcFound.node.allowRename();
+          if (rc !== undefined && rc < 0) {
+            cb(rc);
+            return;
+          }
+          destNode.add(srcFound.name, srcFound.node);
+          srcFound.parent.remove(srcFound.name);
+          cb(0);
           return;
         }
-        if ((destFound.node.flags & DescriptorFlags.Writable) === 0 || !destFound.node.commit) {
-          cb(EACCES);
+
+        // Pure repositioning: destination slot is empty. Capability is
+        // declared by the presence of allowRename on the node itself.
+        if (typeof srcFound.node.allowRename !== "function") {
+          cb(EPERM);
           return;
         }
-        destFound.node.commit("replace", srcFound.node.render());
+        const rc = srcFound.node.allowRename();
+        if (rc !== undefined && rc < 0) {
+          cb(rc);
+          return;
+        }
+        destSlot.parent.add(destSlot.name, srcFound.node);
         srcFound.parent.remove(srcFound.name);
         cb(0);
       },

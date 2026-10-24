@@ -41,6 +41,15 @@ export class ListDescriptor implements DescriptorFile {
     this.#items = [];
     console.error({ action: "truncate", items: this.#items });
   }
+
+  /** Accept rename-overwrite: replace the list contents with the source file's content. */
+  onRenameOverwrite(source: DescriptorFile): number {
+    if ((source.flags & DescriptorFlags.Readable) === 0 || !source.render) {
+      return EACCES;
+    }
+    this.commit("replace", source.render());
+    return 0;
+  }
 }
 
 /** Split written text into list items, ignoring NUL padding and the trailing newline. */

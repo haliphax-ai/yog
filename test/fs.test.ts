@@ -13,8 +13,12 @@ import {
   FILE_MODE,
 } from "../src/fs/index.ts";
 
-/** A file descriptor with controllable flags and simple string content. */
-function fileDescriptor(flags: DescriptorFlags, content = ""): DescriptorFile {
+/** A file descriptor with controllable flags, simple string content, and optional rename hooks. */
+function fileDescriptor(
+  flags: DescriptorFlags,
+  content = "",
+  hooks: { allowRename?: () => number | void; onRenameOverwrite?: () => number | void } = {},
+): DescriptorFile {
   return {
     kind: "file",
     mode: FILE_MODE,
@@ -23,6 +27,7 @@ function fileDescriptor(flags: DescriptorFlags, content = ""): DescriptorFile {
     render: () => content,
     commit: () => {},
     reset: () => {},
+    ...hooks,
   };
 }
 
@@ -193,8 +198,8 @@ describe("DescriptorFlags unlink behavior", () => {
   });
 });
 
-describe("rename-as-replace to list", () => {
-  it("renames a file onto list and replaces its content", async () => {
+describe("rename behavior (emergent from descriptors)", () => {
+  it("renames a file onto list and replaces its content (list declares onRenameOverwrite)", async () => {
     const list = new ListDescriptor();
     const registry = new DescriptorRegistry([["/list", list]]);
     const ops = registry.buildOps();
@@ -214,7 +219,20 @@ describe("rename-as-replace to list", () => {
     expect(registry.has("/scratch")).toBe(false);
   });
 
-  it("denies renaming the list node itself", async () => {
+  it("denies rename-overwrite onto a file that does not declare onRenameOverwrite", async () => {
+    const registry = new DescriptorRegistry([
+      ["/scratch", fileDescriptor(DescriptorFlags.Readable, "x")],
+      ["/target", fileDescriptor(DescriptorFlags.Readable | DescriptorFlags.Writable, "y")],
+    ]);
+    const ops = registry.buildOps();
+
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/scratch", "/target", (e) => resolve(e));
+    });
+    expect(err).toBe(EPERM);
+  });
+
+  it("denies renaming the list node itself (no allowRename)", async () => {
     const list = new ListDescriptor();
     const registry = new DescriptorRegistry([["/list", list]]);
     const ops = registry.buildOps();
@@ -226,18 +244,45 @@ describe("rename-as-replace to list", () => {
     expect(registry.has("/list")).toBe(true);
   });
 
-  it("denies renaming onto a non-list descriptor", async () => {
+  it("repositions a file that declares allowRename within the mount", async () => {
+    const movable = fileDescriptor(DescriptorFlags.Readable, "x", {
+      allowRename: () => 0,
+    });
+    const registry = new DescriptorRegistry([["/a", movable]]);
+    const ops = registry.buildOps();
+
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/a", "/b", (e) => resolve(e));
+    });
+    expect(err).toBe(0);
+    expect(registry.has("/a")).toBe(false);
+    expect(registry.has("/b")).toBe(true);
+  });
+
+  it("denies repositioning a file that does not declare allowRename", async () => {
     const registry = new DescriptorRegistry([
-      ["/list", new ListDescriptor()],
-      ["/scratch", fileDescriptor(DescriptorFlags.Readable, "x")],
-      ["/other", new ListDescriptor()],
+      ["/a", fileDescriptor(DescriptorFlags.Readable, "x")],
     ]);
     const ops = registry.buildOps();
 
     const err = await new Promise<number | null>((resolve) => {
-      ops.rename!("/scratch", "/other", (e) => resolve(e));
+      ops.rename!("/a", "/b", (e) => resolve(e));
     });
     expect(err).toBe(EPERM);
+    expect(registry.has("/a")).toBe(true);
+  });
+
+  it("denies repositioning into a missing parent", async () => {
+    const movable = fileDescriptor(DescriptorFlags.Readable, "x", {
+      allowRename: () => 0,
+    });
+    const registry = new DescriptorRegistry([["/a", movable]]);
+    const ops = registry.buildOps();
+
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/a", "/nope/b", (e) => resolve(e));
+    });
+    expect(err).toBe(ENOENT);
   });
 
   it("returns ENOENT when the source is missing", async () => {
