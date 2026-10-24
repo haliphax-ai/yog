@@ -6,10 +6,25 @@ import {
   DescriptorFolder,
   DescriptorRegistry,
   DIR_MODE,
+  EACCES,
+  EISDIR,
   ENOENT,
   EPERM,
   FILE_MODE,
 } from "../src/fs/index.ts";
+
+/** A file descriptor with controllable flags and simple string content. */
+function fileDescriptor(flags: DescriptorFlags, content = ""): DescriptorFile {
+  return {
+    kind: "file",
+    mode: FILE_MODE,
+    flags,
+    size: content.length,
+    render: () => content,
+    commit: () => {},
+    reset: () => {},
+  };
+}
 
 describe("DescriptorFolder", () => {
   it("starts empty", () => {
@@ -84,33 +99,57 @@ describe("DescriptorRegistry path hierarchy", () => {
   });
 });
 
+describe("DescriptorFlags gating", () => {
+  it("denies reads on a non-Readable file", async () => {
+    const registry = new DescriptorRegistry([
+      ["/perm", fileDescriptor(DescriptorFlags.None, "secret")],
+    ]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.open!("/perm", 0, (e, fd) => resolve(e === 0 && fd !== undefined ? 0 : e));
+    });
+    expect(err).toBe(EACCES);
+  });
+
+  it("denies writes on a non-Writable file", async () => {
+    const registry = new DescriptorRegistry([
+      ["/ro", fileDescriptor(DescriptorFlags.Readable, "hello")],
+    ]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.open!("/ro", 1, (e, fd) => resolve(e === 0 && fd !== undefined ? 0 : e));
+    });
+    expect(err).toBe(EACCES);
+  });
+
+  it("allows reads on a Readable file", async () => {
+    const registry = new DescriptorRegistry([
+      ["/ro", fileDescriptor(DescriptorFlags.Readable, "hello")],
+    ]);
+    const ops = registry.buildOps();
+    const fd = await new Promise<number>((resolve) => {
+      ops.open!("/ro", 0, (e, f) => resolve(e === 0 ? (f ?? -1) : -1));
+    });
+    expect(fd).toBeGreaterThanOrEqual(1000);
+  });
+
+  it("allows writes on a Writable file", async () => {
+    const registry = new DescriptorRegistry([
+      ["/rw", fileDescriptor(DescriptorFlags.Readable | DescriptorFlags.Writable, "")],
+    ]);
+    const ops = registry.buildOps();
+    const fd = await new Promise<number>((resolve) => {
+      ops.open!("/rw", 1, (e, f) => resolve(e === 0 ? (f ?? -1) : -1));
+    });
+    expect(fd).toBeGreaterThanOrEqual(1000);
+  });
+});
+
 describe("DescriptorFlags unlink behavior", () => {
-  function removableFile(): DescriptorFile {
-    return {
-      kind: "file",
-      mode: FILE_MODE,
-      flags: DescriptorFlags.Removable,
-      size: 0,
-      render: () => "",
-      commit: () => {},
-      reset: () => {},
-    };
-  }
-
-  function permanentFile(): DescriptorFile {
-    return {
-      kind: "file",
-      mode: FILE_MODE,
-      flags: DescriptorFlags.None,
-      size: 0,
-      render: () => "",
-      commit: () => {},
-      reset: () => {},
-    };
-  }
-
   it("denies unlink for a descriptor without Removable", async () => {
-    const registry = new DescriptorRegistry([["/perm", permanentFile()]]);
+    const registry = new DescriptorRegistry([
+      ["/perm", fileDescriptor(DescriptorFlags.Readable, "x")],
+    ]);
     const ops = registry.buildOps();
     const err = await new Promise<number | null>((resolve) => {
       ops.unlink!("/perm", (e) => resolve(e));
@@ -120,7 +159,9 @@ describe("DescriptorFlags unlink behavior", () => {
   });
 
   it("allows unlink for a Removable descriptor", async () => {
-    const registry = new DescriptorRegistry([["/mutable", removableFile()]]);
+    const registry = new DescriptorRegistry([
+      ["/mutable", fileDescriptor(DescriptorFlags.Removable, "x")],
+    ]);
     const ops = registry.buildOps();
     const err = await new Promise<number | null>((resolve) => {
       ops.unlink!("/mutable", (e) => resolve(e));
@@ -131,7 +172,7 @@ describe("DescriptorFlags unlink behavior", () => {
 
   it("removes a Removable child from a folder via unlink", async () => {
     const sessions = new DescriptorFolder();
-    sessions.add("s1", removableFile());
+    sessions.add("s1", fileDescriptor(DescriptorFlags.Removable, "x"));
     const registry = new DescriptorRegistry([["/sessions", sessions]]);
     const ops = registry.buildOps();
     const err = await new Promise<number | null>((resolve) => {
@@ -149,5 +190,89 @@ describe("DescriptorFlags unlink behavior", () => {
       ops.unlink!("/nope", (e) => resolve(e));
     });
     expect(err).toBe(ENOENT);
+  });
+});
+
+describe("rename-as-replace to list", () => {
+  it("renames a file onto list and replaces its content", async () => {
+    const list = new ListDescriptor();
+    const registry = new DescriptorRegistry([["/list", list]]);
+    const ops = registry.buildOps();
+
+    // seed the list
+    list.commit("replace", "old\n");
+
+    // create a scratch file with fresh content
+    const scratch = fileDescriptor(DescriptorFlags.Readable, "fresh\n");
+    registry.add("/scratch", scratch);
+
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/scratch", "/list", (e) => resolve(e));
+    });
+    expect(err).toBe(0);
+    expect(list.items).toEqual(["fresh"]);
+    expect(registry.has("/scratch")).toBe(false);
+  });
+
+  it("denies renaming the list node itself", async () => {
+    const list = new ListDescriptor();
+    const registry = new DescriptorRegistry([["/list", list]]);
+    const ops = registry.buildOps();
+
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/list", "/away", (e) => resolve(e));
+    });
+    expect(err).toBe(EPERM);
+    expect(registry.has("/list")).toBe(true);
+  });
+
+  it("denies renaming onto a non-list descriptor", async () => {
+    const registry = new DescriptorRegistry([
+      ["/list", new ListDescriptor()],
+      ["/scratch", fileDescriptor(DescriptorFlags.Readable, "x")],
+      ["/other", new ListDescriptor()],
+    ]);
+    const ops = registry.buildOps();
+
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/scratch", "/other", (e) => resolve(e));
+    });
+    expect(err).toBe(EPERM);
+  });
+
+  it("returns ENOENT when the source is missing", async () => {
+    const registry = new DescriptorRegistry([["/list", new ListDescriptor()]]);
+    const ops = registry.buildOps();
+
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/missing", "/list", (e) => resolve(e));
+    });
+    expect(err).toBe(ENOENT);
+  });
+
+  it("denies renaming a folder onto list", async () => {
+    const registry = new DescriptorRegistry([
+      ["/list", new ListDescriptor()],
+      ["/dir", new DescriptorFolder()],
+    ]);
+    const ops = registry.buildOps();
+
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/dir", "/list", (e) => resolve(e));
+    });
+    expect(err).toBe(EISDIR);
+  });
+
+  it("denies renaming a non-Readable source onto list", async () => {
+    const registry = new DescriptorRegistry([
+      ["/list", new ListDescriptor()],
+      ["/secret", fileDescriptor(DescriptorFlags.None, "hidden")],
+    ]);
+    const ops = registry.buildOps();
+
+    const err = await new Promise<number | null>((resolve) => {
+      ops.rename!("/secret", "/list", (e) => resolve(e));
+    });
+    expect(err).toBe(EACCES);
   });
 });

@@ -10,12 +10,17 @@ import type { FuseOps } from "fuse-native";
  * live on the `DescriptorNode` parent so they flow uniformly to both files
  * and folders.
  *
+ * Capability flags declare what a node supports (reading, writing, removal,
+ * renaming). The registry gates every operation on the relevant flag, so a
+ * descriptor that does not support an operation is not forced to implement a
+ * stub that raises an error — it simply omits the flag (and may omit the
+ * corresponding method).
+ *
  * To add a new descriptor, implement `DescriptorFile` (or use a
  * `DescriptorFolder` for a managed subtree) and register it — with its mount
  * path — on a `DescriptorRegistry`; the FUSE wiring (attribute reporting,
  * open/create fd handling, write buffering, commit-on-release, truncate,
- * unlink denial, errno constants) is handled here, so a new tool only
- * supplies its content, mutation, and child-management semantics.
+ * rename, unlink, errno constants) is handled here.
  */
 
 export const EPERM = -1;
@@ -25,6 +30,8 @@ export const EBADF = -9;
 export const EEXIST = -17;
 export const ENOTDIR = -20;
 export const EISDIR = -21;
+export const EINVAL = -22;
+export const ENOSYS = -38;
 
 /** Mount root: read/traverse-only under default_permissions. */
 export const DIR_MODE = 0o40555;
@@ -39,14 +46,21 @@ export type WriteMode = "read" | "append" | "replace";
 
 /**
  * Bit flags describing a descriptor's capabilities. A descriptor advertises
- * what it allows; absence of a flag means the default (permanent) behavior.
- * Const-object form (not a TS enum) so it survives Node's strip-only TS mode.
+ * what it allows; absence of a flag means the default (denied) behavior for
+ * that operation. Const-object form (not a TS enum) so it survives Node's
+ * strip-only TS mode.
  */
 export const DescriptorFlags = {
-  /** No optional capabilities — permanent, non-removable. */
+  /** No optional capabilities — permanent, non-readable, non-writable. */
   None: 0,
-  /** The descriptor may be unlinked (removed) from its parent folder. */
-  Removable: 1 << 0,
+  /** Content may be read. */
+  Readable: 1 << 0,
+  /** Content may be written (append/replace/truncate). */
+  Writable: 1 << 1,
+  /** The node may be unlinked (removed) from its parent folder. */
+  Removable: 1 << 2,
+  /** The node may be renamed (moved) within the mount. */
+  Renamable: 1 << 3,
 } as const;
 
 export type DescriptorFlags = (typeof DescriptorFlags)[keyof typeof DescriptorFlags];
@@ -71,25 +85,27 @@ export interface DescriptorNode {
   readonly mode: number;
   /** Capability bit flags. */
   readonly flags: DescriptorFlags;
-  /** Current size in bytes (file content length; folder directory size). */
-  readonly size: number;
+  /** Current size in bytes (0 when unspecified). */
+  readonly size?: number;
 }
 
 /**
  * A leaf descriptor: a virtual file. Implementations decide what the file
- * contains and how writes are applied.
+ * contains and how writes are applied; methods may be omitted when the
+ * corresponding capability flag is not set.
  */
 export interface DescriptorFile extends DescriptorNode {
   readonly kind: "file";
-  /** Content served for reads. */
-  render(): string;
+  /** Content served for reads (required when Readable). */
+  render?(): string;
   /**
-   * Apply a committed mutation. `kind` is 'append' for O_APPEND opens and
-   * 'replace' for destructive writes; `text` is the fully buffered bytes.
+   * Apply a committed mutation (required when Writable). `kind` is 'append'
+   * for O_APPEND opens and 'replace' for destructive writes; `text` is the
+   * fully buffered bytes.
    */
-  commit(kind: Exclude<WriteMode, "read">, text: string): void;
-  /** Reset to empty content (standalone truncate-to-zero). */
-  reset(): void;
+  commit?(kind: Exclude<WriteMode, "read">, text: string): void;
+  /** Reset to empty content (required when Writable). */
+  reset?(): void;
 }
 
 /**
@@ -106,7 +122,7 @@ export class DescriptorFolder implements DescriptorNode {
 
   constructor(opts: { mode?: number; flags?: DescriptorFlags } = {}) {
     this.mode = opts.mode ?? DIR_MODE;
-    this.flags = opts.flags ?? DescriptorFlags.None;
+    this.flags = opts.flags ?? DescriptorFlags.Readable;
   }
 
   get size(): number {
@@ -237,7 +253,7 @@ export class DescriptorRegistry {
         if (node.kind === "folder") {
           cb(null, {
             mode: node.mode,
-            size: node.size,
+            size: node.size ?? 0,
             nlink: 2,
             uid: OWNER_UID,
             gid: OWNER_GID,
@@ -246,7 +262,7 @@ export class DescriptorRegistry {
         }
         cb(null, {
           mode: node.mode,
-          size: node.size,
+          size: node.size ?? 0,
           nlink: 1,
           uid: OWNER_UID,
           gid: OWNER_GID,
@@ -261,6 +277,10 @@ export class DescriptorRegistry {
         }
         if (node.kind !== "folder") {
           cb(ENOTDIR);
+          return;
+        }
+        if ((node.flags & DescriptorFlags.Readable) === 0) {
+          cb(EACCES);
           return;
         }
         cb(null, [...node.children().keys()]);
@@ -279,6 +299,14 @@ export class DescriptorRegistry {
         const acc = flags & 3;
         const mode: WriteMode =
           acc === 0 ? "read" : (flags & O_APPEND) !== 0 ? "append" : "replace";
+        if (mode === "read" && (node.flags & DescriptorFlags.Readable) === 0) {
+          cb(EACCES, 0);
+          return;
+        }
+        if (mode !== "read" && (node.flags & DescriptorFlags.Writable) === 0) {
+          cb(EACCES, 0);
+          return;
+        }
         const fd = this.nextFd++;
         this.open.set(fd, {
           file: node,
@@ -290,9 +318,13 @@ export class DescriptorRegistry {
       },
 
       create: (path, _mode, cb) => {
-        // Only existing file descriptors may be (re)created.
+        // Only existing writable file descriptors may be (re)created.
         const node = this.resolve(normalizePath(path));
         if (!node || node.kind !== "file") {
+          cb(EACCES, 0);
+          return;
+        }
+        if ((node.flags & DescriptorFlags.Writable) === 0) {
           cb(EACCES, 0);
           return;
         }
@@ -312,7 +344,7 @@ export class DescriptorRegistry {
           cb(EBADF);
           return;
         }
-        const data = Buffer.from(o.file.render(), "utf8");
+        const data = Buffer.from(o.file.render?.() ?? "", "utf8");
         if (pos >= data.length) {
           cb(0);
           return;
@@ -338,11 +370,11 @@ export class DescriptorRegistry {
           this.open.delete(fd);
           const text = Buffer.concat(o.chunks).toString("utf8");
           if (o.mode === "append") {
-            o.file.commit("append", text);
+            o.file.commit?.("append", text);
           } else if (o.mode === "replace") {
             const destructive = o.truncPending || this.pendingTruncate;
             this.pendingTruncate = false;
-            if (o.chunks.length > 0 || destructive) o.file.commit("replace", text);
+            if (o.chunks.length > 0 || destructive) o.file.commit?.("replace", text);
           }
           // mode === 'read': never commits.
         }
@@ -350,18 +382,79 @@ export class DescriptorRegistry {
       },
 
       truncate: (path, size, cb) => {
-        if (size === 0) {
-          const node = this.resolve(normalizePath(path));
-          if (node && node.kind === "file") {
-            if (this.open.size > 0) {
-              // Truncate belonging to an open handle: defer to release so
-              // subsequent writes land first.
-              this.pendingTruncate = true;
-            } else {
-              node.reset();
-            }
-          }
+        if (size !== 0) {
+          cb(EINVAL);
+          return;
         }
+        const node = this.resolve(normalizePath(path));
+        if (!node) {
+          cb(ENOENT);
+          return;
+        }
+        if (node.kind !== "file") {
+          cb(EISDIR);
+          return;
+        }
+        if ((node.flags & DescriptorFlags.Writable) === 0) {
+          cb(EACCES);
+          return;
+        }
+        if (!node.reset) {
+          cb(ENOSYS);
+          return;
+        }
+        if (this.open.size > 0) {
+          // Truncate belonging to an open handle: defer to release so
+          // subsequent writes land first.
+          this.pendingTruncate = true;
+          cb(0);
+          return;
+        }
+        node.reset();
+        cb(0);
+      },
+
+      rename: (src, dest, cb) => {
+        const srcNorm = normalizePath(src);
+        const destNorm = normalizePath(dest);
+
+        // The list descriptor itself may never be renamed away.
+        if (srcNorm === "/list") {
+          cb(EPERM);
+          return;
+        }
+
+        // Renaming a new name onto an existing descriptor is only supported
+        // for the list descriptor, and is treated as writing fresh content.
+        if (destNorm !== "/list") {
+          cb(EPERM);
+          return;
+        }
+
+        const srcFound = this.resolveParent(srcNorm);
+        const destFound = this.resolveParent(destNorm);
+        if (!srcFound) {
+          cb(ENOENT);
+          return;
+        }
+        if (!destFound) {
+          cb(ENOENT);
+          return;
+        }
+        if (srcFound.node.kind !== "file" || destFound.node.kind !== "file") {
+          cb(EISDIR);
+          return;
+        }
+        if ((srcFound.node.flags & DescriptorFlags.Readable) === 0 || !srcFound.node.render) {
+          cb(EACCES);
+          return;
+        }
+        if ((destFound.node.flags & DescriptorFlags.Writable) === 0 || !destFound.node.commit) {
+          cb(EACCES);
+          return;
+        }
+        destFound.node.commit("replace", srcFound.node.render());
+        srcFound.parent.remove(srcFound.name);
         cb(0);
       },
 
