@@ -1,7 +1,8 @@
-# fuse-overlay-harness
+# yog
 
 An agent harness that mounts a virtual FUSE directory and runs a streaming
-OpenAI-compatible chat completion with tools.
+OpenAI-compatible chat completion with a single tool: `bash`. System features
+are presented to agents as proxied virtual file descriptors.
 
 ## Usage
 
