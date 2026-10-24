@@ -3,12 +3,15 @@ import type { FuseOps } from "fuse-native";
 /**
  * Shared plumbing for FUSE descriptor tools.
  *
- * A descriptor is a virtual file the harness exposes through the mount. To add
- * a new descriptor, implement `DescriptorFile` and register it (with its
- * mount path) on a `DescriptorRegistry` — the FUSE wiring (attribute
- * reporting, open/create fd handling, write buffering, commit-on-release,
- * truncate, unlink denial, errno constants) is handled here, so a new tool
- * only supplies its content and mutation semantics.
+ * A descriptor is a node in the virtual filesystem the harness exposes through
+ * the mount. Nodes form a tree: `DescriptorFolder` nodes manage their own
+ * children (files or folders), and `DescriptorFile` nodes are leaf content.
+ * To add a new descriptor, implement `DescriptorFile` (or use a
+ * `DescriptorFolder` for a managed subtree) and register it — with its mount
+ * path — on a `DescriptorRegistry`; the FUSE wiring (attribute reporting,
+ * open/create fd handling, write buffering, commit-on-release, truncate,
+ * unlink denial, errno constants) is handled here, so a new tool only
+ * supplies its content, mutation, and child-management semantics.
  */
 
 export const EPERM = -1;
@@ -17,6 +20,7 @@ export const EACCES = -13;
 export const EBADF = -9;
 export const EEXIST = -17;
 export const ENOTDIR = -20;
+export const EISDIR = -21;
 
 /** Mount root: read/traverse-only under default_permissions. */
 export const DIR_MODE = 0o40555;
@@ -29,9 +33,6 @@ export const OWNER_GID = process.getgid?.() ?? 0;
 /** Open access mode classification. */
 export type WriteMode = "read" | "append" | "replace";
 
-const O_APPEND = 0x400;
-const O_TRUNC = 0x200;
-
 /** Normalize a mount path to a canonical leading-slash form. */
 function normalizePath(path: string): string {
   const p = path.startsWith("/") ? path : `/${path}`;
@@ -39,12 +40,11 @@ function normalizePath(path: string): string {
 }
 
 /**
- * A single virtual file exposed by a descriptor tool. Implementations decide
- * what the file contains and how writes are applied. The mount path is NOT
- * part of the descriptor — it is assigned by the registry at registration
- * time.
+ * A leaf descriptor: a virtual file. Implementations decide what the file
+ * contains and how writes are applied.
  */
 export interface DescriptorFile {
+  readonly kind: "file";
   /** POSIX mode bits (include S_IFREG). */
   readonly mode: number;
   /** Current size in bytes. */
@@ -60,6 +60,56 @@ export interface DescriptorFile {
   reset(): void;
 }
 
+/**
+ * A directory descriptor: dynamically manages its own children. Children are
+ * files or folders; `DescriptorFolder` provides the storage + CRUD API, and
+ * subclasses may override `children`/`get` for fully dynamic behavior.
+ */
+export class DescriptorFolder {
+  readonly kind = "folder" as const;
+  readonly mode: number;
+
+  #children = new Map<string, DescriptorNode>();
+
+  constructor(opts: { mode?: number } = {}) {
+    this.mode = opts.mode ?? DIR_MODE;
+  }
+
+  get size(): number {
+    return 4096;
+  }
+
+  /** Snapshot of current children, keyed by name. */
+  children(): ReadonlyMap<string, DescriptorNode> {
+    return this.#children;
+  }
+
+  has(name: string): boolean {
+    return this.#children.has(name);
+  }
+
+  get(name: string): DescriptorNode | undefined {
+    return this.#children.get(name);
+  }
+
+  /** Add or replace a child node. */
+  add(name: string, node: DescriptorNode): void {
+    this.#children.set(name, node);
+  }
+
+  /** Remove a child; returns whether it was present. */
+  remove(name: string): boolean {
+    return this.#children.delete(name);
+  }
+}
+
+/**
+ * A node in the virtual filesystem: either a file or a folder. The mount
+ * path is NOT part of the node — it is assigned by the registry/parent at
+ * registration time.
+ */
+export type DescriptorNode = DescriptorFile | DescriptorFolder;
+
 interface OpenFile {
   file: DescriptorFile;
   mode: WriteMode;
@@ -68,32 +118,53 @@ interface OpenFile {
 }
 
 /**
- * Registry of FUSE descriptors keyed by mount path. Paths are assigned here,
- * at registration time, not inside the descriptor itself — mirroring how
- * harness tools are registered by name.
+ * Registry of FUSE descriptor nodes keyed by mount path — the mount's root is
+ * itself a folder, and top-level names resolve to the registered nodes. Paths
+ * are assigned here, at registration time, not inside the descriptor itself —
+ * mirroring how harness tools are registered by name.
  */
 export class DescriptorRegistry {
-  private readonly descriptors = new Map<string, DescriptorFile>();
+  private readonly root = new DescriptorFolder();
   private readonly open = new Map<number, OpenFile>();
   private nextFd = 1000;
   private pendingTruncate = false;
 
-  constructor(entries: readonly (readonly [string, DescriptorFile])[] = []) {
-    for (const [path, descriptor] of entries) this.add(path, descriptor);
+  constructor(entries: readonly (readonly [string, DescriptorNode])[] = []) {
+    for (const [path, node] of entries) this.add(path, node);
   }
 
-  /** Register a descriptor at the given mount path (leading slash optional). */
-  add(path: string, descriptor: DescriptorFile): void {
-    this.descriptors.set(normalizePath(path), descriptor);
+  /**
+   * Register a node at the given mount path (leading slash optional).
+   * Intermediate path segments must already exist as folders.
+   */
+  add(path: string, node: DescriptorNode): void {
+    const segments = normalizePath(path).split("/").filter(Boolean);
+    if (segments.length === 0) throw new Error("cannot register the mount root itself");
+    let parent: DescriptorFolder = this.root;
+    for (let i = 0; i < segments.length - 1; i++) {
+      const segment = segments[i] as string;
+      const intermediate = parent.get(segment);
+      if (!intermediate || intermediate.kind !== "folder") {
+        throw new Error(`descriptor path ${path} requires intermediate folder "${segment}"`);
+      }
+      parent = intermediate;
+    }
+    parent.add(segments[segments.length - 1] as string, node);
   }
 
   has(path: string): boolean {
-    return this.descriptors.has(normalizePath(path));
+    return this.resolve(normalizePath(path)) !== undefined;
   }
 
-  /** Registered descriptors keyed by their normalized mount paths. */
-  get entries(): ReadonlyMap<string, DescriptorFile> {
-    return this.descriptors;
+  /** Resolve a normalized path through the node tree. */
+  private resolve(path: string): DescriptorNode | undefined {
+    const segments = path.split("/").filter(Boolean);
+    let node: DescriptorNode | undefined = this.root;
+    for (const segment of segments) {
+      if (!node || node.kind !== "folder") return undefined;
+      node = node.get(segment);
+    }
+    return node;
   }
 
   /** Build the flat FUSE operation set backed by the registered descriptors. */
@@ -103,21 +174,31 @@ export class DescriptorRegistry {
         if (path === "/") {
           cb(null, {
             mode: DIR_MODE,
-            size: 4096,
+            size: this.root.size,
             nlink: 2,
             uid: OWNER_UID,
             gid: OWNER_GID,
           });
           return;
         }
-        const file = this.descriptors.get(normalizePath(path));
-        if (!file) {
+        const node = this.resolve(normalizePath(path));
+        if (!node) {
           cb(ENOENT);
           return;
         }
+        if (node.kind === "folder") {
+          cb(null, {
+            mode: node.mode,
+            size: node.size,
+            nlink: 2,
+            uid: OWNER_UID,
+            gid: OWNER_GID,
+          });
+          return;
+        }
         cb(null, {
-          mode: file.mode,
-          size: file.size,
+          mode: node.mode,
+          size: node.size,
           nlink: 1,
           uid: OWNER_UID,
           gid: OWNER_GID,
@@ -125,20 +206,26 @@ export class DescriptorRegistry {
       },
 
       readdir: (path, cb) => {
-        if (path !== "/") {
+        const node = path === "/" ? this.root : this.resolve(normalizePath(path));
+        if (!node) {
+          cb(ENOENT);
+          return;
+        }
+        if (node.kind !== "folder") {
           cb(ENOTDIR);
           return;
         }
-        cb(
-          null,
-          [...this.descriptors.keys()].map((p) => p.slice(1)),
-        );
+        cb(null, [...node.children().keys()]);
       },
 
       open: (path, flags, cb) => {
-        const file = this.descriptors.get(normalizePath(path));
-        if (!file) {
+        const node = this.resolve(normalizePath(path));
+        if (!node) {
           cb(ENOENT, 0);
+          return;
+        }
+        if (node.kind !== "file") {
+          cb(EISDIR, 0);
           return;
         }
         const acc = flags & 3;
@@ -146,7 +233,7 @@ export class DescriptorRegistry {
           acc === 0 ? "read" : (flags & O_APPEND) !== 0 ? "append" : "replace";
         const fd = this.nextFd++;
         this.open.set(fd, {
-          file,
+          file: node,
           mode,
           truncPending: (flags & O_TRUNC) !== 0,
           chunks: [],
@@ -155,14 +242,19 @@ export class DescriptorRegistry {
       },
 
       create: (path, _mode, cb) => {
-        // Only registered descriptors may be (re)created.
-        const file = this.descriptors.get(normalizePath(path));
-        if (!file) {
+        // Only existing file descriptors may be (re)created.
+        const node = this.resolve(normalizePath(path));
+        if (!node || node.kind !== "file") {
           cb(EACCES, 0);
           return;
         }
         const fd = this.nextFd++;
-        this.open.set(fd, { file, mode: "replace", truncPending: true, chunks: [] });
+        this.open.set(fd, {
+          file: node,
+          mode: "replace",
+          truncPending: true,
+          chunks: [],
+        });
         cb(0, fd);
       },
 
@@ -211,14 +303,14 @@ export class DescriptorRegistry {
 
       truncate: (path, size, cb) => {
         if (size === 0) {
-          const file = this.descriptors.get(normalizePath(path));
-          if (file) {
+          const node = this.resolve(normalizePath(path));
+          if (node && node.kind === "file") {
             if (this.open.size > 0) {
               // Truncate belonging to an open handle: defer to release so
               // subsequent writes land first.
               this.pendingTruncate = true;
             } else {
-              file.reset();
+              node.reset();
             }
           }
         }
@@ -226,7 +318,8 @@ export class DescriptorRegistry {
       },
 
       unlink: (path, cb) => {
-        if (!this.descriptors.has(normalizePath(path))) {
+        const node = this.resolve(normalizePath(path));
+        if (!node) {
           cb(ENOENT);
           return;
         }
@@ -236,3 +329,6 @@ export class DescriptorRegistry {
     };
   }
 }
+
+const O_APPEND = 0x400;
+const O_TRUNC = 0x200;

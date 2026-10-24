@@ -9,6 +9,7 @@ import { type DescriptorFile, FILE_MODE } from "./index.ts";
  * path is assigned by the registry at registration time (e.g. `/list`).
  */
 export class ListDescriptor implements DescriptorFile {
+  readonly kind = "file" as const;
   readonly mode = FILE_MODE;
 
   #items: string[] = [];
