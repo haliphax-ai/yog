@@ -2,9 +2,11 @@
 // it mounts a virtual filesystem and performs actual syscalls through it, so
 // it requires a FUSE device and mount privileges.
 //
-// It is gated: the suite is skipped unless /dev/fuse exists or TEST_FUSE=1
-// is set (explicit opt-in for environments where the device exists but the
-// gate cannot detect it). Run it explicitly with:
+// The suite runs only when BOTH conditions hold:
+//   - `TEST_FUSE=1` is set (explicit opt-in), and
+//   - `/dev/fuse` is present in this environment.
+// If `TEST_FUSE=1` is set but the device is missing, the file fails loudly
+// instead of silently skipping. Run it explicitly with:
 //
 //   npm run test:mount
 //
@@ -27,7 +29,17 @@ import { DescriptorRegistry } from "../src/fs/index.ts";
 const mnt = "./sys-test";
 const file = `${mnt}/list`;
 
-const runMountTests = process.env.TEST_FUSE === "1" || existsSync("/dev/fuse");
+const forced = process.env.TEST_FUSE === "1";
+const devFusePresent = existsSync("/dev/fuse");
+
+// Explicitly requested but impossible to run: fail rather than skip quietly.
+if (forced && !devFusePresent) {
+  throw new Error(
+    "TEST_FUSE=1 requires /dev/fuse, but the FUSE device is not present in this environment.",
+  );
+}
+
+const runMountTests = forced && devFusePresent;
 
 describe.skipIf(!runMountTests)("live FUSE mount", () => {
   let list: ListDescriptor;
