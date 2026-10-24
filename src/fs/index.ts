@@ -98,6 +98,26 @@ export interface DescriptorNode {
    * mount. Return a negative errno to refuse the rename.
    */
   onRename?(): number | void;
+  /**
+   * Optional housekeeping hook invoked when this node's content is read.
+   * Return a negative errno to refuse the read.
+   */
+  onRead?(): number | void;
+  /**
+   * Optional housekeeping hook invoked before content is committed (append or
+   * replace). Return a negative errno to refuse the write.
+   */
+  onWrite?(kind: Exclude<WriteMode, "read">, text: string): number | void;
+  /**
+   * Optional housekeeping hook invoked before the node is truncated to empty.
+   * Return a negative errno to refuse the truncation.
+   */
+  onTruncate?(): number | void;
+  /**
+   * Optional housekeeping hook invoked before this node is removed from its
+   * parent. Return a negative errno to refuse the deletion.
+   */
+  onDelete?(): number | void;
 }
 
 /**
@@ -397,6 +417,11 @@ export class DescriptorRegistry {
           cb(EBADF);
           return;
         }
+        const rc = o.file.onRead?.();
+        if (rc !== undefined && rc < 0) {
+          cb(rc);
+          return;
+        }
         const data = Buffer.from(o.file.render?.() ?? "", "utf8");
         if (pos >= data.length) {
           cb(0);
@@ -423,11 +448,15 @@ export class DescriptorRegistry {
           this.open.delete(fd);
           const text = Buffer.concat(o.chunks).toString("utf8");
           if (o.mode === "append") {
-            o.file.commit?.("append", text);
+            const rc = o.file.onWrite?.("append", text);
+            if (rc === undefined || rc >= 0) o.file.commit?.("append", text);
           } else if (o.mode === "replace") {
             const destructive = o.truncPending || this.pendingTruncate;
             this.pendingTruncate = false;
-            if (o.chunks.length > 0 || destructive) o.file.commit?.("replace", text);
+            if (o.chunks.length > 0 || destructive) {
+              const rc = o.file.onWrite?.("replace", text);
+              if (rc === undefined || rc >= 0) o.file.commit?.("replace", text);
+            }
           }
           // mode === 'read': never commits.
         }
@@ -461,6 +490,11 @@ export class DescriptorRegistry {
           // subsequent writes land first.
           this.pendingTruncate = true;
           cb(0);
+          return;
+        }
+        const rc = node.onTruncate?.();
+        if (rc !== undefined && rc < 0) {
+          cb(rc);
           return;
         }
         node.reset();
@@ -585,7 +619,12 @@ export class DescriptorRegistry {
           cb(EPERM);
           return;
         }
-        const rc = found.parent.onChildDelete?.(found.name, found.node);
+        const childRc = found.parent.onChildDelete?.(found.name, found.node);
+        if (childRc !== undefined && childRc < 0) {
+          cb(childRc);
+          return;
+        }
+        const rc = found.node.onDelete?.();
         if (rc !== undefined && rc < 0) {
           cb(rc);
           return;

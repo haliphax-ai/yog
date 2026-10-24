@@ -19,6 +19,10 @@ function fileDescriptor(
   content = "",
   hooks: {
     onRename?: () => number | void;
+    onRead?: () => number | void;
+    onWrite?: (kind: "append" | "replace", text: string) => number | void;
+    onTruncate?: () => number | void;
+    onDelete?: () => number | void;
     onOverwrite?: (source: DescriptorFile) => number | void;
   } = {},
 ): DescriptorFile {
@@ -370,6 +374,111 @@ describe("rename behavior (emergent from descriptors)", () => {
     expect(registry.has("/dest/a")).toBe(true);
   });
 
+describe("node lifecycle hooks", () => {
+  it("fires onRead when content is read", async () => {
+    let reads = 0;
+    const file = fileDescriptor(DescriptorFlags.CanRead, "hello", {
+      onRead: () => {
+        reads++;
+        return 0;
+      },
+    });
+    const registry = new DescriptorRegistry([["/f", file]]);
+    const ops = registry.buildOps();
+    const fd = await new Promise<number>((resolve) => {
+      ops.open!("/f", 0, (e, f) => resolve(e === 0 ? (f ?? -1) : -1));
+    });
+    const buf = Buffer.alloc(16);
+    await new Promise<void>((resolve) => {
+      ops.read!("/f", fd, buf, 5, 0, () => resolve());
+    });
+    expect(reads).toBe(1);
+  });
+
+  it("fires onWrite and commits when allowed", async () => {
+    let writes: string[] = [];
+    const file = fileDescriptor(DescriptorFlags.CanRead | DescriptorFlags.CanWrite, "", {
+      onWrite: (_kind, text) => {
+        writes.push(text);
+        return 0;
+      },
+    });
+    const registry = new DescriptorRegistry([["/f", file]]);
+    const ops = registry.buildOps();
+    const fd = await new Promise<number>((resolve) => {
+      ops.open!("/f", 1, (e, f) => resolve(e === 0 ? (f ?? -1) : -1));
+    });
+    const buf = Buffer.from("abc");
+    await new Promise<void>((resolve) => {
+      ops.write!("/f", fd, buf, 3, 0, () => resolve());
+    });
+    await new Promise<void>((resolve) => {
+      ops.release!("/f", fd, () => resolve());
+    });
+    expect(writes).toEqual(["abc"]);
+  });
+
+  it("onWrite can veto by returning a negative errno", async () => {
+    let committed = false;
+    const file = fileDescriptor(DescriptorFlags.CanRead | DescriptorFlags.CanWrite, "", {
+      onWrite: () => EACCES,
+    });
+    const originalCommit = file.commit;
+    file.commit = () => {
+      committed = true;
+    };
+    const registry = new DescriptorRegistry([["/f", file]]);
+    const ops = registry.buildOps();
+    const fd = await new Promise<number>((resolve) => {
+      ops.open!("/f", 1, (e, f) => resolve(e === 0 ? (f ?? -1) : -1));
+    });
+    const buf = Buffer.from("abc");
+    await new Promise<void>((resolve) => {
+      ops.write!("/f", fd, buf, 3, 0, () => resolve());
+    });
+    await new Promise<void>((resolve) => {
+      ops.release!("/f", fd, () => resolve());
+    });
+    expect(committed).toBe(false);
+    void originalCommit;
+  });
+
+  it("fires onTruncate before resetting", async () => {
+    let truncated = 0;
+    const file = fileDescriptor(DescriptorFlags.CanRead | DescriptorFlags.CanWrite, "abc", {
+      onTruncate: () => {
+        truncated++;
+        return 0;
+      },
+    });
+    const registry = new DescriptorRegistry([["/f", file]]);
+    const ops = registry.buildOps();
+    await new Promise<void>((resolve) => {
+      ops.truncate!("/f", 0, () => resolve());
+    });
+    expect(truncated).toBe(1);
+  });
+
+  it("onDelete can veto unlink", async () => {
+    let deleted = false;
+    const file = fileDescriptor(DescriptorFlags.CanRemove, "x", {
+      onDelete: () => {
+        deleted = true;
+        return EPERM;
+      },
+    });
+    const registry = new DescriptorRegistry([["/f", file]]);
+    const ops = registry.buildOps();
+    const err = await new Promise<number | null>((resolve) => {
+      ops.unlink!("/f", (e) => resolve(e));
+    });
+    expect(deleted).toBe(true);
+    expect(err).toBe(EPERM);
+    expect(registry.has("/f")).toBe(true);
+  });
+});
+
+describe("shared child hooks", () => {
   it("calls onChildCreate when a child is registered into a folder", () => {
     const created: string[] = [];
     const folder = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
