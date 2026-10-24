@@ -42,10 +42,21 @@ async function main(): Promise<void> {
 
   const messages: ChatCompletionMessageParam[] = [{ role: 'user', content: prompt }]
 
+  let code = 0
   try {
     await runLoop(client, modelId, messages)
+  } catch (err) {
+    console.error(err instanceof Error ? err.stack ?? err.message : String(err))
+    code = 1
   } finally {
-    await unmountSys(fuse)
+    // Teardown is best-effort and bounded: a hung unmount or an open stream
+    // handle must not keep the harness alive after the answer is delivered.
+    await Promise.race([
+      unmountSys(fuse),
+      new Promise((resolve) => setTimeout(resolve, 1500)),
+    ])
+    process.exitCode = code
+    setTimeout(() => process.exit(code), 250).unref()
   }
 }
 
