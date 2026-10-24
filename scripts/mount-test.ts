@@ -2,13 +2,13 @@
 import { readFile, writeFile, appendFile, rm, readdir, stat, open } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import { mountSys, unmountSys } from '../src/mount.ts'
-import { ListStore } from '../src/store.ts'
+import { ListDescriptor, createListOps } from '../src/fs/list.ts'
 
 const mnt = './sys-test'
-const file = `${mnt}/tool`
+const file = `${mnt}/list`
 const log = (msg: string): void => console.log(`[${new Date().toISOString()}] ${msg}`)
 
-const store = new ListStore()
+const list = new ListDescriptor()
 let failed = 0
 
 function check(name: string, cond: boolean, detail = ''): void {
@@ -21,7 +21,7 @@ function check(name: string, cond: boolean, detail = ''): void {
 
 try {
   log('mounting...')
-  const fuse = await mountSys(store, mnt, {
+  const fuse = await mountSys(createListOps(list), mnt, {
     // set FUSE_DEBUG=1 to see raw FUSE opcodes on stderr
     debug: process.env['FUSE_DEBUG'] === '1',
   })
@@ -29,11 +29,11 @@ try {
 
   log('readdir...')
   const entries = await readdir(mnt)
-  check('readdir shows only tool', entries.length === 1 && entries[0] === 'tool', JSON.stringify(entries))
+  check('readdir shows only list', entries.length === 1 && entries[0] === 'list', JSON.stringify(entries))
 
   log('stat...')
   const st = await stat(file)
-  check('stat of tool', st.isFile() && st.size === 0, JSON.stringify({ size: st.size }))
+  check('stat of list', st.isFile() && st.size === 0, JSON.stringify({ size: st.size }))
 
   log('read empty...')
   const empty = await readFile(file, 'utf8')
@@ -48,13 +48,13 @@ try {
   await appendFile(file, 'gamma\n')
   text = await readFile(file, 'utf8')
   check('second append', text === 'alpha\nbeta\ngamma\n', JSON.stringify(text))
-  check('store reflects appends', store.items.length === 3, JSON.stringify(store.items))
+  check('store reflects appends', list.items.length === 3, JSON.stringify(list.items))
 
   log('rewrite...')
   await writeFile(file, 'solo\n')
   text = await readFile(file, 'utf8')
   check('destructive rewrite', text === 'solo\n', JSON.stringify(text))
-  check('store reflects rewrite', store.items.length === 1, JSON.stringify(store.items))
+  check('store reflects rewrite', list.items.length === 1, JSON.stringify(list.items))
 
   log('delete attempt...')
   let deleteErr: unknown = null
@@ -71,7 +71,7 @@ try {
       : 'succeeded!',
   )
   const stillThere = await readdir(mnt)
-  check('tool survives failed delete', stillThere.includes('tool'), JSON.stringify(stillThere))
+  check('list survives failed delete', stillThere.includes('list'), JSON.stringify(stillThere))
 
   // The mount directory is 0555 + default_permissions: creating any new entry
   // must fail at the VFS with EACCES before reaching our handlers.
@@ -160,7 +160,7 @@ try {
   }
 
   log('reads do not mutate the store...')
-  check('store intact after read battery', store.items.length === 1000, `items=${store.items.length}`)
+  check('store intact after read battery', list.items.length === 1000, `items=${list.items.length}`)
 
   // restore: leave a small list, then final full read round-trip
   await writeFile(file, 'alpha\n')

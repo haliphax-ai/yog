@@ -16,16 +16,44 @@ npm start -- <modelId> "<prompt>"
 ## Layout
 
 - `src/index.ts` — CLI entry: parses `modelId` + `prompt`, mounts `./sys`,
-  runs the streaming completion with tool-calling loop, exits.
-- `src/store.ts` — the in-memory `string[]` backing the virtual file.
-- `src/fs.ts` — FUSE operations for the mount (see semantics below).
-- `src/mount.ts` — mount/unmount helpers.
-- `src/tools.ts` — tool registry, JSON-schema validation, and the `bash` tool.
+  runs the agent turn engine, exits.
+- `src/turn.ts` — agent turn engine: streams completions, executes tool calls,
+  feeds results back until the model answers without tools.
+- `src/mount.ts` — mount/unmount helpers (accepts any `FuseOps`).
+- `src/fs/index.ts` — shared descriptor-tool plumbing: `DescriptorFile`
+  interface + `DescriptorFs` base class (open/create fd handling, write
+  buffering, commit-on-release, truncate, unlink denial, errno constants).
+- `src/fs/list.ts` — the list descriptor (`ListDescriptor`) and
+  `createListOps` for the `sys/list` file.
+- `src/tools/index.ts` — shared harness-tool plumbing: `ToolResult`,
+  `ToolSpec<TArgs, TResult>`, JSON-schema validation, and the `ToolRegistry`.
+- `src/tools/bash.ts` — the `bash` harness tool (persistent shell state, env
+  hiding).
 - `src/fuse-native.d.ts` — ambient typings for the untyped `fuse-native` package.
+
+### Adding a new descriptor tool
+
+Implement `DescriptorFile` (name, mode, size, `render`, `commit`, `reset`) and
+build ops via a `DescriptorFs`:
+
+```ts
+const fs = new DescriptorFs([myDescriptor])
+// mountSys(fs.buildOps())
+```
+
+### Adding a new harness tool
+
+Implement `ToolSpec<TArgs, TResult>` (definition, validate, failure, run) and
+add it to the registry:
+
+```ts
+const registry = new ToolRegistry([bashTool, myTool])
+// runTurn(client, modelId, messages, registry)
+```
 
 ## Virtual filesystem (`./sys`)
 
-The mount contains a single file, `tool`, a window onto the harness's
+The mount contains a single file, `list`, a window onto the harness's
 in-memory list:
 
 - **read** — outputs the list, one item per line.
@@ -37,9 +65,9 @@ in-memory list:
 Permission model (enforced by the VFS via `default_permissions`):
 
 - The mount directory is `0555` — read/traverse only. Creating or removing
-  *any* entry (including `tool`) fails with `EACCES` at the kernel before
+  *any* entry (including `list`) fails with `EACCES` at the kernel before
   reaching the handlers; `ls -l` visibly shows `dr-xr-xr-x`.
-- `tool` itself is `0644`, owned by the harness user — so appends and
+- `list` itself is `0644`, owned by the harness user — so appends and
   destructive rewrites work, but the descriptor can never be deleted or
   shadowed by a sibling file.
 
@@ -75,7 +103,7 @@ Every response also carries `error?: string`:
 
 ### Virtual filesystem action log
 
-Every mutation of `sys/tool` is logged to **stderr** via `console.error`, so
+Every mutation of `sys/list` is logged to **stderr** via `console.error`, so
 observers can see the descriptor being acted on:
 
 - append: `{ action: 'append', items: [...] }` (contents after the action)

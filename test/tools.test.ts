@@ -2,19 +2,18 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import {
-  bashTool,
-  executeToolCall,
-  toolDefinitions,
-  tools,
-  validateAgainstSchema,
-} from '../src/tools.js'
+import { ToolRegistry, validateAgainstSchema } from '../src/tools/index.ts'
+import { bashTool } from '../src/tools/bash.ts'
+
+const registry = new ToolRegistry([bashTool])
 
 describe('tool definitions', () => {
   it('exposes a single bash tool for starters', () => {
-    expect(Object.keys(tools)).toEqual(['bash'])
-    expect(toolDefinitions).toHaveLength(1)
-    expect((toolDefinitions[0] as { function: { name: string } }).function.name).toBe('bash')
+    expect(registry.has('bash')).toBe(true)
+    expect(registry.definitions).toHaveLength(1)
+    expect(
+      (registry.definitions[0] as { function: { name: string } }).function.name,
+    ).toBe('bash')
   })
 
   it('requires a single script string', () => {
@@ -49,9 +48,9 @@ describe('schema validation', () => {
   })
 })
 
-describe('executeToolCall', () => {
+describe('registry.execute', () => {
   it('runs bash and returns stdout/exitCode', async () => {
-    const result = await executeToolCall('bash', JSON.stringify({ script: 'echo hello' }))
+    const result = await registry.execute('bash', JSON.stringify({ script: 'echo hello' }))
     expect(result?.error).toBeUndefined()
     expect(result?.['stdout']).toBe('hello\n')
     expect(result?.['exitCode']).toBe(0)
@@ -59,13 +58,13 @@ describe('executeToolCall', () => {
   })
 
   it('reports the exit code of a failing script', async () => {
-    const result = await executeToolCall('bash', JSON.stringify({ script: 'exit 7' }))
+    const result = await registry.execute('bash', JSON.stringify({ script: 'exit 7' }))
     expect(result?.['exitCode']).toBe(7)
     expect(result?.error).toBeUndefined()
   })
 
   it('aborts on schema violation with error and null output fields', async () => {
-    const result = await executeToolCall('bash', JSON.stringify({}))
+    const result = await registry.execute('bash', JSON.stringify({}))
     expect(result?.['error']).toMatch(/missing required field "script"/)
     expect(result?.['stdout']).toBeNull()
     expect(result?.['stderr']).toBeNull()
@@ -73,7 +72,7 @@ describe('executeToolCall', () => {
   })
 
   it('aborts on extra fields', async () => {
-    const result = await executeToolCall(
+    const result = await registry.execute(
       'bash',
       JSON.stringify({ script: 'echo', shell: true }),
     )
@@ -82,13 +81,13 @@ describe('executeToolCall', () => {
   })
 
   it('sets error on invalid JSON arguments', async () => {
-    const result = await executeToolCall('bash', '{not json')
+    const result = await registry.execute('bash', '{not json')
     expect(result?.['error']).toMatch(/invalid JSON arguments/)
     expect(result?.['exitCode']).toBeNull()
   })
 
   it('returns undefined for unknown tools', async () => {
-    expect(await executeToolCall('nope', '{}')).toBeUndefined()
+    expect(await registry.execute('nope', '{}')).toBeUndefined()
   })
 })
 
@@ -97,7 +96,7 @@ describe('host environment hiding', () => {
     process.env['OPENAI_API_KEY'] = 'sk-super-secret'
     process.env['GH_TOKEN'] = 'ghp_super-secret'
     try {
-      const result = await executeToolCall(
+      const result = await registry.execute(
         'bash',
         JSON.stringify({ script: 'env | sort' }),
       )
@@ -119,7 +118,6 @@ describe('host environment hiding', () => {
       delete process.env['GH_TOKEN']
     }
   })
-
 })
 
 describe('bash shell state persistence', () => {
@@ -128,7 +126,7 @@ describe('bash shell state persistence', () => {
     const prev = process.env['HARNESS_STATE_DIR']
     process.env['HARNESS_STATE_DIR'] = stateDir
     try {
-      const r1 = await executeToolCall(
+      const r1 = await registry.execute(
         'bash',
         JSON.stringify({
           script: "cd /tmp && export FOO=bar && myfn() { echo fn-ok; }",
@@ -137,7 +135,7 @@ describe('bash shell state persistence', () => {
       expect(r1?.error).toBeUndefined()
       expect(r1?.['exitCode']).toBe(0)
 
-      const r2 = await executeToolCall(
+      const r2 = await registry.execute(
         'bash',
         JSON.stringify({ script: 'printf "%s|%s|" "$PWD" "$FOO"; myfn' }),
       )

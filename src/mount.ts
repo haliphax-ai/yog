@@ -1,29 +1,28 @@
 import type Fuse from 'fuse-native'
-import type { ListStore } from './store.ts'
-import { createOps } from './fs.ts'
+import type { FuseOps } from 'fuse-native'
 
 type FuseCtor = new (
   mnt: string,
-  ops: ReturnType<typeof createOps>,
+  ops: FuseOps,
   opts?: Record<string, unknown>,
 ) => Fuse
 
 /**
- * Mount the virtual filesystem exposing `<mnt>/tool` as a window onto the
- * harness's in-memory list. Resolves once the mount is active.
+ * Mount the virtual filesystem exposing a set of descriptor ops. Resolves
+ * once the mount is active.
  *
  * The native addon is imported lazily so a missing libfuse or FUSE device
  * rejects this promise instead of crashing the process at module load.
  */
 export async function mountSys(
-  store: ListStore,
+  ops: FuseOps,
   mnt = './sys',
   extraOpts: Record<string, unknown> = {},
 ): Promise<Fuse> {
   const mod = (await import('fuse-native')) as unknown as { default: FuseCtor }
   const FuseCtor = mod.default
 
-  const fuse = new FuseCtor(mnt, createOps(store), {
+  const fuse = new FuseCtor(mnt, ops, {
     mkdir: true,
     force: true,
     // Let the VFS enforce the mode bits we serve: the mount directory is
