@@ -6,6 +6,10 @@ import type { FuseOps } from "fuse-native";
  * A descriptor is a node in the virtual filesystem the harness exposes through
  * the mount. Nodes form a tree: `DescriptorFolder` nodes manage their own
  * children (files or folders), and `DescriptorFile` nodes are leaf content.
+ * Features shared by every descriptor (kind, mode, capability flags, size)
+ * live on the `DescriptorNode` parent so they flow uniformly to both files
+ * and folders.
+ *
  * To add a new descriptor, implement `DescriptorFile` (or use a
  * `DescriptorFolder` for a managed subtree) and register it — with its mount
  * path — on a `DescriptorRegistry`; the FUSE wiring (attribute reporting,
@@ -47,6 +51,9 @@ export const DescriptorFlags = {
 
 export type DescriptorFlags = (typeof DescriptorFlags)[keyof typeof DescriptorFlags];
 
+/** Discriminator for descriptor nodes. */
+export type DescriptorKind = "file" | "folder";
+
 /** Normalize a mount path to a canonical leading-slash form. */
 function normalizePath(path: string): string {
   const p = path.startsWith("/") ? path : `/${path}`;
@@ -54,17 +61,26 @@ function normalizePath(path: string): string {
 }
 
 /**
- * A leaf descriptor: a virtual file. Implementations decide what the file
- * contains and how writes are applied.
+ * The parent node type: every feature shared by all descriptors lives here so
+ * it flows to both files and folders. The mount path is NOT part of the node —
+ * it is assigned by the registry/parent at registration time.
  */
-export interface DescriptorFile {
-  readonly kind: "file";
-  /** POSIX mode bits (include S_IFREG). */
+export interface DescriptorNode {
+  readonly kind: DescriptorKind;
+  /** POSIX mode bits (include S_IFREG / S_IFDIR). */
   readonly mode: number;
   /** Capability bit flags. */
   readonly flags: DescriptorFlags;
-  /** Current size in bytes. */
+  /** Current size in bytes (file content length; folder directory size). */
   readonly size: number;
+}
+
+/**
+ * A leaf descriptor: a virtual file. Implementations decide what the file
+ * contains and how writes are applied.
+ */
+export interface DescriptorFile extends DescriptorNode {
+  readonly kind: "file";
   /** Content served for reads. */
   render(): string;
   /**
@@ -81,12 +97,12 @@ export interface DescriptorFile {
  * files or folders; `DescriptorFolder` provides the storage + CRUD API, and
  * subclasses may override `children`/`get` for fully dynamic behavior.
  */
-export class DescriptorFolder {
+export class DescriptorFolder implements DescriptorNode {
   readonly kind = "folder" as const;
   readonly mode: number;
   readonly flags: DescriptorFlags;
 
-  #children = new Map<string, DescriptorNode>();
+  #children = new Map<string, DescriptorChild>();
 
   constructor(opts: { mode?: number; flags?: DescriptorFlags } = {}) {
     this.mode = opts.mode ?? DIR_MODE;
@@ -98,7 +114,7 @@ export class DescriptorFolder {
   }
 
   /** Snapshot of current children, keyed by name. */
-  children(): ReadonlyMap<string, DescriptorNode> {
+  children(): ReadonlyMap<string, DescriptorChild> {
     return this.#children;
   }
 
@@ -106,12 +122,12 @@ export class DescriptorFolder {
     return this.#children.has(name);
   }
 
-  get(name: string): DescriptorNode | undefined {
+  get(name: string): DescriptorChild | undefined {
     return this.#children.get(name);
   }
 
   /** Add or replace a child node. */
-  add(name: string, node: DescriptorNode): void {
+  add(name: string, node: DescriptorChild): void {
     this.#children.set(name, node);
   }
 
@@ -121,12 +137,8 @@ export class DescriptorFolder {
   }
 }
 
-/**
- * A node in the virtual filesystem: either a file or a folder. The mount
- * path is NOT part of the node — it is assigned by the registry/parent at
- * registration time.
- */
-export type DescriptorNode = DescriptorFile | DescriptorFolder;
+/** Any concrete node: a file or a folder. */
+export type DescriptorChild = DescriptorFile | DescriptorFolder;
 
 interface OpenFile {
   file: DescriptorFile;
@@ -147,7 +159,7 @@ export class DescriptorRegistry {
   private nextFd = 1000;
   private pendingTruncate = false;
 
-  constructor(entries: readonly (readonly [string, DescriptorNode])[] = []) {
+  constructor(entries: readonly (readonly [string, DescriptorChild])[] = []) {
     for (const [path, node] of entries) this.add(path, node);
   }
 
@@ -155,7 +167,7 @@ export class DescriptorRegistry {
    * Register a node at the given mount path (leading slash optional).
    * Intermediate path segments must already exist as folders.
    */
-  add(path: string, node: DescriptorNode): void {
+  add(path: string, node: DescriptorChild): void {
     const segments = normalizePath(path).split("/").filter(Boolean);
     if (segments.length === 0) throw new Error("cannot register the mount root itself");
     let parent: DescriptorFolder = this.root;
@@ -175,9 +187,9 @@ export class DescriptorRegistry {
   }
 
   /** Resolve a normalized path through the node tree. */
-  private resolve(path: string): DescriptorNode | undefined {
+  private resolve(path: string): DescriptorChild | undefined {
     const segments = path.split("/").filter(Boolean);
-    let node: DescriptorNode | undefined = this.root;
+    let node: DescriptorChild | undefined = this.root;
     for (const segment of segments) {
       if (!node || node.kind !== "folder") return undefined;
       node = node.get(segment);
@@ -188,7 +200,7 @@ export class DescriptorRegistry {
   /** Resolve the parent folder and child name for a normalized path. */
   private resolveParent(
     path: string,
-  ): { parent: DescriptorFolder; name: string; node: DescriptorNode } | undefined {
+  ): { parent: DescriptorFolder; name: string; node: DescriptorChild } | undefined {
     const segments = path.split("/").filter(Boolean);
     if (segments.length === 0) return undefined;
     let parent: DescriptorFolder = this.root;
