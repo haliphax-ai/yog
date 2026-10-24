@@ -9,11 +9,8 @@
  */
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
-import { ListDescriptor } from "./fs/list.ts";
-import { DescriptorRegistry } from "./fs/index.ts";
+import { tools, descriptors } from "./register.ts";
 import { mountSys, unmountSys } from "./mount.ts";
-import { ToolRegistry } from "./tools/index.ts";
-import { bashTool } from "./tools/bash.ts";
 import { runTurn } from "./turn.ts";
 
 const USAGE = 'usage: npm start -- <modelId> "<prompt>"';
@@ -33,13 +30,7 @@ async function main(): Promise<void> {
     ...(process.env["OPENAI_API_KEY"] ? { apiKey: process.env["OPENAI_API_KEY"] } : {}),
   });
 
-  // Tool registry — the harness-wide set of model-facing tools.
-  const tools = new ToolRegistry([bashTool]);
-
-  // The virtual filesystem: a registry of permanent descriptors. Paths are
-  // assigned here, at registration time — not inside the descriptor.
-  const list = new ListDescriptor();
-  const descriptors = new DescriptorRegistry([["/list", list]]);
+  // Registries come from the wiring manifest (register.ts).
   let fuse: Awaited<ReturnType<typeof mountSys>> | undefined;
   try {
     fuse = await mountSys(descriptors.buildOps());
