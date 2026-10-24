@@ -1,7 +1,7 @@
 {
-  "name": "fuse-overlay-harness",
+  "name": "yog",
   "version": "0.1.0",
-  "description": "Agent harness with virtual filesystem",
+  "description": "Virtual file system agent harness",
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
