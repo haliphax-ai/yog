@@ -128,7 +128,7 @@ export function createOps(store: ListStore): FuseOps {
           // splitItems of '' yields no items, so an append open with no
           // writes is a no-op.
           store.append(text)
-          console.error({ action: 'append' })
+          console.error({ action: 'append', items: store.items })
         } else if (handle.mode === 'replace') {
           // Commit a rewrite only when something was actually written or the
           // open was destructive (O_TRUNC flag or a trailing SETATTR(0)).

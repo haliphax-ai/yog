@@ -62,7 +62,7 @@ Every response also carries `error?: string`:
 Every mutation of `sys/tool` is logged to **stderr** via `console.error`, so
 observers can see the descriptor being acted on:
 
-- append: `{ action: 'append' }`
+- append: `{ action: 'append', items: [...] }` (contents after the action)
 - destructive rewrite: `{ action: 'replace', items: [...] }` (contents after
   the action)
 - standalone truncate: `{ action: 'truncate', items: [...] }`
