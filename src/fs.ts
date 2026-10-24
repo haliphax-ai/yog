@@ -11,6 +11,7 @@ const TOOL_PATH = '/tool'
 // local so this module has no load-time dependency on the native addon.
 const EPERM = -1
 const ENOENT = -2
+const EACCES = -13
 const EBADF = -9
 const EEXIST = -17
 const ENOTDIR = -20
@@ -84,9 +85,10 @@ export function createOps(store: ListStore): FuseOps {
     },
 
     create(path, _mode, cb) {
-      // The only file is `tool`, and it always exists — creating anything else fails.
+      // The virtual fs is permanent: `tool` is the only file and cannot be
+      // re-created/removed; anything else is simply not creatable.
       if (path !== TOOL_PATH) {
-        cb(EEXIST, 0)
+        cb(EACCES, 0)
         return
       }
       const fd = nextFd++
