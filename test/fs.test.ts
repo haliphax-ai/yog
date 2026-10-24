@@ -370,6 +370,38 @@ describe("rename behavior (emergent from descriptors)", () => {
     expect(registry.has("/dest/a")).toBe(true);
   });
 
+  it("calls onChildCreate when a child is registered into a folder", () => {
+    const created: string[] = [];
+    const folder = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    folder.onChildCreate = (name) => {
+      created.push(name);
+      return 0;
+    };
+    const registry = new DescriptorRegistry([["/dir", folder]]);
+    registry.add("/dir/s1", fileDescriptor(DescriptorFlags.CanRead, "x"));
+    expect(created).toEqual(["s1"]);
+  });
+
+  it("calls onChildDelete before unlinking a child and can refuse", async () => {
+    let notified = false;
+    const folder = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    folder.onChildDelete = (_name, _child) => {
+      notified = true;
+      return EPERM;
+    };
+    const child = fileDescriptor(DescriptorFlags.CanRemove, "x");
+    folder.add("s1", child);
+    const registry = new DescriptorRegistry([["/dir", folder]]);
+    const ops = registry.buildOps();
+
+    const err = await new Promise<number | null>((resolve) => {
+      ops.unlink!("/dir/s1", (e) => resolve(e));
+    });
+    expect(notified).toBe(true);
+    expect(err).toBe(EPERM);
+    expect(registry.has("/dir/s1")).toBe(true);
+  });
+
   it("denies repositioning into a missing parent", async () => {
     const movable = fileDescriptor(DescriptorFlags.CanRead | DescriptorFlags.CanRename, "x");
     const registry = new DescriptorRegistry([["/a", movable]]);

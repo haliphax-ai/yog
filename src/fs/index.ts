@@ -142,6 +142,18 @@ export class DescriptorFolder implements DescriptorNode {
    */
   onChildRename?(name: string, child: DescriptorChild): number | void;
 
+  /**
+   * Optional housekeeping hook invoked when a child is created in this folder.
+   * Return a negative errno to refuse the creation.
+   */
+  onChildCreate?(name: string, child: DescriptorChild): number | void;
+
+  /**
+   * Optional housekeeping hook invoked when a child of this folder is deleted.
+   * Return a negative errno to refuse the deletion.
+   */
+  onChildDelete?(name: string, child: DescriptorChild): number | void;
+
   #children = new Map<string, DescriptorChild>();
 
   constructor(opts: { mode?: number; flags?: DescriptorFlags } = {}) {
@@ -219,7 +231,9 @@ export class DescriptorRegistry {
       }
       parent = intermediate;
     }
-    parent.add(segments[segments.length - 1] as string, node);
+    const name = segments[segments.length - 1] as string;
+    parent.add(name, node);
+    parent.onChildCreate?.(name, node);
   }
 
   has(path: string): boolean {
@@ -569,6 +583,11 @@ export class DescriptorRegistry {
         // A descriptor governs its own removability via its capability flags.
         if ((found.node.flags & DescriptorFlags.CanRemove) === 0) {
           cb(EPERM);
+          return;
+        }
+        const rc = found.parent.onChildDelete?.(found.name, found.node);
+        if (rc !== undefined && rc < 0) {
+          cb(rc);
           return;
         }
         found.parent.remove(found.name);
