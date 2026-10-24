@@ -73,6 +73,25 @@ try {
   const stillThere = await readdir(mnt)
   check('tool survives failed delete', stillThere.includes('tool'), JSON.stringify(stillThere))
 
+  // The mount directory is 0555 + default_permissions: creating any new entry
+  // must fail at the VFS with EACCES before reaching our handlers.
+  log('create sibling ...')
+  {
+    let createErr: unknown = null
+    try {
+      await writeFile(`${mnt}/nope`, 'x')
+    } catch (err) {
+      createErr = err
+    }
+    check(
+      'cannot create new file in mount',
+      createErr !== null,
+      createErr ? String((createErr as { code?: string }).code ?? (createErr as Error).message) : 'succeeded!',
+    )
+    const afterCreate = await readdir(mnt)
+    check('no new entries after denied create', afterCreate.length === 1, JSON.stringify(afterCreate))
+  }
+
   // --- read battery: offsets, EOF edges, multi-chunk reads ---
   const bigLines: string[] = []
   for (let i = 1; i <= 1000; i++) bigLines.push(`line-${String(i).padStart(4, '0')}`)

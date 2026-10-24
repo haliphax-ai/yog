@@ -26,7 +26,11 @@ export async function mountSys(
   const fuse = new FuseCtor(mnt, createOps(store), {
     mkdir: true,
     force: true,
-    defaultPermissions: false,
+    // Let the VFS enforce the mode bits we serve: the mount directory is
+    // 0555 (read-only), so adding/removing entries fails at the kernel with
+    // EACCES before reaching our handlers. The tool descriptor is owned by
+    // the harness user and remains writable.
+    defaultPermissions: true,
     ...extraOpts,
   })
 

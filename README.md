@@ -32,7 +32,16 @@ in-memory list:
 - **append open** (`>>`) — lines written are added to the list on close.
 - **destructive write** (`>` / O_TRUNC) — written content replaces the list
   on close.
-- **delete** (`rm`) — always fails with `EPERM`; the list is never removable.
+- **delete** (`rm`) — always fails; the list is never removable.
+
+Permission model (enforced by the VFS via `default_permissions`):
+
+- The mount directory is `0555` — read/traverse only. Creating or removing
+  *any* entry (including `tool`) fails with `EACCES` at the kernel before
+  reaching the handlers; `ls -l` visibly shows `dr-xr-xr-x`.
+- `tool` itself is `0644`, owned by the harness user — so appends and
+  destructive rewrites work, but the descriptor can never be deleted or
+  shadowed by a sibling file.
 
 ## Tools
 

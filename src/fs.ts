@@ -2,8 +2,11 @@ import { constants } from 'node:fs'
 import type { FuseOps } from 'fuse-native'
 import type { ListStore } from './store.ts'
 
-const DIR_MODE = 0o40755 // S_IFDIR | 0755
-const FILE_MODE = 0o100644 // S_IFREG | 0644
+const DIR_MODE = 0o40555 // S_IFDIR | 0555 — read/traverse only; no add/remove
+const FILE_MODE = 0o100644 // S_IFREG | 0644 — owner read/write, world read
+
+const OWNER_UID = process.getuid ? process.getuid() : 0
+const OWNER_GID = process.getgid ? process.getgid() : 0
 
 const TOOL_PATH = '/tool'
 
@@ -42,7 +45,13 @@ export function createOps(store: ListStore): FuseOps {
   return {
     getattr(path, cb) {
       if (path === '/') {
-        cb(null, { mode: DIR_MODE, size: 4096, nlink: 2, uid: 0, gid: 0 })
+        cb(null, {
+          mode: DIR_MODE,
+          size: 4096,
+          nlink: 2,
+          uid: OWNER_UID,
+          gid: OWNER_GID,
+        })
         return
       }
       if (path === TOOL_PATH) {
@@ -50,8 +59,8 @@ export function createOps(store: ListStore): FuseOps {
           mode: FILE_MODE,
           size: store.size,
           nlink: 1,
-          uid: 0,
-          gid: 0,
+          uid: OWNER_UID,
+          gid: OWNER_GID,
         })
         return
       }
