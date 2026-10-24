@@ -16,8 +16,9 @@ npm start -- <modelId> "<prompt>"
 
 ### Docker
 
-Build the image and run through the bundled launcher, which loads the `yog`
-AppArmor profile and forwards `OPENAI_BASE_URL` / `OPENAI_API_KEY`:
+Build the image and run through the bundled launcher, which runs the image
+under the `yog` AppArmor profile and forwards `OPENAI_BASE_URL` /
+`OPENAI_API_KEY`:
 
 ```sh
 docker build -t yog .
@@ -47,8 +48,9 @@ place a model id in a `model` file (host cwd) to override it.
 - `src/fuse-native.d.ts` — ambient typings for the untyped `fuse-native` package.
 - `Dockerfile` — container image: node:24, a non-root `agent` user, and the
   `fuse`/CLI packages.
-- `yog` — Docker launcher: builds the run with the `yog` AppArmor profile,
-  the FUSE device, `SYS_ADMIN`, and unconfined seccomp.
+- `yog` — Docker launcher: runs the image under the `yog` AppArmor profile,
+  with the FUSE device, `SYS_ADMIN`, and unconfined seccomp.
+- `apparmor/yog.profile` — the `yog` AppArmor profile to load on the host.
 
 ### Adding a new descriptor tool
 
@@ -158,8 +160,13 @@ The `fuse-native` addon needs a FUSE device and mount privileges:
   ```
 
   `apparmor=yog` references an AppArmor profile named `yog` that must be
-  loaded on the host (e.g. `sudo apparmor_parser -r -W /path/to/yog.profile`)
-  before the container starts.
+  loaded on the host before the container starts. The profile is checked in
+  at `apparmor/yog.profile`:
+
+  ```sh
+  sudo apparmor_parser -r -W apparmor/yog.profile
+  sudo aa-status | grep yog   # confirms it is loaded
+  ```
 
 All of the above is wired into the bundled `yog` launcher:
 
