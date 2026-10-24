@@ -1,15 +1,16 @@
+import { z } from "zod";
 import type {
   ChatCompletionFunctionTool,
   ChatCompletionTool,
 } from "openai/resources/chat/completions/completions.mjs";
 
 /**
- * Shared plumbing for harness tools.
+ * Shared plumbing for harness tools, backed by zod schemas.
  *
- * A harness tool is a model-facing function: it declares an OpenAI function
- * definition, validates its JSON arguments, and runs. The `ToolRegistry`
- * holds the active tools and executes calls by name, so adding a tool is just
- * implementing `ToolSpec` and registering it.
+ * A harness tool is a model-facing function: it declares a zod schema for its
+ * arguments, derives the OpenAI function definition from that schema, and
+ * runs. The `ToolRegistry` holds the active tools and executes calls by name,
+ * so adding a tool is just implementing `ToolSpec` and registering it.
  */
 
 /**
@@ -26,103 +27,46 @@ export interface ToolSpec<
   TArgs extends Record<string, unknown> = Record<string, unknown>,
   TResult extends ToolResult = ToolResult,
 > {
-  definition: ChatCompletionFunctionTool;
-  /** Validate the raw (JSON-parsed) arguments; return an error string to abort. */
-  validate(args: unknown): string | undefined;
+  /** OpenAI function name. */
+  name: string;
+  /** Human-readable description for the model. */
+  description: string;
+  /** Zod schema for the tool's arguments. */
+  schema: z.ZodType<TArgs>;
   /** Response shape used when the call is aborted (validation error / exception). */
   failure(error: string): TResult;
   run(args: TArgs): Promise<TResult>;
 }
 
-export type SchemaNode = {
-  type?: string | string[];
-  properties?: Record<string, SchemaNode>;
-  required?: string[];
-  items?: SchemaNode;
-  additionalProperties?: boolean | SchemaNode;
-  enum?: unknown[];
-  [key: string]: unknown;
-};
+/** Derive the OpenAI function definition from a tool spec's zod schema. */
+export function toFunctionTool(spec: ToolSpec): ChatCompletionFunctionTool {
+  return {
+    type: "function",
+    function: {
+      name: spec.name,
+      description: spec.description,
+      parameters: z.toJSONSchema(spec.schema),
+    },
+  };
+}
 
-/**
- * Validate `args` against a JSON schema (subset: object/string/number/integer/
- * boolean/array/enum). Returns a human-readable message covering missing,
- * extra, and invalid fields, or undefined when the arguments are valid.
- */
-export function validateAgainstSchema(
-  schema: SchemaNode,
-  args: unknown,
-  path = "",
-): string | undefined {
-  if (typeof schema !== "object" || schema === null) return undefined;
-  const types =
-    schema.type === undefined ? [] : Array.isArray(schema.type) ? schema.type : [schema.type];
-
-  if (schema.enum !== undefined && !schema.enum.includes(args)) {
-    return `${path || "arguments"}: value ${JSON.stringify(args)} is not one of ${JSON.stringify(schema.enum)}`;
-  }
-
-  if (types.length > 0 && !types.some((t) => matchesType(t, args))) {
-    return `${path || "arguments"}: expected ${types.join(" | ")}, got ${describe(args)}`;
-  }
-
-  if (matchesType("object", args) && schema.properties !== undefined) {
-    const obj = args as Record<string, unknown>;
-    const known = Object.keys(schema.properties);
-    const errors: string[] = [];
-
-    for (const key of schema.required ?? []) {
-      if (!(key in obj)) errors.push(`missing required field "${key}"`);
-    }
-    for (const key of Object.keys(obj)) {
-      if (!known.includes(key)) errors.push(`unexpected field "${key}"`);
-    }
-    for (const [key, sub] of Object.entries(schema.properties)) {
-      if (key in obj) {
-        const err = validateAgainstSchema(sub, obj[key], path ? `${path}.${key}` : key);
-        if (err) errors.push(err);
+/** Format a zod error the way the harness reports validation failures. */
+export function formatZodError(error: z.ZodError): string {
+  return error.issues
+    .map((issue) => {
+      const path = issue.path.length > 0 ? issue.path.join(".") : "arguments";
+      if (issue.code === "unrecognized_keys") {
+        const keys = (issue as { keys?: string[] }).keys ?? [];
+        return keys.map((key) => `unexpected field "${key}"`).join("; ");
       }
-    }
-
-    if (errors.length > 0) return errors.join("; ");
-  }
-
-  if (matchesType("array", args) && schema.items !== undefined) {
-    const arr = args as unknown[];
-    for (let i = 0; i < arr.length; i++) {
-      const err = validateAgainstSchema(schema.items, arr[i], `${path}[${i}]`);
-      if (err) return err;
-    }
-  }
-
-  return undefined;
-}
-
-function matchesType(type: string, value: unknown): boolean {
-  switch (type) {
-    case "object":
-      return typeof value === "object" && value !== null && !Array.isArray(value);
-    case "array":
-      return Array.isArray(value);
-    case "string":
-      return typeof value === "string";
-    case "number":
-      return typeof value === "number" && Number.isFinite(value);
-    case "integer":
-      return typeof value === "number" && Number.isInteger(value);
-    case "boolean":
-      return typeof value === "boolean";
-    case "null":
-      return value === null;
-    default:
-      return true;
-  }
-}
-
-function describe(value: unknown): string {
-  if (Array.isArray(value)) return "array";
-  if (value === null) return "null";
-  return typeof value;
+      if (issue.code === "invalid_type" && /received undefined/.test(issue.message)) {
+        // zod v4 reports missing required fields as invalid_type with an
+        // undefined received value baked into the message
+        return `missing required field "${path}"`;
+      }
+      return `${path}: ${issue.message}`;
+    })
+    .join("; ");
 }
 
 /**
@@ -137,7 +81,7 @@ export class ToolRegistry {
   }
 
   add(tool: ToolSpec): void {
-    this.tools.set(tool.definition.function.name, tool);
+    this.tools.set(tool.name, tool);
   }
 
   has(name: string): boolean {
@@ -145,13 +89,14 @@ export class ToolRegistry {
   }
 
   get definitions(): ChatCompletionTool[] {
-    return [...this.tools.values()].map((t) => t.definition);
+    return [...this.tools.values()].map(toFunctionTool);
   }
 
   /**
-   * Execute one tool call: validate arguments, abort with `error` set when the
-   * schema rejects them, and convert thrown exceptions into `error` on the
-   * response. Returns undefined when the tool name is unknown.
+   * Execute one tool call: validate arguments against the tool's zod schema,
+   * abort with `error` set when validation fails, and convert thrown
+   * exceptions into `error` on the response. Returns undefined when the tool
+   * name is unknown.
    */
   async execute(name: string, rawArgs: string | null): Promise<ToolResult | undefined> {
     const tool = this.tools.get(name);
@@ -164,13 +109,13 @@ export class ToolRegistry {
       return tool.failure(`invalid JSON arguments: ${(err as Error).message}`);
     }
 
-    const validationError = tool.validate(parsed);
-    if (validationError) {
-      return tool.failure(validationError);
+    const result = tool.schema.safeParse(parsed);
+    if (!result.success) {
+      return tool.failure(formatZodError(result.error));
     }
 
     try {
-      return await tool.run(parsed as Record<string, unknown>);
+      return await tool.run(result.data as Record<string, unknown>);
     } catch (err) {
       return tool.failure(err instanceof Error ? err.message : String(err));
     }

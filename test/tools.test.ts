@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ToolRegistry, validateAgainstSchema } from "../src/tools/index.ts";
+import { ToolRegistry, toFunctionTool } from "../src/tools/index.ts";
 import { bashTool } from "../src/tools/bash.ts";
 
 const registry = new ToolRegistry([bashTool]);
+const bashDefinition = toFunctionTool(bashTool);
 
 describe("tool definitions", () => {
   it("exposes a single bash tool for starters", () => {
@@ -15,7 +16,7 @@ describe("tool definitions", () => {
   });
 
   it("requires a single script string", () => {
-    const params = bashTool.definition.function.parameters as {
+    const params = bashDefinition.function.parameters as {
       required: string[];
       properties: Record<string, { type?: unknown }>;
     };
@@ -25,24 +26,24 @@ describe("tool definitions", () => {
 });
 
 describe("schema validation", () => {
-  const schema = bashTool.definition.function.parameters as never;
-
   it("accepts a valid call", () => {
-    expect(validateAgainstSchema(schema, { script: "echo hi" })).toBeUndefined();
+    expect(bashTool.schema.safeParse({ script: "echo hi" }).success).toBe(true);
   });
 
   it("rejects a missing required field", () => {
-    expect(validateAgainstSchema(schema, {})).toMatch(/missing required field "script"/);
+    const r = bashTool.schema.safeParse({});
+    expect(r.success).toBe(false);
+    if (!r.success) expect(JSON.stringify(r.error.issues)).toMatch(/script/);
   });
 
   it("rejects extra fields", () => {
-    expect(validateAgainstSchema(schema, { script: "echo", cwd: "/tmp" })).toMatch(
-      /unexpected field "cwd"/,
-    );
+    const r = bashTool.schema.safeParse({ script: "echo", cwd: "/tmp" });
+    expect(r.success).toBe(false);
   });
 
   it("rejects an invalid field type", () => {
-    expect(validateAgainstSchema(schema, { script: 42 })).toMatch(/expected string/);
+    const r = bashTool.schema.safeParse({ script: 42 });
+    expect(r.success).toBe(false);
   });
 });
 

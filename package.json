@@ -21,7 +21,8 @@
   "license": "MIT",
   "dependencies": {
     "fuse-native": "^2.2.6",
-    "openai": "^7.43.0"
+    "openai": "^7.43.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { type SchemaNode, type ToolResult, type ToolSpec, validateAgainstSchema } from "./index.ts";
+import { z } from "zod";
+import { type ToolResult, type ToolSpec } from "./index.ts";
 
 export interface BashResult extends ToolResult {
   stdout: string | null;
@@ -150,33 +151,17 @@ function execBash(script: string): Promise<ExecOutcome> {
 }
 
 export const bashTool: ToolSpec<BashArgs, BashResult> = {
-  definition: {
-    type: "function",
-    function: {
-      name: "bash",
-      description:
-        "Run a bash script in a persistent shell environment. " +
-        "cwd, exported variables, and shell functions persist between calls; " +
-        "the agent rc (BASH_ENV or ~/.bashrc) is sourced as the baseline. " +
-        "stdout/stderr/exitCode map to the shell process; they are null (with " +
-        "`error` set) if the call failed validation or threw.",
-      parameters: {
-        type: "object",
-        properties: {
-          script: {
-            type: "string",
-            description: "A bash script to execute.",
-          },
-        },
-        required: ["script"],
-        additionalProperties: false,
-      },
-    },
-  },
+  name: "bash",
+  description:
+    "Run a bash script in a persistent shell environment. " +
+    "cwd, exported variables, and shell functions persist between calls; " +
+    "the agent rc (BASH_ENV or ~/.bashrc) is sourced as the baseline. " +
+    "stdout/stderr/exitCode map to the shell process; they are null (with " +
+    "`error` set) if the call failed validation or threw.",
 
-  validate(args: unknown): string | undefined {
-    return validateAgainstSchema(this.definition.function.parameters as SchemaNode, args);
-  },
+  schema: z.object({
+    script: z.string().describe("A bash script to execute."),
+  }).strict(),
 
   failure(error: string): BashResult {
     return { stdout: null, stderr: null, runtimeMs: null, exitCode: null, error };
