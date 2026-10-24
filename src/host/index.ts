@@ -95,5 +95,13 @@ export function spawn(
   args?: readonly string[],
   options?: SpawnOptions,
 ): ChildProcess {
-  return nodeSpawn(command, args ? [...args] : undefined, options);
+  // Never pass `undefined` as the positional args argument — no overload
+  // accepts (command, undefined, options). Branch so each call matches a
+  // two- or three-argument overload explicitly.
+  if (args !== undefined) {
+    return options === undefined
+      ? nodeSpawn(command, [...args])
+      : nodeSpawn(command, [...args], options);
+  }
+  return options === undefined ? nodeSpawn(command) : nodeSpawn(command, options);
 }
