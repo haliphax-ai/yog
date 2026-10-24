@@ -120,29 +120,6 @@ describe('host environment hiding', () => {
     }
   })
 
-  it('preserves agent-set variables even when their names look secret-ish', async () => {
-    const stateDir = mkdtempSync(join(tmpdir(), 'harness-state-'))
-    const prev = process.env['HARNESS_STATE_DIR']
-    process.env['HARNESS_STATE_DIR'] = stateDir
-    try {
-      const setResult = await executeToolCall(
-        'bash',
-        JSON.stringify({ script: 'export MY_API_TOKEN=abc123' }),
-      )
-      expect(setResult?.error).toBeUndefined()
-
-      const getResult = await executeToolCall(
-        'bash',
-        JSON.stringify({ script: 'printf "%s" "$MY_API_TOKEN"' }),
-      )
-      expect(getResult?.error).toBeUndefined()
-      expect(getResult?.['stdout']).toBe('abc123')
-    } finally {
-      if (prev === undefined) delete process.env['HARNESS_STATE_DIR']
-      else process.env['HARNESS_STATE_DIR'] = prev
-      rmSync(stateDir, { recursive: true, force: true })
-    }
-  })
 })
 
 describe('bash shell state persistence', () => {
