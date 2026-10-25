@@ -56,6 +56,8 @@ place a model id in a `model` file (host cwd) to override it.
   with the FUSE device, `SYS_ADMIN`, and unconfined seccomp.
 - `apparmor/yog.profile` - the `yog` AppArmor profile to load on the host.
 
+![Dependency graph](https://raw.githubusercontent.com/haliphax-ai/yog/refs/heads/assets/dependencies.jpg)
+
 ### Adding a new descriptor tool
 
 Implement `DescriptorFile` (mode, size, `render`, `commit`, `reset`) and
