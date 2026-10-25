@@ -1,6 +1,7 @@
 *.log
 *.mmd
 .env
+.env.local
 .harness/
 /assets
 /model
