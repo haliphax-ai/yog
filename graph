@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -eo pipefail
+cd "$(dirname "$0")"
+npm run depcruise:graph -- -f assets/dependencies.mmd -I src -x '\.d\.ts$'
+sed -i'' 's#flowchart LR#flowchart TD#' dependencies.mmd
+mmdc -i dependencies.mmd -o dependencies.png -b white --size 2048 -t redux-color
+/usr/bin/gm convert dependencies.png dependencies.jpg
+rm dependencies.png
