@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: haliphax-ai/yog/.github@main
-      - run: npx vitest run --silent .
+      - run: npx vitest run --silent=true .
 
   oxlint:
     runs-on: ubuntu-latest
