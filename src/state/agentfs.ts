@@ -43,6 +43,13 @@ interface DBLike {
   };
 }
 
+/** The persisted persistent-shell state shape (mirrors the worker snapshot). */
+export interface ShellHomeState {
+  readonly cwd?: string;
+  readonly env?: string;
+  readonly functions?: string;
+}
+
 export class AgentFSState {
   /** Path of the SQLite database file backing this agent state. */
   readonly path: string;
@@ -113,6 +120,16 @@ export class AgentFSState {
         rec.durationMs,
         rec.sessionId,
       );
+  }
+
+  /** Persist the persistent-shell snapshot for a session (rewindable home). */
+  async saveShellSnapshot(sessionId: string, state: ShellHomeState): Promise<void> {
+    await this.#agent.kv.set(`session:${sessionId}:shell`, state);
+  }
+
+  /** Load the persisted persistent-shell snapshot for a session. */
+  async loadShellSnapshot(sessionId: string): Promise<ShellHomeState | undefined> {
+    return this.#agent.kv.get(`session:${sessionId}:shell`);
   }
 
   /** Close the underlying database connection. */

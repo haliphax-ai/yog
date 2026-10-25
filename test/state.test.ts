@@ -123,4 +123,22 @@ describe("AgentFSState", () => {
     expect(rows[0]!.name).toBe("bash");
     await restored.close();
   });
+
+  it("persists and reloads the shell snapshot across opens", async () => {
+    const dir = await tempDir();
+    const dbPath = join(dir, "home.db");
+
+    const state = await AgentFSState.open({ path: dbPath });
+    await state.saveShellSnapshot("abc", { cwd: "/tmp", env: "x", functions: "" });
+    await state.close();
+
+    const reopened = await AgentFSState.open({ path: dbPath });
+    await expect(reopened.loadShellSnapshot("abc")).resolves.toEqual({
+      cwd: "/tmp",
+      env: "x",
+      functions: "",
+    });
+    await expect(reopened.loadShellSnapshot("nope")).resolves.toBeUndefined();
+    await reopened.close();
+  });
 });

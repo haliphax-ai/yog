@@ -127,4 +127,20 @@ describe("WorkerClient", () => {
     await client.close();
     await expect(client.runBash("echo x")).rejects.toThrow(/worker closed/);
   });
+
+  it("restores a prior snapshot before running", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "yog-worker-restore-"));
+    const client = await startWorker();
+    try {
+      const r = await client.runBash('printf "%s|%s|" "$PWD" "$FOO"; myfn', stateDir, {
+        cwd: "/tmp",
+        env: "export FOO=bar\n",
+        functions: "myfn() { echo fn-ok; }\n",
+      });
+      expectOk(r);
+      expect(r.stdout).toBe("/tmp|bar|fn-ok\n");
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
 });

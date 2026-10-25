@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { type ToolResult, type ToolSpec } from "../index.ts";
 import { WorkerClient } from "../../worker/index.ts";
+import type { ShellSnapshot } from "../../worker/protocol.ts";
 
 export interface BashResult extends ToolResult {
   stdout: string | null;
@@ -14,12 +15,23 @@ export interface BashArgs extends Record<string, unknown> {
 }
 
 /**
- * The bash tool executes through the worker process, never directly in the
- * harness. The worker owns the persistent shell (cwd/export/function state
- * carried between calls) and spawns bash with a minimal environment, so host
- * credentials never reach the tool.
+ * Optional source/sink for the persistent shell state, injected by the
+ * composition root. When set, every bash call restores the previous snapshot
+ * before running and persists the post-run snapshot afterwards — making the
+ * shell's home state agentfs-backed (queryable and rewindable).
  */
+export interface ShellStateProvider {
+  load(): Promise<Partial<ShellSnapshot> | undefined>;
+  save(state: ShellSnapshot): Promise<void>;
+}
+
 let workerPromise: Promise<WorkerClient> | undefined;
+let shellProvider: ShellStateProvider | undefined;
+
+/** Inject the agentfs-backed home provider (called once at startup). */
+export function setShellStateProvider(provider: ShellStateProvider | undefined): void {
+  shellProvider = provider;
+}
 
 function getWorker(): Promise<WorkerClient> {
   workerPromise ??= WorkerClient.start();
@@ -49,8 +61,26 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
     const start = performance.now();
     try {
       const worker = await getWorker();
-      const resp = await worker.runBash(args.script, process.env["HARNESS_STATE_DIR"]);
+
+      let restore: Partial<ShellSnapshot> | undefined;
+      try {
+        restore = await shellProvider?.load();
+      } catch {
+        // A home read failure must not fail the tool call.
+        restore = undefined;
+      }
+
+      const resp = await worker.runBash(args.script, process.env["HARNESS_STATE_DIR"], restore);
       const runtimeMs = Math.round(performance.now() - start);
+
+      if (resp.ok && resp.state && shellProvider) {
+        try {
+          await shellProvider.save(resp.state);
+        } catch {
+          // A home write failure must not fail the tool call.
+        }
+      }
+
       if (!resp.ok) {
         return { stdout: null, stderr: null, runtimeMs, exitCode: null, error: resp.error };
       }

@@ -6,6 +6,16 @@
  * concurrently.
  */
 
+/** The persisted persistent-shell state captured by the wrapper. */
+export interface ShellSnapshot {
+  /** `pwd -P` output (the shell's working directory). */
+  readonly cwd: string;
+  /** `export -p` output (exported variables). */
+  readonly env: string;
+  /** `declare -f` output (shell functions). */
+  readonly functions: string;
+}
+
 /** A request to run a bash script in the worker's persistent shell. */
 export interface BashRunRequest {
   readonly type: "bash.run";
@@ -16,6 +26,12 @@ export interface BashRunRequest {
    * snapshotted. Omitted to use the worker's default (`.harness`).
    */
   readonly stateDir?: string;
+  /**
+   * Optional prior snapshot to restore into the state dir before running. The
+   * daemon supplies this from its agentfs-backed home so shell state survives
+   * across daemon restarts and is queryable/rewindable.
+   */
+  readonly restore?: Partial<ShellSnapshot>;
 }
 
 export type WorkerRequest = BashRunRequest;
@@ -27,11 +43,11 @@ export interface BashRunOk {
   readonly stderr: string;
   readonly exitCode: number | null;
   /**
-   * Optional snapshot of the persistent shell state after the run, read back
-   * from the state dir. Present only when `stateDir` was provided and the
-   * files existed.
+   * Snapshot of the persistent shell state after the run, read back from the
+   * state dir. Present only when `stateDir` was provided and the files
+   * existed.
    */
-  readonly state?: { cwd: string; env: string; functions: string };
+  readonly state?: ShellSnapshot;
 }
 
 /** Spawn/exec failure or malformed request. */

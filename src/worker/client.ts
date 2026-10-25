@@ -6,7 +6,13 @@
  */
 import { fileURLToPath } from "node:url";
 import { spawn, type ChildProcess, type SpawnOptions } from "../host.ts";
-import { decodeFrame, encodeFrame, type WorkerRequest, type WorkerResponse } from "./protocol.ts";
+import {
+  decodeFrame,
+  encodeFrame,
+  type ShellSnapshot,
+  type WorkerRequest,
+  type WorkerResponse,
+} from "./protocol.ts";
 
 const liveClients = new Set<WorkerClient>();
 
@@ -55,7 +61,11 @@ export class WorkerClient {
    * the shell-state snapshot lives (and therefore whether cwd/export/function
    * changes persist into later calls).
    */
-  runBash(script: string, stateDir?: string): Promise<WorkerResponse> {
+  runBash(
+    script: string,
+    stateDir?: string,
+    restore?: Partial<ShellSnapshot>,
+  ): Promise<WorkerResponse> {
     if (this.#closed) {
       return Promise.reject(new Error("worker closed"));
     }
@@ -64,6 +74,7 @@ export class WorkerClient {
       type: "bash.run",
       script,
       ...(stateDir !== undefined ? { stateDir } : {}),
+      ...(restore ? { restore } : {}),
     };
     return new Promise((resolve, reject) => {
       this.#pending.set(id, { resolve, reject });

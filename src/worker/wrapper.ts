@@ -46,6 +46,11 @@ if [ -f "$HARNESS_STATE_DIR/env" ]; then
   source "$HARNESS_STATE_DIR/env" >/dev/null 2>&1 || true
 fi
 
+if [ -f "$HARNESS_STATE_DIR/functions" ]; then
+  # shellcheck disable=SC1090
+  source "$HARNESS_STATE_DIR/functions" >/dev/null 2>&1 || true
+fi
+
 if [ -f "$HARNESS_STATE_DIR/cwd" ]; then
   __h_cwd=$(cat "$HARNESS_STATE_DIR/cwd" 2>/dev/null)
   if [ -n "$__h_cwd" ] && [ -d "$__h_cwd" ]; then

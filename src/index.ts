@@ -11,6 +11,7 @@ import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import { tools, descriptors } from "./register.ts";
 import { AgentFSState, newSessionId } from "./state/index.ts";
+import { setShellStateProvider } from "./toolkit/tools/bash.ts";
 import { mountSys, unmountSys } from "./mount.ts";
 import { runTurn } from "./turn.ts";
 
@@ -55,6 +56,16 @@ async function main(): Promise<void> {
       `warning: opening agent state failed (${(err as Error).message}); continuing without audit trail`,
     );
   }
+
+  // Back the bash shell state with agentfs when the state db is available.
+  setShellStateProvider(
+    state
+      ? {
+          load: () => state.loadShellSnapshot(sessionId),
+          save: (snapshot) => state.saveShellSnapshot(sessionId, snapshot),
+        }
+      : undefined,
+  );
 
   // Env vars are used when set, for OpenAI-compatible proxies; otherwise the
   // SDK defaults (OPENAI_BASE_URL / OPENAI_API_KEY) apply.

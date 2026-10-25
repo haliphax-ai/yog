@@ -9,14 +9,21 @@
  * child so teardown never leaves a shell behind.
  */
 import { createInterface } from "node:readline";
-import { readFile, spawn } from "../host.ts";
+import { mkdir, readFile, spawn, writeFile } from "../host.ts";
 import { decodeFrame, encodeFrame, type WorkerResponse, type WorkerRequest } from "./protocol.ts";
 import { buildToolEnv, WRAPPER } from "./wrapper.ts";
 
 let currentChild: ReturnType<typeof spawn> | undefined;
 
 /** Run one script through the persistent-shell wrapper. */
-function runBash(script: string, stateDir?: string): Promise<WorkerResponse> {
+async function runBash(
+  script: string,
+  stateDir?: string,
+  restore?: Partial<import("./protocol.ts").ShellSnapshot>,
+): Promise<WorkerResponse> {
+  if (stateDir && restore) {
+    await hydrateState(stateDir, restore);
+  }
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
@@ -56,6 +63,17 @@ function runBash(script: string, stateDir?: string): Promise<WorkerResponse> {
       })();
     });
   });
+}
+
+/** Restore a prior shell snapshot into the state dir before a run. */
+async function hydrateState(
+  stateDir: string,
+  restore: Partial<import("./protocol.ts").ShellSnapshot>,
+): Promise<void> {
+  await mkdir(stateDir, { recursive: true });
+  if (restore.cwd !== undefined) await writeFile(`${stateDir}/cwd`, restore.cwd);
+  if (restore.env !== undefined) await writeFile(`${stateDir}/env`, restore.env);
+  if (restore.functions !== undefined) await writeFile(`${stateDir}/functions`, restore.functions);
 }
 
 /** Read the persisted shell-state snapshot back for the response. */
@@ -107,7 +125,7 @@ rl.on("line", (line) => {
     const payload = frame.payload as WorkerRequest;
     let resp: WorkerResponse;
     if (payload.type === "bash.run") {
-      resp = await runBash(payload.script, payload.stateDir);
+      resp = await runBash(payload.script, payload.stateDir, payload.restore);
     } else {
       resp = { ok: false, error: `unknown request type: ${JSON.stringify(payload)}` };
     }
