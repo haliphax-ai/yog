@@ -30,6 +30,8 @@ place a model id in a `model` file (host cwd) to override it.
 
 ## Layout
 
+<details><summary>Files</summary><br />
+
 - `src/`
   - `index.ts` - CLI entry: parses `modelId` + `prompt`, mounts `./sys`,
     runs the agent turn engine, exits.
@@ -61,8 +63,12 @@ place a model id in a `model` file (host cwd) to override it.
   `fuse`/CLI packages.
 - `yog` - Docker launcher: runs the image under the `yog` AppArmor profile,
   with the FUSE device, `SYS_ADMIN`, and unconfined seccomp.
+</details>
+
+<details><summary>Dependency graph</summary><div><br />
 
 ![Dependency graph](https://raw.githubusercontent.com/haliphax-ai/yog/refs/heads/assets/dependencies.jpg)
+</div></details>
 
 ### Adding a new descriptor tool
 
