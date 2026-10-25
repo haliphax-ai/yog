@@ -30,31 +30,37 @@ place a model id in a `model` file (host cwd) to override it.
 
 ## Layout
 
-- `src/index.ts` - CLI entry: parses `modelId` + `prompt`, mounts `./sys`,
-  runs the agent turn engine, exits.
-- `src/turn.ts` - agent turn engine: streams completions, executes tool calls,
-  feeds results back until the model answers without tools.
-- `src/mount.ts` — mount/unmount helpers (accepts any `FuseOps`).
-- `src/vfs/index.ts` — shared descriptor-tool plumbing: `DescriptorFile`
-  interface + `DescriptorRegistry` (open/create fd handling, write buffering,
-  commit-on-release, truncate, unlink denial, errno constants). Registry paths
-  are assigned at registration time, not inside the descriptor.
-- `src/vfs/descriptors/list.ts` — the list descriptor (`ListDescriptor`) backing the
-  `sys/list` file.
-- `src/host.ts` - host proxy: the only sanctioned path for descriptors
-  and tools to touch the host - filesystem **and** subprocess spawning
-  (direct `node:fs` / `node:child_process` imports elsewhere are blocked by
-  dependency-cruiser).
-- `src/toolkit/index.ts` — shared harness-tool plumbing: `ToolResult`,
-  `ToolSpec<TArgs, TResult>`, JSON-schema validation, and the `ToolRegistry`.
-- `src/toolkit/tools/bash.ts` — the `bash` harness tool (persistent shell state, env
-  hiding).
-- `src/fuse-native.d.ts` - ambient typings for the untyped `fuse-native` package.
+- `src/`
+  - `index.ts` - CLI entry: parses `modelId` + `prompt`, mounts `./sys`,
+    runs the agent turn engine, exits.
+  - `turn.ts` - agent turn engine: streams completions, executes tool calls,
+    feeds results back until the model answers without tools.
+  - `mount.ts` — mount/unmount helpers (accepts any `FuseOps`).
+  - `host.ts` - host proxy: the only sanctioned path for descriptors
+    and tools to touch the host - filesystem **and** subprocess spawning
+    (direct `node:fs` / `node:child_process` imports elsewhere are blocked by
+    dependency-cruiser).
+  - `fuse-native.d.ts` - ambient typings for the untyped `fuse-native` package.
+  - `vfs/`
+    - `index.ts` — shared descriptor-tool plumbing: `DescriptorFile`
+      interface + `DescriptorRegistry` (open/create fd handling, write
+      buffering, commit-on-release, truncate, unlink denial, errno
+      constants). Registry paths are assigned at registration time, not
+      inside the descriptor.
+    - `descriptors/list.ts` — the list descriptor (`ListDescriptor`) backing
+      the `sys/list` file.
+  - `toolkit/`
+    - `index.ts` — shared harness-tool plumbing: `ToolResult`,
+      `ToolSpec<TArgs, TResult>`, JSON-schema validation, and the
+      `ToolRegistry`.
+    - `tools/bash.ts` — the `bash` harness tool (persistent shell state, env
+      hiding).
+- `apparmor/`
+  - `yog.profile` - the `yog` AppArmor profile to load on the host.
 - `Dockerfile` - container image: node:24, a non-root `agent` user, and the
   `fuse`/CLI packages.
 - `yog` - Docker launcher: runs the image under the `yog` AppArmor profile,
   with the FUSE device, `SYS_ADMIN`, and unconfined seccomp.
-- `apparmor/yog.profile` - the `yog` AppArmor profile to load on the host.
 
 ![Dependency graph](https://raw.githubusercontent.com/haliphax-ai/yog/refs/heads/assets/dependencies.jpg)
 
