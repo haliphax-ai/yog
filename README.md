@@ -41,7 +41,7 @@ place a model id in a `model` file (host cwd) to override it.
   are assigned at registration time, not inside the descriptor.
 - `src/fs/list.ts` — the list descriptor (`ListDescriptor`) backing the
   `sys/list` file.
-- `src/host/index.ts` — host proxy: the only sanctioned path for descriptors
+- `src/host.ts` — host proxy: the only sanctioned path for descriptors
   and tools to touch the host — filesystem **and** subprocess spawning
   (direct `node:fs` / `node:child_process` imports elsewhere are blocked by
   dependency-cruiser).

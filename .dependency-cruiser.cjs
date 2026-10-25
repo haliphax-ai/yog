@@ -7,14 +7,14 @@
  *   src/register.ts   wiring manifest — composes tools + fs domains only
  *   src/turn.ts       orchestration — knows the ToolRegistry, never the VFS/entry
  *   src/mount.ts      pure FUSE bridge — no internal dependencies
- *   src/host/         host proxy — the ONLY module allowed to touch node:fs
+ *   src/host.ts      host proxy — the ONLY module allowed to touch node:fs
  *                     and node:child_process
  *   src/fs/**         leaf domain: descriptors (may use host for out-of-VFS action)
  *   src/tools/**      leaf domain: harness tools (may use host for out-of-VFS action)
  *   test/**           may import any src/**, never the reverse
  *
  * Key invariant: descriptors and tools reach the host (filesystem AND
- * subprocess spawning) only through src/host/ — direct node:fs /
+ * subprocess spawning) only through src/host.ts — direct node:fs /
  * node:child_process imports anywhere in src/ other than host are rule
  * violations.
  */
@@ -78,26 +78,26 @@ module.exports = {
     {
       name: "host-leaf",
       severity: "error",
-      from: { path: "^src/host/" },
+      from: { path: "^src/host\.ts$" },
       to: { path: "^src/" },
     },
 
-    // Host filesystem access happens ONLY through src/host/. This is the rule
-    // that keeps descriptors/tools honest: no direct node:fs anywhere in
-    // src/ except the proxy itself.
+    // Host filesystem access happens ONLY through src/host.ts. This is the
+    // rule that keeps descriptors/tools honest: no direct node:fs anywhere
+    // in src/ except the proxy itself.
     {
       name: "fs-only-via-host",
       severity: "error",
-      from: { path: "^src/(?!host/)" },
+      from: { path: "^src/(?!host\.ts$)" },
       to: { path: "^(node:)?fs(/promises)?$" },
     },
 
-    // Subprocess spawning likewise happens ONLY through src/host/ (the spawn
-    // passthrough), so process execution is governable in one place.
+    // Subprocess spawning likewise happens ONLY through src/host.ts (the
+    // spawn passthrough), so process execution is governable in one place.
     {
       name: "subprocess-only-via-host",
       severity: "error",
-      from: { path: "^src/(?!host/)" },
+      from: { path: "^src/(?!host\.ts$)" },
       to: { path: "^(node:)?child_process$" },
     },
 

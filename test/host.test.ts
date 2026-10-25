@@ -15,7 +15,7 @@ import {
   spawn,
   stat,
   writeFile,
-} from "../src/host/index.ts";
+} from "../src/host.ts";
 
 let dir: string;
 

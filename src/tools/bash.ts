@@ -1,4 +1,4 @@
-import { spawn } from "../host/index.ts";
+import { spawn } from "../host.ts";
 import { z } from "zod";
 import { type ToolResult, type ToolSpec } from "./index.ts";
 
