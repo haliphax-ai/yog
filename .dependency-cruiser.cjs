@@ -11,6 +11,8 @@
  *                     and node:child_process
  *   src/vfs/**        leaf domain: descriptors (may use host for out-of-VFS action)
  *   src/toolkit/**    leaf domain: harness tools (may use host for out-of-VFS action)
+ *   src/worker/**     worker process + JSONL client (infra; uses host only)
+ *   src/state/**      agentfs-backed home/state (the only agentfs-SDK importer)
  *   test/**           may import any src/**, never the reverse
  *
  * Key invariant: descriptors and tools reach the host (filesystem AND
@@ -99,6 +101,30 @@ module.exports = {
       severity: "error",
       from: { path: "^src/(?!host\\.ts$)" },
       to: { path: "^(node:)?child_process$" },
+    },
+
+    // Only the state layer may import the agentfs SDK.
+    {
+      name: "agentfs-only-in-state",
+      severity: "error",
+      from: { path: "^src/(?!state/)" },
+      to: { path: "^agentfs-sdk$" },
+    },
+
+    // The state layer is a leaf below tools/vfs — it never reaches up.
+    {
+      name: "state-leaf",
+      severity: "error",
+      from: { path: "^src/state/" },
+      to: { path: "^src/(vfs/|toolkit/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)" },
+    },
+
+    // The worker layer is infra below the tool domain — it may only touch host.
+    {
+      name: "worker-leaf",
+      severity: "error",
+      from: { path: "^src/worker/" },
+      to: { path: "^src/(vfs/|toolkit/|state/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)" },
     },
 
     // Production code never imports tests.

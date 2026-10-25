@@ -16,6 +16,7 @@
     "prepare": "husky"
   },
   "dependencies": {
+    "agentfs-sdk": "^0.6.4",
     "fuse-native": "^2.2.6",
     "openai": "^7.43.0",
     "zod": "^4.6.7"

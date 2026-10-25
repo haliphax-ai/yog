@@ -10,6 +10,7 @@
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import { tools, descriptors } from "./register.ts";
+import { AgentFSState, newSessionId } from "./state/index.ts";
 import { mountSys, unmountSys } from "./mount.ts";
 import { runTurn } from "./turn.ts";
 
@@ -42,6 +43,19 @@ async function main(): Promise<void> {
   }
   const prompt = promptParts.join(" ");
 
+  const sessionId = newSessionId();
+
+  // The agent state/audit trail is best-effort: if the database cannot be
+  // opened, the harness continues without it.
+  let state: AgentFSState | undefined;
+  try {
+    state = await AgentFSState.open();
+  } catch (err) {
+    console.error(
+      `warning: opening agent state failed (${(err as Error).message}); continuing without audit trail`,
+    );
+  }
+
   // Env vars are used when set, for OpenAI-compatible proxies; otherwise the
   // SDK defaults (OPENAI_BASE_URL / OPENAI_API_KEY) apply.
   const client = new OpenAI({
@@ -63,7 +77,11 @@ async function main(): Promise<void> {
 
   let code = 0;
   try {
-    await runTurn(client, modelId, messages, tools, { signal: abortController.signal });
+    await runTurn(client, modelId, messages, tools, {
+      signal: abortController.signal,
+      sessionId,
+      ...(state ? { recorder: { record: (rec) => state.recordToolCall(rec) } } : {}),
+    });
   } catch (err) {
     if (abortController.signal.aborted) {
       code = 130;
@@ -75,6 +93,9 @@ async function main(): Promise<void> {
     // Teardown is best-effort and bounded: a hung unmount or an open stream
     // handle must not keep the harness alive after the answer is delivered.
     await Promise.race([unmountSys(fuse), new Promise((resolve) => setTimeout(resolve, 1500))]);
+    if (state) {
+      await state.close().catch(() => {});
+    }
     process.exitCode = code;
     setTimeout(() => process.exit(code), 250).unref();
   }

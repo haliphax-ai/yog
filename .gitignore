@@ -3,6 +3,7 @@
 .env
 .env.local
 .harness/
+.agentfs/
 /assets
 /model
 node_modules/
