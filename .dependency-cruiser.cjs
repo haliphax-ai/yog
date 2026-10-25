@@ -78,7 +78,7 @@ module.exports = {
     {
       name: "host-leaf",
       severity: "error",
-      from: { path: "^src/host\.ts$" },
+      from: { path: "^src/host\\.ts$" },
       to: { path: "^src/" },
     },
 
@@ -88,7 +88,7 @@ module.exports = {
     {
       name: "fs-only-via-host",
       severity: "error",
-      from: { path: "^src/(?!host\.ts$)" },
+      from: { path: "^src/(?!host\\.ts$)" },
       to: { path: "^(node:)?fs(/promises)?$" },
     },
 
@@ -97,7 +97,7 @@ module.exports = {
     {
       name: "subprocess-only-via-host",
       severity: "error",
-      from: { path: "^src/(?!host\.ts$)" },
+      from: { path: "^src/(?!host\\.ts$)" },
       to: { path: "^(node:)?child_process$" },
     },
 
