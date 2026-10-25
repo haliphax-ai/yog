@@ -6,13 +6,18 @@ are presented to agents as proxied virtual file descriptors.
 
 ## Usage
 
+The harness entrypoint is `yog run <modelId> "<prompt>"` (pre-1.0
+replace-and-delete: the bare `yog <model> <prompt>` form is gone).
+
 ```sh
-npm start -- <modelId> "<prompt>"
+npm start -- run <modelId> "<prompt>"
 ```
 
 - Streams the model response to stdout and exits when the stream ends.
 - Uses `OPENAI_BASE_URL` / `OPENAI_API_KEY` environment variables when set
   (compatible-proxy support), otherwise the SDK defaults.
+- Runs the `bash` tool through a dedicated worker process; the persistent
+  shell state is mirrored into the agentfs database (see below).
 
 ### Docker
 
@@ -33,8 +38,10 @@ place a model id in a `model` file (host cwd) to override it.
 <details><summary>Files</summary><br />
 
 - `src/`
-  - `index.ts` - CLI entry: parses `modelId` + `prompt`, mounts `./sys`,
-    runs the agent turn engine, exits.
+  - `cli.ts` - CLI arg parsing: the `run` subcommand (the bare form is
+    deleted).
+  - `index.ts` - CLI entry: parses args via `cli.ts`, opens the agent state,
+    mounts `/yog`, runs the agent turn engine, exits.
   - `turn.ts` - agent turn engine: streams completions, executes tool calls,
     feeds results back until the model answers without tools.
   - `mount.ts` — mount/unmount helpers (accepts any `FuseOps`).
@@ -56,7 +63,17 @@ place a model id in a `model` file (host cwd) to override it.
       `ToolSpec<TArgs, TResult>`, JSON-schema validation, and the
       `ToolRegistry`.
     - `tools/bash.ts` — the `bash` harness tool (persistent shell state, env
-      hiding).
+      hiding; executes through the worker).
+  - `worker/`
+    - `protocol.ts` — JSONL wire protocol (requests/responses, shell snapshot).
+    - `wrapper.ts` — persistent-shell wrapper + minimal env builder.
+    - `client.ts` — daemon-side worker client (spawn, id-correlated responses).
+    - `main.ts` — worker entrypoint (runs bash on behalf of the harness).
+  - `state/`
+    - `agentfs.ts` — `AgentFSState` wrapper: audit recorder, snapshots, and
+      the agentfs-backed shell home. The only module that imports the agentfs
+      SDK.
+    - `session.ts` — base62 session id generation.
 - `apparmor/`
   - `yog.profile` - the `yog` AppArmor profile to load on the host.
 - `Dockerfile` - container image: node:24, a non-root `agent` user, and the
@@ -91,7 +108,7 @@ const registry = new ToolRegistry([bashTool, myTool]);
 // runTurn(client, modelId, messages, registry)
 ```
 
-## Virtual filesystem (`./sys`)
+## Virtual filesystem (`/yog`)
 
 The mount contains a single file, `list`, which proxies access to an in-memory
 array in the harness process to demonstrate the descriptor tool concept:
@@ -114,7 +131,8 @@ pre-empt mutations:
   (`onRead`, `onWrite`, `onTruncate`, `onDelete`, `onRename`,
   `onOverwrite`, `onChildCreate`, `onChildDelete`, `onChildRename`). No
   hardcoded paths.
-- `list` is `0644`, owned by the harness user - appends and destructive
+- `list` is `0644`, served as owned by the agent user (descriptors default
+  to the agent; they may declare their own uid/gid) - appends and destructive
   rewrites work; it lacks `CanRemove` and `CanRename`, so it can never be
   deleted or moved away. It declares `onOverwrite` so rename-as-replace
   content can be written into it.
@@ -162,6 +180,24 @@ observers can see the descriptor being acted on:
 - standalone truncate: `{ action: 'truncate', items: [...] }`
 - rejected delete: `{ action: 'unlink', error: 'EPERM' }`
 
+### AgentFS state, audit trail, and rewindable home
+
+The harness opens an AgentFS database (default `.agentfs/yog.db`, override
+with `YOG_STATE_DB`) at startup:
+
+- Every tool call is recorded in the insert-only `tool_calls` table, stamped
+  with a base62 `session_id` extension column — the model's actions are
+  queryable in SQL.
+- The persistent bash shell state (cwd/env/functions) is mirrored into the
+  database per session (`session:<id>:shell`), making the harness home
+  rewindable.
+- Snapshot state with `cp .agentfs/yog.db snapshot.db` (the SDK checkpoints
+  WAL on `snapshotTo`); restore by pointing `YOG_STATE_DB` at the copy.
+- Opening/recording failures are non-fatal: the harness logs and continues.
+
+The state layer (`src/state/`) is the only code allowed to import the agentfs
+SDK (enforced by dependency-cruiser).
+
 ## Environment requirements
 
 The `fuse-native` addon needs a FUSE device and mount privileges:
@@ -206,7 +242,7 @@ system libfuse2 is installed, provide it:
 LD_LIBRARY_PATH=$PWD/node_modules/fuse-native/prebuilds/linux-x64 npm start -- ...
 ```
 
-If mounting fails, the harness logs a warning and continues without `./sys`.
+If mounting fails, the harness logs a warning and continues without `/yog`.
 
 ## Scripts
 

@@ -1,9 +1,9 @@
 /**
  * fuse-overlay-harness — agent harness with a virtual FUSE filesystem.
  *
- * Usage: npm start -- <modelId> "<prompt>"
+ * Usage: yog run <modelId> "<prompt>"
  *
- * Mounts ./sys (containing the virtual `list` file) and runs a streaming
+ * Mounts /yog (containing the virtual `list` file) and runs a streaming
  * chat completion with tools against the given model, exiting when the stream
  * ends.
  */
@@ -12,10 +12,11 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import { tools, descriptors } from "./register.ts";
 import { AgentFSState, newSessionId } from "./state/index.ts";
 import { setShellStateProvider } from "./toolkit/tools/bash.ts";
+import { parseCliArgs } from "./cli.ts";
 import { mountSys, unmountSys } from "./mount.ts";
 import { runTurn } from "./turn.ts";
 
-const USAGE = 'usage: npm start -- <modelId> "<prompt>"';
+const USAGE = 'usage: yog run <modelId> "<prompt>"';
 
 /**
  * Termination handling. The first SIGINT/SIGTERM aborts the in-flight model
@@ -37,12 +38,13 @@ function requestExit(signal: NodeJS.Signals): void {
 }
 
 async function main(): Promise<void> {
-  const [modelId, ...promptParts] = process.argv.slice(2);
-  if (!modelId || promptParts.length === 0) {
+  const parsed = parseCliArgs(process.argv.slice(2));
+  if ("error" in parsed) {
+    console.error(parsed.error);
     console.error(USAGE);
     process.exit(1);
   }
-  const prompt = promptParts.join(" ");
+  const { modelId, prompt } = parsed;
 
   const sessionId = newSessionId();
 

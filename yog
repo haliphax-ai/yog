@@ -15,4 +15,4 @@ exec docker run \
   -e OPENAI_BASE_URL \
   -e OPENAI_API_KEY \
   --name yog \
-  -t yog "$model" "$@"
+  -t yog run "$model" "$@"
