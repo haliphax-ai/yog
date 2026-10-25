@@ -1,6 +1,6 @@
-import { spawn } from "../host.ts";
+import { spawn } from "../../host.ts";
 import { z } from "zod";
-import { type ToolResult, type ToolSpec } from "./index.ts";
+import { type ToolResult, type ToolSpec } from "../index.ts";
 
 export interface BashResult extends ToolResult {
   stdout: string | null;

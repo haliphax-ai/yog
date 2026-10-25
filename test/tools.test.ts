@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ToolRegistry, toFunctionTool } from "../src/tools/index.ts";
-import { bashTool } from "../src/tools/bash.ts";
+import { ToolRegistry, toFunctionTool } from "../src/toolkit/index.ts";
+import { bashTool } from "../src/toolkit/tools/bash.ts";
 
 const registry = new ToolRegistry([bashTool]);
 const bashDefinition = toFunctionTool(bashTool);

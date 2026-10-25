@@ -9,8 +9,8 @@
  *   src/mount.ts      pure FUSE bridge — no internal dependencies
  *   src/host.ts      host proxy — the ONLY module allowed to touch node:fs
  *                     and node:child_process
- *   src/fs/**         leaf domain: descriptors (may use host for out-of-VFS action)
- *   src/tools/**      leaf domain: harness tools (may use host for out-of-VFS action)
+ *   src/vfs/**        leaf domain: descriptors (may use host for out-of-VFS action)
+ *   src/toolkit/**    leaf domain: harness tools (may use host for out-of-VFS action)
  *   test/**           may import any src/**, never the reverse
  *
  * Key invariant: descriptors and tools reach the host (filesystem AND
@@ -38,16 +38,16 @@ module.exports = {
     {
       name: "fs-not-above",
       severity: "error",
-      from: { path: "^src/fs/" },
-      to: { path: "^src/(tools/|turn\\.ts|mount\\.ts|index\\.ts|register\\.ts)" },
+      from: { path: "^src/vfs/" },
+      to: { path: "^src/(toolkit/|turn\\.ts|mount\\.ts|index\\.ts|register\\.ts)" },
     },
 
     // The tool domain never reaches up into the VFS/orchestration/entry.
     {
       name: "tools-not-above",
       severity: "error",
-      from: { path: "^src/tools/" },
-      to: { path: "^src/(fs/|turn\\.ts|mount\\.ts|index\\.ts|register\\.ts)" },
+      from: { path: "^src/toolkit/" },
+      to: { path: "^src/(vfs/|turn\\.ts|mount\\.ts|index\\.ts|register\\.ts)" },
     },
 
     // The turn engine receives registries injected; it never fetches them.

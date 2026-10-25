@@ -5,7 +5,7 @@ import {
   EACCES,
   EISDIR,
   FILE_MODE,
-} from "./index.ts";
+} from "../index.ts";
 
 /**
  * The list descriptor.

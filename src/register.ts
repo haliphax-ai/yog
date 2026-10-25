@@ -1,7 +1,7 @@
-import { bashTool } from "./tools/bash.ts";
-import { ToolRegistry } from "./tools/index.ts";
-import { DescriptorRegistry, type DescriptorFile } from "./fs/index.ts";
-import { ListDescriptor } from "./fs/list.ts";
+import { bashTool } from "./toolkit/tools/bash.ts";
+import { ToolRegistry } from "./toolkit/index.ts";
+import { DescriptorRegistry, type DescriptorFile } from "./vfs/index.ts";
+import { ListDescriptor } from "./vfs/descriptors/list.ts";
 
 /**
  * The harness's wiring manifest: the set of model-facing tools and the set of

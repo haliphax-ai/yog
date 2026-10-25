@@ -34,20 +34,20 @@ place a model id in a `model` file (host cwd) to override it.
   runs the agent turn engine, exits.
 - `src/turn.ts` - agent turn engine: streams completions, executes tool calls,
   feeds results back until the model answers without tools.
-- `src/mount.ts` - mount/unmount helpers (accepts any `FuseOps`).
-- `src/fs/index.ts` - shared descriptor-tool plumbing: `DescriptorFile`
+- `src/mount.ts` — mount/unmount helpers (accepts any `FuseOps`).
+- `src/vfs/index.ts` — shared descriptor-tool plumbing: `DescriptorFile`
   interface + `DescriptorRegistry` (open/create fd handling, write buffering,
   commit-on-release, truncate, unlink denial, errno constants). Registry paths
   are assigned at registration time, not inside the descriptor.
-- `src/fs/list.ts` - the list descriptor (`ListDescriptor`) backing the
+- `src/vfs/descriptors/list.ts` — the list descriptor (`ListDescriptor`) backing the
   `sys/list` file.
 - `src/host.ts` - host proxy: the only sanctioned path for descriptors
   and tools to touch the host - filesystem **and** subprocess spawning
   (direct `node:fs` / `node:child_process` imports elsewhere are blocked by
   dependency-cruiser).
-- `src/tools/index.ts` - shared harness-tool plumbing: `ToolResult`,
+- `src/toolkit/index.ts` — shared harness-tool plumbing: `ToolResult`,
   `ToolSpec<TArgs, TResult>`, JSON-schema validation, and the `ToolRegistry`.
-- `src/tools/bash.ts` - the `bash` harness tool (persistent shell state, env
+- `src/toolkit/tools/bash.ts` — the `bash` harness tool (persistent shell state, env
   hiding).
 - `src/fuse-native.d.ts` - ambient typings for the untyped `fuse-native` package.
 - `Dockerfile` - container image: node:24, a non-root `agent` user, and the

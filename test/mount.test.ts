@@ -22,8 +22,8 @@ import {
 } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { mountSys, unmountSys } from "../src/mount.ts";
-import { ListDescriptor } from "../src/fs/list.ts";
-import { DescriptorRegistry } from "../src/fs/index.ts";
+import { ListDescriptor } from "../src/vfs/descriptors/list.ts";
+import { DescriptorRegistry } from "../src/vfs/index.ts";
 
 const mnt = "./sys-test";
 const file = `${mnt}/list`;

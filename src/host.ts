@@ -2,7 +2,7 @@
  * Host proxy — the single sanctioned gateway through which descriptors and
  * tools reach the host filesystem.
  *
- * Nothing under `src/tools/` or `src/fs/` may import `node:fs` /
+ * Nothing under `src/toolkit/` or `src/vfs/` may import `node:fs` /
  * `node:fs/promises` directly (enforced by dependency-cruiser); they are
  * expected to use this module instead. Centralizing host FS access here is
  * what makes it possible to add policy uniformly later — access logging,

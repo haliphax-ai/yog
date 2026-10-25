@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ListDescriptor } from "../src/fs/list.ts";
+import { ListDescriptor } from "../src/vfs/descriptors/list.ts";
 import {
   type DescriptorFile,
   DescriptorFlags,
@@ -15,7 +15,7 @@ import {
   ENOTEMPTY,
   EPERM,
   FILE_MODE,
-} from "../src/fs/index.ts";
+} from "../src/vfs/index.ts";
 
 /** A file descriptor with controllable flags, simple string content, and optional hooks. */
 function fileDescriptor(

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ListDescriptor } from "../src/fs/list.ts";
+import { ListDescriptor } from "../src/vfs/descriptors/list.ts";
 
 describe("ListDescriptor", () => {
   it("renders empty as empty string", () => {
