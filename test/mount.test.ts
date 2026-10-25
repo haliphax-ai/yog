@@ -11,15 +11,7 @@
 //
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
-import {
-  appendFile,
-  open,
-  readFile,
-  readdir,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { appendFile, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { mountSys, unmountSys } from "../src/mount.ts";
 import { ListDescriptor } from "../src/vfs/descriptors/list.ts";

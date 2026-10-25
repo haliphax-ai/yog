@@ -14,11 +14,7 @@
  */
 import * as fsp from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import {
-  spawn as nodeSpawn,
-  type ChildProcess,
-  type SpawnOptions,
-} from "node:child_process";
+import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 
 /** Copy a file, failing if the destination exists (mirrors `cp -n`). */
 export function copyFile(src: string, dest: string, flags = 0): Promise<void> {
@@ -31,12 +27,18 @@ export function rename(oldPath: string, newPath: string): Promise<void> {
 }
 
 /** Remove a file or (recursively) a directory tree. */
-export function rm(path: string, opts: { recursive?: boolean; force?: boolean } = {}): Promise<void> {
+export function rm(
+  path: string,
+  opts: { recursive?: boolean; force?: boolean } = {},
+): Promise<void> {
   return fsp.rm(path, opts);
 }
 
 /** Create a directory (parents included by default). */
-export function mkdir(path: string, opts: { recursive?: boolean; mode?: number } = {}): Promise<string | undefined> {
+export function mkdir(
+  path: string,
+  opts: { recursive?: boolean; mode?: number } = {},
+): Promise<string | undefined> {
   return fsp.mkdir(path, opts);
 }
 

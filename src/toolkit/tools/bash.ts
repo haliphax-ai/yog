@@ -159,9 +159,11 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
     "stdout/stderr/exitCode map to the shell process; they are null (with " +
     "`error` set) if the call failed validation or threw.",
 
-  schema: z.object({
-    script: z.string().describe("A bash script to execute."),
-  }).strict(),
+  schema: z
+    .object({
+      script: z.string().describe("A bash script to execute."),
+    })
+    .strict(),
 
   failure(error: string): BashResult {
     return { stdout: null, stderr: null, runtimeMs: null, exitCode: null, error };

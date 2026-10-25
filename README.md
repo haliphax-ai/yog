@@ -63,6 +63,7 @@ place a model id in a `model` file (host cwd) to override it.
   `fuse`/CLI packages.
 - `yog` - Docker launcher: runs the image under the `yog` AppArmor profile,
   with the FUSE device, `SYS_ADMIN`, and unconfined seccomp.
+
 </details>
 
 <details><summary>Dependency graph</summary><div><br />
@@ -76,7 +77,7 @@ Implement `DescriptorFile` (mode, size, `render`, `commit`, `reset`) and
 register it - with its mount path - on a `DescriptorRegistry`:
 
 ```ts
-const descriptors = new DescriptorRegistry(['/myfile', myDescriptor])
+const descriptors = new DescriptorRegistry(["/myfile", myDescriptor]);
 // mountSys(descriptors.buildOps())
 ```
 
@@ -86,7 +87,7 @@ Implement `ToolSpec<TArgs, TResult>` (definition, validate, failure, run) and
 add it to the registry:
 
 ```ts
-const registry = new ToolRegistry([bashTool, myTool])
+const registry = new ToolRegistry([bashTool, myTool]);
 // runTurn(client, modelId, messages, registry)
 ```
 
@@ -138,6 +139,7 @@ a persistent shell **and the harness's descriptors**:
   home rc, which the operator controls. The shell-state snapshot therefore
   reflects only what the agent itself set; no secret filtering happens at
   capture time (an agent-set `MY_API_TOKEN` persists fine).
+
 - **output**: `stdout: string | null`, `stderr: string | null`,
   `runtimeMs: number | null`, `exitCode: number | null`.
 

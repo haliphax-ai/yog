@@ -2,6 +2,8 @@
   "name": "yog",
   "version": "0.1.0",
   "description": "Virtual file system agent harness",
+  "license": "MIT",
+  "author": "haliphax <haliphax@gmail.com>",
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
@@ -13,14 +15,6 @@
     "depcruise:graph": "dependency-cruiser src --output-type mermaid",
     "prepare": "husky"
   },
-  "nano-staged": {
-    "**/*.ts": [
-      "oxfmt",
-      "oxlint"
-    ]
-  },
-  "author": "haliphax <haliphax@gmail.com>",
-  "license": "MIT",
   "dependencies": {
     "fuse-native": "^2.2.6",
     "openai": "^7.43.0",
@@ -36,5 +30,11 @@
     "oxlint": "^1.89.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"
+  },
+  "nano-staged": {
+    "**/*.ts": [
+      "oxfmt",
+      "oxlint"
+    ]
   }
 }

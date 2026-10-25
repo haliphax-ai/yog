@@ -114,9 +114,7 @@ export class DescriptorRegistry {
   }
 
   /** Resolve the destination folder+name for a normalized path (child may not exist). */
-  private resolveSlot(
-    path: string,
-  ): { parent: DescriptorFolder; name: string } | undefined {
+  private resolveSlot(path: string): { parent: DescriptorFolder; name: string } | undefined {
     const segments = path.split("/").filter(Boolean);
     if (segments.length === 0) return undefined;
     let parent: DescriptorFolder = this.root;
@@ -606,7 +604,10 @@ export class DescriptorRegistry {
           cb(EPERM);
           return;
         }
-        if (destSlot.parent !== this.root && (destSlot.parent.flags & DescriptorFlags.CanWrite) === 0) {
+        if (
+          destSlot.parent !== this.root &&
+          (destSlot.parent.flags & DescriptorFlags.CanWrite) === 0
+        ) {
           cb(EACCES);
           return;
         }

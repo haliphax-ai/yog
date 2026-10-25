@@ -4,12 +4,7 @@
  * `DescriptorChild` union. The mount path is NOT part of a node — it is
  * assigned by the registry/parent at registration time.
  */
-import {
-  DescriptorFlags,
-  type DescriptorKind,
-  DIR_MODE,
-  type WriteMode,
-} from "./constants.ts";
+import { DescriptorFlags, type DescriptorKind, DIR_MODE, type WriteMode } from "./constants.ts";
 
 /**
  * The parent node type: every feature shared by all descriptors lives here so

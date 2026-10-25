@@ -116,7 +116,9 @@ describe("host proxy", () => {
 });
 
 /** Run a child to completion, returning its exit code and captured stdout. */
-function collect(child: ReturnType<typeof spawn>): Promise<{ code: number | null; stdout: string }> {
+function collect(
+  child: ReturnType<typeof spawn>,
+): Promise<{ code: number | null; stdout: string }> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     child.stdout?.on("data", (c: Buffer) => chunks.push(c));

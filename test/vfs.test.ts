@@ -263,16 +263,12 @@ describe("rename behavior (emergent from descriptors)", () => {
 
   it("uses onOverwrite when declared, overriding CanOverwrite", async () => {
     let called = false;
-    const target = fileDescriptor(
-      DescriptorFlags.CanRead | DescriptorFlags.CanWrite,
-      "old",
-      {
-        onOverwrite: () => {
-          called = true;
-          return 0;
-        },
+    const target = fileDescriptor(DescriptorFlags.CanRead | DescriptorFlags.CanWrite, "old", {
+      onOverwrite: () => {
+        called = true;
+        return 0;
       },
-    );
+    });
     const registry = new DescriptorRegistry([
       ["/scratch", fileDescriptor(DescriptorFlags.CanRead, "new")],
       ["/target", target],
@@ -313,9 +309,7 @@ describe("rename behavior (emergent from descriptors)", () => {
   });
 
   it("denies repositioning a file without CanRename", async () => {
-    const registry = new DescriptorRegistry([
-      ["/a", fileDescriptor(DescriptorFlags.CanRead, "x")],
-    ]);
+    const registry = new DescriptorRegistry([["/a", fileDescriptor(DescriptorFlags.CanRead, "x")]]);
     const ops = registry.buildOps();
 
     const err = await new Promise<number | null>((resolve) => {
@@ -359,7 +353,9 @@ describe("rename behavior (emergent from descriptors)", () => {
 
   it("runs onChildRename on the destination folder", async () => {
     let notified = false;
-    const destFolder = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    const destFolder = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite,
+    });
     destFolder.onChildRename = (_name, _child) => {
       notified = true;
       return 0;
@@ -486,7 +482,9 @@ describe("node lifecycle hooks", () => {
 describe("shared child hooks", () => {
   it("calls onChildCreate when a child is registered into a folder", () => {
     const created: string[] = [];
-    const folder = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    const folder = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite,
+    });
     folder.onChildCreate = (name) => {
       created.push(name);
       return 0;
@@ -498,7 +496,9 @@ describe("shared child hooks", () => {
 
   it("calls onChildDelete before unlinking a child and can refuse", async () => {
     let notified = false;
-    const folder = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    const folder = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite,
+    });
     folder.onChildDelete = (_name, _child) => {
       notified = true;
       return EPERM;
@@ -567,7 +567,10 @@ describe("shared child hooks", () => {
 describe("mkdir", () => {
   it("creates a folder child under a writable parent", async () => {
     const registry = new DescriptorRegistry([
-      ["/sessions", new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite })],
+      [
+        "/sessions",
+        new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite }),
+      ],
     ]);
     const ops = registry.buildOps();
     const err = await new Promise<number | null>((resolve) => {
@@ -606,7 +609,9 @@ describe("mkdir", () => {
 
   it("fires onChildCreate on the parent", async () => {
     const created: string[] = [];
-    const folder = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    const folder = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite,
+    });
     folder.onChildCreate = (name) => {
       created.push(name);
       return 0;
@@ -625,7 +630,10 @@ describe("rmdir", () => {
     const registry = new DescriptorRegistry([
       ["/dir", new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite })],
     ]);
-    registry.add("/dir/empty", new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanRemove }));
+    registry.add(
+      "/dir/empty",
+      new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanRemove }),
+    );
     const ops = registry.buildOps();
     const err = await new Promise<number | null>((resolve) => {
       ops.rmdir!("/dir/empty", (e) => resolve(e));
@@ -672,12 +680,16 @@ describe("rmdir", () => {
   it("fires onDelete on the folder and onChildDelete on its parent", async () => {
     let deleted = false;
     let notified = false;
-    const child = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanRemove });
+    const child = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanRemove,
+    });
     child.onDelete = () => {
       deleted = true;
       return 0;
     };
-    const parent = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    const parent = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite,
+    });
     parent.onChildDelete = () => {
       notified = true;
       return 0;
@@ -696,7 +708,10 @@ describe("rmdir", () => {
 describe("unlink vs folders", () => {
   it("returns EISDIR when unlinking a folder", async () => {
     const registry = new DescriptorRegistry([
-      ["/dir", new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanRemove })],
+      [
+        "/dir",
+        new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanRemove }),
+      ],
     ]);
     const ops = registry.buildOps();
     const err = await new Promise<number | null>((resolve) => {
@@ -710,7 +725,9 @@ describe("unlink vs folders", () => {
 describe("folder rename guards", () => {
   it("notifies the source folder via onChildRename when a child leaves", async () => {
     let left = false;
-    const srcFolder = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    const srcFolder = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite,
+    });
     srcFolder.onChildRename = () => {
       left = true;
       return 0;
@@ -719,7 +736,10 @@ describe("folder rename guards", () => {
     srcFolder.add("m", movable);
     const registry = new DescriptorRegistry([
       ["/src", srcFolder],
-      ["/dest", new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite })],
+      [
+        "/dest",
+        new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite }),
+      ],
     ]);
     const ops = registry.buildOps();
     const err = await new Promise<number | null>((resolve) => {
@@ -735,7 +755,9 @@ describe("folder rename guards", () => {
     const outer = new DescriptorFolder({
       flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite | DescriptorFlags.CanRename,
     });
-    const inner = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    const inner = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite,
+    });
     outer.add("inner", inner);
     const registry = new DescriptorRegistry([["/outer", outer]]);
     const ops = registry.buildOps();
@@ -791,7 +813,9 @@ describe("folder rename guards", () => {
     const source = new DescriptorFolder({
       flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite | DescriptorFlags.CanRename,
     });
-    const target = new DescriptorFolder({ flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite });
+    const target = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead | DescriptorFlags.CanWrite,
+    });
     target.onOverwrite = () => {
       called = true;
       return 0;
