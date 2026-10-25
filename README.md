@@ -92,8 +92,8 @@ const registry = new ToolRegistry([bashTool, myTool])
 
 ## Virtual filesystem (`./sys`)
 
-The mount contains a single file, `list`, a window onto the harness's
-in-memory list:
+The mount contains a single file, `list`, which proxies access to an in-memory
+array in the harness process to demonstrate the descriptor tool concept:
 
 - **read** - outputs the list, one item per line.
 - **append open** (`>>`) - lines written are added to the list on close.
@@ -101,8 +101,10 @@ in-memory list:
   on close.
 - **delete** (`rm`) - always fails; the list is never removable.
 
-Permission model (enforced by the registry; the mount root is `0755` so the
-kernel does not pre-empt mutations):
+### Permission model
+
+Enforced by the registry; the mount root is `0755` so the kernel does not
+pre-empt mutations:
 
 - The `DescriptorRegistry` is the sole guard: creating non-registered entries,
   unlinking, renaming, and overwriting all resolve against the registered
@@ -118,7 +120,8 @@ kernel does not pre-empt mutations):
 
 ## Tools
 
-A single model tool for starters, `bash`:
+A single tool is provided to agents - `bash` - through which they interact with
+a persistent shell **and the harness's descriptors**:
 
 - **input**: `script: string` (required; no extra fields allowed). The
   script runs via `eval` inside a wrapper shell, giving it full bash syntax -
