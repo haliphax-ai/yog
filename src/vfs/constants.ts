@@ -24,8 +24,14 @@ export const DIR_MODE = 0o40755;
 /** Base mode for regular-file descriptors (owner read/write, world read). */
 export const FILE_MODE = 0o100644;
 
-export const OWNER_UID = process.getuid?.() ?? 0;
-export const OWNER_GID = process.getgid?.() ?? 0;
+/**
+ * The agent user the descriptors are served as. The daemon learns the agent's
+ * uid/gid at spawn; when it runs unprivileged (e.g. the agent user itself)
+ * this falls back to the current process ids. Descriptors may declare their
+ * own uid/gid; the registry defaults to these.
+ */
+export const AGENT_UID = Number(process.env["YOG_AGENT_UID"] ?? process.getuid?.() ?? 0);
+export const AGENT_GID = Number(process.env["YOG_AGENT_GID"] ?? process.getgid?.() ?? 0);
 
 /** Open access mode classification. */
 export type WriteMode = "read" | "append" | "replace";

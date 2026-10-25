@@ -12,13 +12,13 @@ type FuseCtor = new (mnt: string, ops: FuseOps, opts?: Record<string, unknown>) 
  */
 export async function mountSys(
   ops: FuseOps,
-  mnt = "./sys",
+  mnt = "/yog",
   extraOpts: Record<string, unknown> = {},
 ): Promise<Fuse> {
   const mod = (await import("fuse-native")) as unknown as { default: FuseCtor };
   const FuseCtor = mod.default;
 
-  const fuse = new FuseCtor(mnt, ops, {
+  const mountOpts: Record<string, unknown> = {
     mkdir: true,
     force: true,
     // Let the VFS enforce the mode bits we serve: the mount directory is
@@ -27,7 +27,15 @@ export async function mountSys(
     // the harness user and remains writable.
     defaultPermissions: true,
     ...extraOpts,
-  });
+  };
+  // In the container (daemon mounts on behalf of the agent) other users must
+  // reach the mount; enabled via the YOG_ALLOW_OTHER env (the image writes
+  // user_allow_other into /etc/fuse.conf).
+  if (process.env["YOG_ALLOW_OTHER"] === "1") {
+    mountOpts["allowOther"] = true;
+  }
+
+  const fuse = new FuseCtor(mnt, ops, mountOpts);
 
   return new Promise((resolve, reject) => {
     fuse.mount((err) => (err ? reject(err) : resolve(fuse)));

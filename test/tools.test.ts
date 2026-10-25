@@ -1,12 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ToolRegistry, toFunctionTool } from "../src/toolkit/index.ts";
 import { bashTool } from "../src/toolkit/tools/bash.ts";
+import { shutdownAllWorkers } from "../src/worker/index.ts";
 
 const registry = new ToolRegistry([bashTool]);
 const bashDefinition = toFunctionTool(bashTool);
+
+afterAll(async () => {
+  await shutdownAllWorkers();
+});
 
 describe("tool definitions", () => {
   it("exposes a single bash tool for starters", () => {

@@ -19,8 +19,8 @@ import {
   ENOTDIR,
   ENOTEMPTY,
   EPERM,
-  OWNER_GID,
-  OWNER_UID,
+  AGENT_GID,
+  AGENT_UID,
   type WriteMode,
 } from "./constants.ts";
 import { DescriptorFolder, type DescriptorChild, type DescriptorFile } from "./node.ts";
@@ -178,8 +178,8 @@ export class DescriptorRegistry {
             mode: DIR_MODE,
             size: this.root.size,
             nlink: 2,
-            uid: OWNER_UID,
-            gid: OWNER_GID,
+            uid: AGENT_UID,
+            gid: AGENT_GID,
           });
           return;
         }
@@ -193,8 +193,8 @@ export class DescriptorRegistry {
             mode: node.mode,
             size: node.size ?? 0,
             nlink: 2,
-            uid: OWNER_UID,
-            gid: OWNER_GID,
+            uid: node.uid ?? AGENT_UID,
+            gid: node.gid ?? AGENT_GID,
           });
           return;
         }
@@ -202,8 +202,8 @@ export class DescriptorRegistry {
           mode: node.mode,
           size: node.size ?? 0,
           nlink: 1,
-          uid: OWNER_UID,
-          gid: OWNER_GID,
+          uid: node.uid ?? AGENT_UID,
+          gid: node.gid ?? AGENT_GID,
         });
       },
 

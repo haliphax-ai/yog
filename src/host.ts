@@ -107,3 +107,6 @@ export function spawn(
   }
   return options === undefined ? nodeSpawn(command) : nodeSpawn(command, options);
 }
+
+/** Re-export child_process types so callers need not import node:child_process for types. */
+export type { ChildProcess, SpawnOptions } from "node:child_process";
