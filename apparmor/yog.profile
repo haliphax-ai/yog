@@ -21,7 +21,8 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   # Capabilities needed for FUSE mounting (used via the setuid fusermount
   # helper; kept here so direct mount attempts also behave) and for the
   # daemon/agent split (the harness spawns its bash worker as the agent user).
-  capability mount,
+  # Note: there is no `capability mount` — mount(2) is gated by sys_admin and
+  # the mount/umount rules below.
   capability sys_admin,
   capability setuid,
   capability setgid,
