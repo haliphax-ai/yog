@@ -32,7 +32,9 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   # unconfined (`Ux`) so the model can execute arbitrary commands without
   # enumerating every utility here; fusermount likewise escapes so the setuid
   # helper can perform the mount.
-  /app/** r,
+  # /app contains native addons (turso/libsql .node bindings) loaded via
+  # dlopen, which requires mmap (`m`) as well as read (`r`).
+  /app/** rm,
   /usr/bin/bash Ux,
   /usr/bin/{sh,dash,env,sed,grep,cat,echo,ls,ps,tar,gzip,bzip2,xz,find,head,tail,cut,tr,awk,sort,uniq,wc,date,hostname,id,whoami,dirname,basename,mkdir,rmdir,rm,cp,mv,ln,chmod,chown,touch,file,stat,du,df,mount,umount,curl,wget,git,jq,rg,gpg,openssl,tee,printf,seq,nohup,setsid,setpriv,capsh} ix,
   /usr/local/bin/node ix,
