@@ -2,9 +2,19 @@
 set -eo pipefail
 
 model="nvidia/nemotron-3-ultra-550b-a55b:free"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 [[ ! -f "model" ]] || model="$(cat model)"
 [[ ! -f ".env" ]] || source .env
+
+# Seccomp: ship a custom profile (seccomp/yog.json) = Docker's default + an
+# unconditional allowance for mount/umount2 (FUSE). Set YOG_SECCOMP=unconfined
+# to fall back to the old behavior.
+if [[ "${YOG_SECCOMP:-}" == "unconfined" ]]; then
+  seccomp_opt="--security-opt seccomp=unconfined"
+else
+  seccomp_opt="--security-opt seccomp=$here/seccomp/yog.json"
+fi
 
 # The daemon home (/home/yog) holds the agent state database. It lives on a
 # named volume: the turso/libsql file locking misbehaves on Docker's overlay
@@ -12,7 +22,7 @@ model="nvidia/nemotron-3-ultra-550b-a55b:free"
 # runs. Override the db path with YOG_STATE_DB if you want it elsewhere.
 exec docker run \
   --rm \
-  --security-opt seccomp=unconfined \
+  $seccomp_opt \
   --security-opt apparmor=yog \
   --device /dev/fuse \
   --cap-add SYS_ADMIN \

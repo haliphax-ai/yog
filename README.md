@@ -209,6 +209,11 @@ The `fuse-native` addon needs a FUSE device and mount privileges:
 - Mounting requires `--cap-add SYS_ADMIN`, and the `fuse` (libfuse2)
   package so the setuid `fusermount` helper exists; both are set up by the
   image. Mounts go through `fusermount` as the `yog` user into `/yog`.
+- Seccomp is enabled with a custom profile (`seccomp/yog.json`): Docker's
+  default profile plus an unconditional allowance for `mount`/`umount2`
+  (the default only allows them with CAP_SYS_ADMIN, so this is belt-and-
+  suspenders for the FUSE mount). The launcher references the file on the
+  host; set `YOG_SECCOMP=unconfined` to fall back to the old behavior.
 - The worker's drop to the `agent` user requires the harness process to hold
   effective `CAP_SETUID`/`CAP_SETGID`. The image's entrypoint starts as root
   and uses `setpriv` to drop to the `yog` daemon user while granting ambient
