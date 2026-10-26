@@ -38,6 +38,9 @@ ENV YOG_ALLOW_OTHER=1 \
 COPY . /app
 RUN cd /app && npm ci --omit=dev --ignore-scripts && chmod +x /app/entrypoint.sh
 WORKDIR /home/yog
+# The daemon home holds the agent state db; place it on a volume (see the
+# `yog` launcher) so turso's file locking works and state persists.
+VOLUME ["/home/yog"]
 # The container starts as root only so the entrypoint can setpriv down to the
 # `yog` daemon user with ambient CAP_SETUID/CAP_SETGID (needed to spawn the
 # bash worker as the `agent` user). The harness itself never runs as root.

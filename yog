@@ -6,6 +6,10 @@ model="nvidia/nemotron-3-ultra-550b-a55b:free"
 [[ ! -f "model" ]] || model="$(cat model)"
 [[ ! -f ".env" ]] || source .env
 
+# The daemon home (/home/yog) holds the agent state database. It lives on a
+# named volume: the turso/libsql file locking misbehaves on Docker's overlay
+# filesystem (EACCES on flock unlock) and a volume also persists state across
+# runs. Override the db path with YOG_STATE_DB if you want it elsewhere.
 exec docker run \
   --rm \
   --security-opt seccomp=unconfined \
@@ -14,7 +18,9 @@ exec docker run \
   --cap-add SYS_ADMIN \
   --cap-add SETUID \
   --cap-add SETGID \
+  --mount type=volume,source=yog-home,target=/home/yog \
   -e OPENAI_BASE_URL \
   -e OPENAI_API_KEY \
+  -e YOG_STATE_DB \
   --name yog \
   -t yog run "$model" "$@"

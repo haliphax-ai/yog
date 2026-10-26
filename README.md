@@ -217,8 +217,18 @@ The `fuse-native` addon needs a FUSE device and mount privileges:
   launcher still adds `--cap-add SETUID` and `--cap-add SETGID` to put those
   caps in the container's bounding set.
 - The harness's state database defaults to `$HOME/.agentfs/yog.db`; override
-  with `YOG_STATE_DB`. The `/yog` mountpoint must exist and be readable/
-  searchable by the harness user (the image creates and owns it).
+  with `YOG_STATE_DB` (the launcher passes it through). The `/yog` mountpoint
+  must exist and be readable/searchable by the harness user (the image
+  creates and owns it).
+- The daemon home `/home/yog` (which holds the state db) is mounted as the
+  named volume `yog-home` by the launcher. This is required in practice: the
+  turso/libsql native binding's file locking fails with
+  `Failed to unlock file: Permission denied` when the database sits on
+  Docker's overlay filesystem. If you see that panic, ensure the volume mount
+  is present (or set `YOG_STATE_DB` to a path on a real volume); to confirm
+  the cause, rerun with `--security-opt apparmor=unconfined` — AppArmor
+  denies would disappear there, whereas an overlay-filesystem problem would
+  not.
 - On hosts enforcing AppArmor/seccomp, the default profiles block mount
   syscalls. The image is therefore run with:
 
