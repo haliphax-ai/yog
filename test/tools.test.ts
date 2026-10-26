@@ -1,16 +1,23 @@
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ToolRegistry, toFunctionTool } from "../src/toolkit/index.ts";
-import { bashTool } from "../src/toolkit/tools/bash.ts";
-import { shutdownAllWorkers } from "../src/worker/index.ts";
+import { bashTool, setBashExecutor, toFunctionTool, ToolRegistry } from "../src/toolkit/index.ts";
+import { WorkerClient } from "../src/worker/index.ts";
 
 const registry = new ToolRegistry([bashTool]);
 const bashDefinition = toFunctionTool(bashTool);
 
+let worker: WorkerClient | undefined;
+
+beforeAll(async () => {
+  // Wire a real worker as the bash executor (mirrors the composition root).
+  worker = await WorkerClient.start();
+  setBashExecutor((script, opts) => worker!.runBash(script, opts?.stateDir, opts?.restore));
+});
+
 afterAll(async () => {
-  await shutdownAllWorkers();
+  await worker?.close().catch(() => {});
 });
 
 describe("tool definitions", () => {

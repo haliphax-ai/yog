@@ -13,6 +13,10 @@
  *   src/toolkit/**    leaf domain: harness tools (may use host for out-of-VFS action)
  *   src/worker/**     worker process + JSONL client (infra; uses host only)
  *   src/state/**      agentfs-backed home/state (the only agentfs-SDK importer)
+ *
+ * Every domain exposes a single public door: its `index.ts` barrel. Modules
+ * outside a domain may only import its barrel — never its internals.
+ *
  *   test/**           may import any src/**, never the reverse
  *
  * Key invariant: descriptors and tools reach the host (filesystem AND
@@ -125,6 +129,33 @@ module.exports = {
       severity: "error",
       from: { path: "^src/worker/" },
       to: { path: "^src/(vfs/|toolkit/|state/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)" },
+    },
+
+    // Domain encapsulation: anything outside a domain may only import its
+    // barrel (`index.ts`), never its internals. One rule per domain.
+    {
+      name: "vfs-entry-only",
+      severity: "error",
+      from: { path: "^src/(?!vfs/)" },
+      to: { path: "^src/vfs/(?!index\\.ts$)" },
+    },
+    {
+      name: "toolkit-entry-only",
+      severity: "error",
+      from: { path: "^src/(?!toolkit/)" },
+      to: { path: "^src/toolkit/(?!index\\.ts$)" },
+    },
+    {
+      name: "worker-entry-only",
+      severity: "error",
+      from: { path: "^src/(?!worker/)" },
+      to: { path: "^src/worker/(?!index\\.ts$)" },
+    },
+    {
+      name: "state-entry-only",
+      severity: "error",
+      from: { path: "^src/(?!state/)" },
+      to: { path: "^src/state/(?!index\\.ts$)" },
     },
 
     // Production code never imports tests.

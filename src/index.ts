@@ -11,7 +11,8 @@ import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import { tools, descriptors } from "./register.ts";
 import { AgentFSState, newSessionId } from "./state/index.ts";
-import { setShellStateProvider } from "./toolkit/tools/bash.ts";
+import { setBashExecutor, setShellStateProvider } from "./toolkit/index.ts";
+import { shutdownAllWorkers, WorkerClient } from "./worker/index.ts";
 import { parseCliArgs } from "./cli.ts";
 import { mountSys, unmountSys } from "./mount.ts";
 import { runTurn } from "./turn.ts";
@@ -69,6 +70,19 @@ async function main(): Promise<void> {
       : undefined,
   );
 
+  // The worker executes bash on the harness's behalf. The composition root
+  // owns its lifecycle and injects it into the bash tool — the tool layer
+  // never talks to the worker directly.
+  let worker: WorkerClient | undefined;
+  try {
+    worker = await WorkerClient.start();
+    setBashExecutor((script, opts) => worker!.runBash(script, opts?.stateDir, opts?.restore));
+  } catch (err) {
+    console.error(
+      `warning: starting worker failed (${(err as Error).message}); bash tool unavailable`,
+    );
+  }
+
   // Env vars are used when set, for OpenAI-compatible proxies; otherwise the
   // SDK defaults (OPENAI_BASE_URL / OPENAI_API_KEY) apply.
   const client = new OpenAI({
@@ -109,6 +123,7 @@ async function main(): Promise<void> {
     if (state) {
       await state.close().catch(() => {});
     }
+    await shutdownAllWorkers().catch(() => {});
     process.exitCode = code;
     setTimeout(() => process.exit(code), 250).unref();
   }

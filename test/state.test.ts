@@ -2,8 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentFSState } from "../src/state/agentfs.ts";
-import { newSessionId } from "../src/state/session.ts";
+import { AgentFSState, newSessionId } from "../src/state/index.ts";
 
 const dirs: string[] = [];
 

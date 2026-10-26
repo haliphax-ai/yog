@@ -2,13 +2,13 @@ import { afterAll, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WorkerClient } from "../src/worker/client.ts";
 import {
+  WorkerClient,
   decodeFrame,
   encodeFrame,
   type BashRunOk,
   type WorkerResponse,
-} from "../src/worker/protocol.ts";
+} from "../src/worker/index.ts";
 
 const clients = new Set<WorkerClient>();
 

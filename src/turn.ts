@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import type { ToolRegistry } from "./toolkit/index.ts";
-import type { ToolCallRecord } from "./state/agentfs.ts";
+import type { ToolCallRecord } from "./state/index.ts";
 
 /**
  * Agent turn engine: streams one chat completion, executes any tool calls it

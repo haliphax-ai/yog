@@ -1,11 +1,5 @@
-import {
-  type DescriptorChild,
-  type DescriptorFile,
-  DescriptorFlags,
-  EACCES,
-  EISDIR,
-  FILE_MODE,
-} from "../index.ts";
+import { DescriptorFlags, EACCES, EISDIR, FILE_MODE } from "../constants.ts";
+import { type DescriptorChild, type DescriptorFile } from "../node.ts";
 
 /**
  * The list descriptor.
