@@ -33,7 +33,7 @@
 // in one generic regex (no backreferences), so the entry-only rule family is
 // generated per domain from this list; adding a new domain here extends the
 // same guarantee to it automatically.
-const DOMAINS = ["vfs", "toolkit", "worker", "state"];
+const DOMAINS = ["vfs", "toolkit", "worker", "state", "server"];
 
 module.exports = {
   options: {
