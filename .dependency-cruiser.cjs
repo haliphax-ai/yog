@@ -14,8 +14,10 @@
  *   src/worker/**     worker process + JSONL client (infra; uses host only)
  *   src/state/**      agentfs-backed home/state (the only agentfs-SDK importer)
  *
- * Every domain exposes a single public door: its `index.ts` barrel. Modules
- * outside a domain may only import its barrel — never its internals.
+ * Encapsulation invariant: no module reaches into another domain's internals.
+ * Every domain exposes a single public door — its `index.ts` barrel — and
+ * modules outside a domain may only import that barrel (enforced by the
+ * generated `domain-entry-only:*` rule family, see DOMAINS below).
  *
  *   test/**           may import any src/**, never the reverse
  *
@@ -24,6 +26,14 @@
  * node:child_process imports anywhere in src/ other than host are rule
  * violations.
  */
+// Domains that each expose a single public door (`index.ts`). A module
+// outside a domain may only import its barrel — never its internals.
+// dependency-cruiser cannot compare the importer's directory with the target's
+// in one generic regex (no backreferences), so the entry-only rule family is
+// generated per domain from this list; adding a new domain here extends the
+// same guarantee to it automatically.
+const DOMAINS = ["vfs", "toolkit", "worker", "state"];
+
 module.exports = {
   options: {
     exclude: { path: "(node_modules|\\.git|dist|coverage|sys|sys-test|.harness|\\.serena)" },
@@ -131,32 +141,14 @@ module.exports = {
       to: { path: "^src/(vfs/|toolkit/|state/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)" },
     },
 
-    // Domain encapsulation: anything outside a domain may only import its
-    // barrel (`index.ts`), never its internals. One rule per domain.
-    {
-      name: "vfs-entry-only",
+    // Domain encapsulation: no module reaches into another domain's internals.
+    // Anything outside a domain may only import its barrel (`index.ts`).
+    ...DOMAINS.map((domain) => ({
+      name: `domain-entry-only:${domain}`,
       severity: "error",
-      from: { path: "^src/(?!vfs/)" },
-      to: { path: "^src/vfs/(?!index\\.ts$)" },
-    },
-    {
-      name: "toolkit-entry-only",
-      severity: "error",
-      from: { path: "^src/(?!toolkit/)" },
-      to: { path: "^src/toolkit/(?!index\\.ts$)" },
-    },
-    {
-      name: "worker-entry-only",
-      severity: "error",
-      from: { path: "^src/(?!worker/)" },
-      to: { path: "^src/worker/(?!index\\.ts$)" },
-    },
-    {
-      name: "state-entry-only",
-      severity: "error",
-      from: { path: "^src/(?!state/)" },
-      to: { path: "^src/state/(?!index\\.ts$)" },
-    },
+      from: { path: `^src/(?!${domain}/)` },
+      to: { path: `^src/${domain}/(?!index\\.ts$)` },
+    })),
 
     // Production code never imports tests.
     {
