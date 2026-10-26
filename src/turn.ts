@@ -3,11 +3,23 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import type { ToolRegistry } from "./toolkit/index.ts";
 import type { ToolCallRecord } from "./state/index.ts";
 
+import { newSessionId } from "./state/index.ts";
+import {
+  StdoutSink,
+  TURN_EVENT_VERSION,
+  type TurnEventDataMap,
+  type TurnEvent,
+  type TurnEventType,
+  type TurnSink,
+} from "./turn/sink.ts";
+
 /**
  * Agent turn engine: streams one chat completion, executes any tool calls it
  * contains (feeding results back in), and repeats until the model answers
  * without tools. This is the loop every agent run funnels through as the
- * harness grows.
+ * harness grows. Every observable moment — deltas, tool activity, terminal
+ * states — is emitted as a typed `TurnEvent` on a transport-agnostic
+ * `TurnSink`; the default `StdoutSink` reproduces the original stdout bytes.
  */
 export interface TurnOptions {
   /** Abort the in-flight model stream (used for graceful SIGINT/SIGTERM). */
@@ -18,103 +30,181 @@ export interface TurnOptions {
   recorder?: { record(rec: ToolCallRecord): Promise<void> };
 }
 
-export async function runTurn(
+/**
+ * The turn loop, bound to a `TurnSink`: every observable moment (stream
+ * deltas, tool activity, terminal states) is emitted as a typed event to the
+ * sink instead of being written to stdout directly. The engine awaits every
+ * `emit`, so slow transports exert backpressure on the loop.
+ */
+export class TurnEngine {
+  private readonly sink: TurnSink;
+
+  constructor(sink: TurnSink) {
+    this.sink = sink;
+  }
+
+  async run(
+    client: OpenAI,
+    modelId: string,
+    messages: ChatCompletionMessageParam[],
+    tools: ToolRegistry,
+    opts: TurnOptions = {},
+  ): Promise<void> {
+    // Turn identity and envelope ids are per-turn: the contract guarantees
+    // monotonic ids within a turn, not across turns.
+    const turnId = newSessionId();
+    const turnStartedAt = Date.now();
+    let nextEventId = 0;
+    const emit = <T extends TurnEventType>(type: T, data: TurnEventDataMap[T]): Promise<void> =>
+      this.sink.emit({
+        id: nextEventId++,
+        type,
+        version: TURN_EVENT_VERSION,
+        ts: Date.now(),
+        data,
+      } as TurnEvent<T>);
+
+    try {
+      await emit("turn.started", { turnId, model: modelId, ts: Date.now() });
+
+      // Bound the tool-call loop so a misbehaving model cannot spin forever.
+      for (let round = 0; round < 16; round++) {
+        const stream = await client.chat.completions.create({
+          model: modelId,
+          messages,
+          tools: tools.definitions,
+          stream: true,
+          ...(opts.signal ? { signal: opts.signal } : {}),
+        });
+
+        const toolCalls = new Map<number, { id: string; name: string; args: string }>();
+
+        for await (const chunk of stream) {
+          const delta = chunk.choices[0]?.delta;
+          if (!delta) continue;
+
+          if (delta.content) {
+            await emit("message.delta", { text: delta.content });
+          }
+
+          for (const tc of delta.tool_calls ?? []) {
+            const index = tc.index ?? 0;
+            const entry = toolCalls.get(index) ?? { id: "", name: "", args: "" };
+            if (tc.id) entry.id = tc.id;
+            if (tc.function?.name) entry.name = tc.function.name;
+            if (tc.function?.arguments) entry.args += tc.function.arguments;
+            toolCalls.set(index, entry);
+          }
+        }
+
+        if (toolCalls.size === 0) {
+          await emit("turn.finished", {
+            turnId,
+            durationMs: Date.now() - turnStartedAt,
+          });
+          return;
+        }
+
+        const ordered = [...toolCalls.entries()].sort(([a], [b]) => a - b);
+
+        // Replay the assistant turn, then append one tool message per call.
+        messages.push({
+          role: "assistant",
+          content: null,
+          tool_calls: ordered.map(([i, tc]) => ({
+            id: tc.id || `call_${i}`,
+            type: "function" as const,
+            function: { name: tc.name, arguments: tc.args },
+          })),
+        });
+
+        for (const [i, tc] of ordered) {
+          await emit("tool.call", {
+            id: tc.id || `call_${i}`,
+            name: tc.name,
+            args: tc.args,
+          });
+
+          const startedAt = Date.now();
+          const result = await tools.execute(tc.name, tc.args);
+          const completedAt = Date.now();
+          // Tool activity goes to stderr so stdout remains a clean response stream.
+          console.error(
+            `[tool] ${tc.name}(${tc.args}) -> ` +
+              (result === undefined
+                ? "unknown tool"
+                : result["error"]
+                  ? `error: ${result["error"]}`
+                  : `exitCode=${result["exitCode"]} runtimeMs=${result["runtimeMs"]}`),
+          );
+
+          const toolError = result?.["error"] as string | undefined;
+
+          await emit("tool.result", {
+            id: tc.id || `call_${i}`,
+            name: tc.name,
+            ok: result !== undefined && toolError === undefined,
+            result,
+            error: toolError ?? (result === undefined ? `unknown tool "${tc.name}"` : undefined),
+          });
+          if (opts.recorder && opts.sessionId) {
+            try {
+              await opts.recorder.record({
+                name: tc.name,
+                parameters: tc.args,
+                result: toolError === undefined && result !== undefined ? result : undefined,
+                error: toolError,
+                startedAt,
+                completedAt,
+                durationMs: completedAt - startedAt,
+                sessionId: opts.sessionId,
+              });
+            } catch (err) {
+              // Non-fatal by contract: an audit failure must never kill the turn.
+              console.error(`[audit] recorder failed: ${(err as Error).message}`);
+            }
+          }
+
+          const payload =
+            result === undefined
+              ? JSON.stringify({ error: `unknown tool "${tc.name}"` })
+              : JSON.stringify(result);
+          messages.push({
+            role: "tool",
+            tool_call_id: tc.id || `call_${i}`,
+            content: payload,
+          });
+        }
+      }
+    } catch (err) {
+      if (opts.signal?.aborted) {
+        // Abort: propagate untouched so the caller maps it to the signal exit code.
+        throw err;
+      }
+      // Terminal error: emit first (so transports see it), then rethrow so the
+      // composition root keeps its existing exit-code handling.
+      await emit("error", {
+        code: "provider_error",
+        message: err instanceof Error ? err.message : String(err),
+        ...(err instanceof Error ? { details: { name: err.name, stack: err.stack } } : {}),
+      });
+      throw err;
+    }
+  }
+}
+
+/**
+ * Convenience wrapper for callers that just want a turn run with the default
+ * stdout sink; the composition root uses `TurnEngine` directly so the sink
+ * is explicit.
+ */
+export function runTurn(
   client: OpenAI,
   modelId: string,
   messages: ChatCompletionMessageParam[],
   tools: ToolRegistry,
   opts: TurnOptions = {},
+  sink?: TurnSink,
 ): Promise<void> {
-  // Bound the tool-call loop so a misbehaving model cannot spin forever.
-  for (let round = 0; round < 16; round++) {
-    const stream = await client.chat.completions.create({
-      model: modelId,
-      messages,
-      tools: tools.definitions,
-      stream: true,
-      ...(opts.signal ? { signal: opts.signal } : {}),
-    });
-
-    const toolCalls = new Map<number, { id: string; name: string; args: string }>();
-
-    for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta;
-      if (!delta) continue;
-
-      if (delta.content) {
-        process.stdout.write(delta.content);
-      }
-
-      for (const tc of delta.tool_calls ?? []) {
-        const index = tc.index ?? 0;
-        const entry = toolCalls.get(index) ?? { id: "", name: "", args: "" };
-        if (tc.id) entry.id = tc.id;
-        if (tc.function?.name) entry.name = tc.function.name;
-        if (tc.function?.arguments) entry.args += tc.function.arguments;
-        toolCalls.set(index, entry);
-      }
-    }
-
-    if (toolCalls.size === 0) {
-      process.stdout.write("\n");
-      return;
-    }
-
-    const ordered = [...toolCalls.entries()].sort(([a], [b]) => a - b);
-
-    // Replay the assistant turn, then append one tool message per call.
-    messages.push({
-      role: "assistant",
-      content: null,
-      tool_calls: ordered.map(([i, tc]) => ({
-        id: tc.id || `call_${i}`,
-        type: "function" as const,
-        function: { name: tc.name, arguments: tc.args },
-      })),
-    });
-
-    for (const [i, tc] of ordered) {
-      const startedAt = Date.now();
-      const result = await tools.execute(tc.name, tc.args);
-      const completedAt = Date.now();
-      // Tool activity goes to stderr so stdout remains a clean response stream.
-      console.error(
-        `[tool] ${tc.name}(${tc.args}) -> ` +
-          (result === undefined
-            ? "unknown tool"
-            : result["error"]
-              ? `error: ${result["error"]}`
-              : `exitCode=${result["exitCode"]} runtimeMs=${result["runtimeMs"]}`),
-      );
-
-      const toolError = result?.["error"] as string | undefined;
-      if (opts.recorder && opts.sessionId) {
-        try {
-          await opts.recorder.record({
-            name: tc.name,
-            parameters: tc.args,
-            result: toolError === undefined && result !== undefined ? result : undefined,
-            error: toolError,
-            startedAt,
-            completedAt,
-            durationMs: completedAt - startedAt,
-            sessionId: opts.sessionId,
-          });
-        } catch (err) {
-          // Non-fatal by contract: an audit failure must never kill the turn.
-          console.error(`[audit] recorder failed: ${(err as Error).message}`);
-        }
-      }
-
-      const payload =
-        result === undefined
-          ? JSON.stringify({ error: `unknown tool "${tc.name}"` })
-          : JSON.stringify(result);
-      messages.push({
-        role: "tool",
-        tool_call_id: tc.id || `call_${i}`,
-        content: payload,
-      });
-    }
-  }
+  return new TurnEngine(sink ?? new StdoutSink()).run(client, modelId, messages, tools, opts);
 }

@@ -16,7 +16,8 @@ import { setBashExecutor, setShellStateProvider } from "./toolkit/index.ts";
 import { shutdownAllWorkers, WorkerClient } from "./worker/index.ts";
 import { parseCliArgs } from "./cli.ts";
 import { mountSys, unmountSys } from "./mount.ts";
-import { runTurn } from "./turn.ts";
+import { TurnEngine } from "./turn.ts";
+import { StdoutSink } from "./turn/sink.ts";
 import { exists, mkdir, readdir, stat } from "./host.ts";
 
 /** The path the virtual filesystem is mounted at. */
@@ -159,7 +160,7 @@ async function main(): Promise<void> {
 
   let code = 0;
   try {
-    await runTurn(client, modelId, messages, tools, {
+    await new TurnEngine(new StdoutSink()).run(client, modelId, messages, tools, {
       signal: abortController.signal,
       sessionId,
       ...(state ? { recorder: { record: (rec) => state.recordToolCall(rec) } } : {}),
