@@ -8,6 +8,7 @@
   "main": "src/index.ts",
   "scripts": {
     "start": "node src/index.ts",
+    "start:serve": "node src/index.ts serve",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --reporter=dot --silent=true --tagsFilter \"!mount\" .",
     "test:mount": "vitest run --tagsFilter mount test/mount.test.ts",

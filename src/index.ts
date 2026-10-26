@@ -2,10 +2,11 @@
  * fuse-overlay-harness — agent harness with a virtual FUSE filesystem.
  *
  * Usage: yog run <modelId> "<prompt>"
+ *        yog serve [--host <addr>] [--port <n>]
  *
- * Mounts /yog (containing the virtual `list` file) and runs a streaming
+ * `run` mounts /yog (containing the virtual `list` file) and runs a streaming
  * chat completion with tools against the given model, exiting when the stream
- * ends.
+ * ends. `serve` starts the long-lived HTTP/SSE daemon (see server/serve.ts).
  */
 import { homedir } from "node:os";
 import OpenAI from "openai";
@@ -14,16 +15,17 @@ import { tools, descriptors } from "./register.ts";
 import { AgentFSState, DEFAULT_AGENT_ID, newSessionId } from "./state/index.ts";
 import { setBashExecutor, setShellStateProvider } from "./toolkit/index.ts";
 import { shutdownAllWorkers, WorkerClient } from "./worker/index.ts";
-import { parseCliArgs } from "./cli.ts";
+import { parseCliArgs, parseServeArgs } from "./cli.ts";
 import { mountSys, unmountSys } from "./mount.ts";
 import { TurnEngine } from "./turn.ts";
 import { StdoutSink } from "./turn/sink.ts";
 import { exists, mkdir, readdir, stat } from "./host.ts";
+import { createDaemon } from "./server/index.ts";
 
 /** The path the virtual filesystem is mounted at. */
 const MOUNT_POINT = "/yog";
 
-const USAGE = 'usage: yog run <modelId> "<prompt>"';
+const USAGE = 'usage: yog run <modelId> "<prompt>"\n       yog serve [--host <addr>] [--port <n>]';
 
 /**
  * Termination handling. The first SIGINT/SIGTERM aborts the in-flight model
@@ -79,8 +81,25 @@ async function ensureMountPoint(mnt: string): Promise<void> {
   await readdir(mnt);
 }
 
-async function main(): Promise<void> {
-  const parsed = parseCliArgs(process.argv.slice(2));
+/** Start the long-lived HTTP/SSE daemon; resolves only on shutdown. */
+async function serve(argv: readonly string[]): Promise<void> {
+  const parsed = parseServeArgs(argv);
+  if ("error" in parsed) {
+    console.error(parsed.error);
+    console.error(USAGE);
+    process.exit(1);
+  }
+  // createDaemon wires signals (SIGINT/SIGTERM → graceful shutdown → exit),
+  // so the process stays alive on the listening server's event loop.
+  const daemon = await createDaemon({
+    ...(parsed.host !== undefined ? { host: parsed.host } : {}),
+    ...(parsed.port !== undefined ? { port: parsed.port } : {}),
+  });
+  console.error(`[yog] serve listening at ${daemon.url}`);
+}
+
+async function run(argv: readonly string[]): Promise<void> {
+  const parsed = parseCliArgs(argv);
   if ("error" in parsed) {
     console.error(parsed.error);
     console.error(USAGE);
@@ -185,8 +204,17 @@ async function main(): Promise<void> {
   }
 }
 
-process.on("SIGINT", () => requestExit("SIGINT"));
-process.on("SIGTERM", () => requestExit("SIGTERM"));
+async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  if (argv[0] === "serve") {
+    // serve owns its own signal handling (inside createDaemon).
+    await serve(argv);
+    return;
+  }
+  process.on("SIGINT", () => requestExit("SIGINT"));
+  process.on("SIGTERM", () => requestExit("SIGTERM"));
+  await run(argv);
+}
 
 main().catch((err) => {
   console.error(err instanceof Error ? (err.stack ?? err.message) : String(err));
