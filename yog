@@ -12,7 +12,8 @@ exec docker run \
   --security-opt apparmor=yog \
   --device /dev/fuse \
   --cap-add SYS_ADMIN \
-  --cap-add SETUID,SETGID \
+  --cap-add SETUID \
+  --cap-add SETGID \
   -e OPENAI_BASE_URL \
   -e OPENAI_API_KEY \
   --name yog \
