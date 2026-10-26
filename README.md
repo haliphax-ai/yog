@@ -248,8 +248,11 @@ The `fuse-native` addon needs a FUSE device and mount privileges:
   the worker drop):
 
   ```sh
-  sudo apparmor_parser -r -W apparmor/yog.profile
-  sudo aa-status | grep yog   # confirms it is loaded
+  ./apparmor/install.sh          # copies, reloads, and verifies the profile
+  # equivalent manually:
+  # sudo cp apparmor/yog.profile /etc/apparmor.d/yog
+  # sudo apparmor_parser -r -W /etc/apparmor.d/yog
+  # sudo aa-status | grep yog    # confirms it is loaded
   ```
 
 All of the above is wired into the bundled `yog` launcher:
