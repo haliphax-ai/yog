@@ -43,17 +43,54 @@ export class WorkerClient {
   }
 
   /** Spawn a worker process for this harness. */
-  static start(): Promise<WorkerClient> {
+  static async start(): Promise<WorkerClient> {
     const entry = fileURLToPath(new URL("./main.ts", import.meta.url));
-    const opts: SpawnOptions = { stdio: ["pipe", "pipe", "pipe"] };
-    // When the daemon runs as root, drop the worker to the agent user so bash
-    // executes as the agent (mirrors the designed daemon/agent split).
-    if (process.getuid?.() === 0) {
-      opts.uid = Number(process.env["YOG_AGENT_UID"] ?? process.getuid?.() ?? 0);
-      opts.gid = Number(process.env["YOG_AGENT_GID"] ?? process.getgid?.() ?? 0);
+    const baseOpts: SpawnOptions = { stdio: ["pipe", "pipe", "pipe"] };
+
+    // The daemon/agent split: the harness (e.g. root or the `yog` daemon
+    // user) spawns the worker as the *agent* user, so model-executed bash
+    // never runs as the harness user. Drop when the target differs from the
+    // current uid/gid; if the drop is not possible (no privilege), fall back
+    // to running the worker as the harness user so local/unprivileged runs
+    // keep working.
+    const agentUid = Number(process.env["YOG_AGENT_UID"] ?? "");
+    const agentGid = Number(process.env["YOG_AGENT_GID"] ?? "");
+    const curUid = process.getuid?.() ?? -1;
+    const curGid = process.getgid?.() ?? -1;
+    const dropToAgent =
+      agentUid > 0 && agentGid > 0 && (agentUid !== curUid || agentGid !== curGid);
+
+    let child: ChildProcess;
+    if (dropToAgent) {
+      const dropOpts: SpawnOptions = {
+        ...baseOpts,
+        uid: agentUid,
+        gid: agentGid,
+        // The worker (and its bash children) should see the agent's home so
+        // rc sourcing and shell-state files land in the same place regardless
+        // of which daemon user spawned it.
+        env: { ...process.env, HOME: process.env["YOG_AGENT_HOME"] ?? "/home/agent" },
+      };
+      try {
+        child = spawn(process.execPath, [entry, "--worker"], dropOpts);
+      } catch {
+        child = spawn(process.execPath, [entry, "--worker"], baseOpts);
+      }
+      // setuid/setgid failures surface as an async 'error' (EPERM) rather
+      // than a thrown exception, so wait a tick; if the privileged spawn
+      // never came up, respawn without the drop.
+      await new Promise<void>((resolve) => {
+        child.once("spawn", () => resolve());
+        child.once("error", () => resolve());
+      });
+      if (!child.pid) {
+        child = spawn(process.execPath, [entry, "--worker"], baseOpts);
+        console.warn("[worker] could not drop to agent user; running worker as harness user");
+      }
+    } else {
+      child = spawn(process.execPath, [entry, "--worker"], baseOpts);
     }
-    const child = spawn(process.execPath, [entry, "--worker"], opts);
-    return Promise.resolve(new WorkerClient(child));
+    return new WorkerClient(child);
   }
 
   /**

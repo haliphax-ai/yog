@@ -203,16 +203,22 @@ SDK (enforced by dependency-cruiser).
 The `fuse-native` addon needs a FUSE device and mount privileges:
 
 - `/dev/fuse` must be present in the container: `--device /dev/fuse`.
+- The container runs the harness as the non-root `yog` daemon user; its bash
+  worker drops to the non-root `agent` user (the daemon/agent split), so
+  model-executed code never runs as the harness user.
 - Mounting requires `--cap-add SYS_ADMIN`, and the `fuse` (libfuse2)
   package so the setuid `fusermount` helper exists; both are set up by the
-  image. The container runs as the non-root `agent` user; mounts go through
-  `fusermount`.
+  image. Mounts go through `fusermount` as the `yog` user into `/yog`.
+- The worker's drop to the `agent` user requires `--cap-add
+  SETUID,SETGID` (the daemon runs as a non-root user, not root). Without the
+  capabilities the worker degrades to running as the harness user.
 - On hosts enforcing AppArmor/seccomp, the default profiles block mount
   syscalls. The image is therefore run with:
 
   ```sh
   docker run --device /dev/fuse \
     --cap-add SYS_ADMIN \
+    --cap-add SETUID,SETGID \
     --security-opt seccomp=unconfined \
     --security-opt apparmor=yog \
     ...

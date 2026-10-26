@@ -128,6 +128,26 @@ describe("WorkerClient", () => {
     await expect(client.runBash("echo x")).rejects.toThrow(/worker closed/);
   });
 
+  it("falls back to the harness user when dropping to the agent is not possible", async () => {
+    const prevUid = process.env["YOG_AGENT_UID"];
+    const prevGid = process.env["YOG_AGENT_GID"];
+    process.env["YOG_AGENT_UID"] = String(process.getuid?.() ?? 0 + 1);
+    process.env["YOG_AGENT_GID"] = String(process.getgid?.() ?? 0 + 1);
+    try {
+      // No CAP_SETUID here (tests run unprivileged), so the privileged spawn
+      // should fail and the worker should come up as the harness user anyway.
+      const client = await startWorker();
+      const r = await client.runBash("echo ok");
+      expectOk(r);
+      expect(r.stdout).toBe("ok\n");
+    } finally {
+      if (prevUid === undefined) delete process.env["YOG_AGENT_UID"];
+      else process.env["YOG_AGENT_UID"] = prevUid;
+      if (prevGid === undefined) delete process.env["YOG_AGENT_GID"];
+      else process.env["YOG_AGENT_GID"] = prevGid;
+    }
+  });
+
   it("restores a prior snapshot before running", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "yog-worker-restore-"));
     const client = await startWorker();

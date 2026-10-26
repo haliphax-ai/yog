@@ -19,18 +19,23 @@ RUN groupadd --system --gid 900 agent && \
   useradd --system --uid 900 --gid agent --shell /usr/sbin/nologin agent && \
   groupadd --system --gid 901 yog && \
   useradd --system --uid 901 --gid yog --shell /usr/sbin/nologin yog && \
-  mkdir -p /home/agent /yog && \
-  chown agent:agent /home/agent /yog && \
+  mkdir -p /home/agent /home/yog /yog && \
+  chown agent:agent /home/agent && \
+  chown yog:yog /home/yog /yog && \
   echo "user_allow_other" > /etc/fuse.conf
 
-# The mount root lives at /yog and is served to the agent user. The harness
-# may run as the yog (daemon) user and drops its bash worker to the agent on
-# spawn; allow_other lets other users reach the mount.
+# Daemon/agent split: the harness runs as the `yog` daemon user; its bash
+# worker drops to the `agent` user (needs CAP_SETUID/SETGID in the launcher).
+# /yog is the FUSE mount root, served to the agent user with allow_other. The
+# persistent shell state lives in the agent's home, and the harness's state db
+# lives in the daemon's home.
 ENV YOG_ALLOW_OTHER=1 \
   YOG_AGENT_UID=900 \
-  YOG_AGENT_GID=900
+  YOG_AGENT_GID=900 \
+  YOG_AGENT_HOME=/home/agent \
+  HARNESS_STATE_DIR=/home/agent/.harness
 COPY . /app
 RUN cd /app && npm ci --omit=dev --ignore-scripts
-WORKDIR /home/agent
-USER agent:agent
+WORKDIR /home/yog
+USER yog:yog
 ENTRYPOINT ["node", "/app/src/index.ts"]
