@@ -42,6 +42,9 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   /usr/local/bin/node mr,
   /usr/local/bin/node ix,
   /usr/bin/ldd r,
+  # fusermount is at /usr/bin on Debian (and /usr/sbin on some distros);
+  # it must escape so its setuid mount helper works.
+  /usr/bin/fusermount Ux,
   /usr/sbin/fusermount Ux,
   /usr/sbin/{groupadd,useradd} ix,
 
