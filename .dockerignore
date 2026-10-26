@@ -1,4 +1,12 @@
+.agentfs
+.git
+.github
+.harness
+.husky
+/apparmor
+/assets
 /model
+/seccomp
 /sys
 /test
 node_modules
