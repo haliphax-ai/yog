@@ -13,6 +13,7 @@ RUN --mount=type=cache,mode=0755,target=/var/cache/apt \
     gnupg \
     jq \
     ripgrep \
+    util-linux \
     && \
   rm -rf /var/lib/apt/lists/*
 RUN groupadd --system --gid 900 agent && \
@@ -35,7 +36,9 @@ ENV YOG_ALLOW_OTHER=1 \
   YOG_AGENT_HOME=/home/agent \
   HARNESS_STATE_DIR=/home/agent/.harness
 COPY . /app
-RUN cd /app && npm ci --omit=dev --ignore-scripts
+RUN cd /app && npm ci --omit=dev --ignore-scripts && chmod +x /app/entrypoint.sh
 WORKDIR /home/yog
-USER yog:yog
-ENTRYPOINT ["node", "/app/src/index.ts"]
+# The container starts as root only so the entrypoint can setpriv down to the
+# `yog` daemon user with ambient CAP_SETUID/CAP_SETGID (needed to spawn the
+# bash worker as the `agent` user). The harness itself never runs as root.
+ENTRYPOINT ["/app/entrypoint.sh"]

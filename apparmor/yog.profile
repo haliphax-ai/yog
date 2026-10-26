@@ -19,13 +19,17 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/nis>
 
   # Capabilities needed for FUSE mounting (used via the setuid fusermount
-  # helper; kept here so direct mount attempts also behave).
+  # helper; kept here so direct mount attempts also behave) and for the
+  # daemon/agent split (the harness spawns its bash worker as the agent user).
   capability mount,
   capability sys_admin,
+  capability setuid,
+  capability setgid,
 
-  # Runtime + tool binaries
+  # Runtime + tool binaries (setpriv transitions root → yog on entry)
   /app/** r,
-  /usr/bin/{node,bash,sh,dash,env,sed,grep,cat,echo,ls,ps,tar,gzip,bzip2,xz,find,head,tail,cut,tr,awk,sort,uniq,wc,date,hostname,id,whoami,dirname,basename,mkdir,rmdir,rm,cp,mv,ln,chmod,chown,touch,file,stat,du,df,mount,umount,fusermount,curl,wget,git,jq,rg,gpg,openssl,tee,printf,seq,nohup,setsid} mr,
+  /usr/bin/{node,bash,sh,dash,env,sed,grep,cat,echo,ls,ps,tar,gzip,bzip2,xz,find,head,tail,cut,tr,awk,sort,uniq,wc,date,hostname,id,whoami,dirname,basename,mkdir,rmdir,rm,cp,mv,ln,chmod,chown,touch,file,stat,du,df,mount,umount,fusermount,curl,wget,git,jq,rg,gpg,openssl,tee,printf,seq,nohup,setsid,setpriv,capsh} mr,
+  /usr/local/bin/node mr,
   /usr/sbin/{fusermount,groupadd,useradd} mr,
 
   # FUSE device and mounts
@@ -34,11 +38,18 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   mount fstype=fuse.*,
   umount,
 
-  # Working tree (agent HOME + state dir + tmp)
+  # Working tree: agent HOME (model-executed bash), daemon HOME (state db +
+  # audit trail), tmp
   /home/agent/ rw,
   /home/agent/** rw,
+  /home/yog/ rw,
+  /home/yog/** rw,
   /tmp/ rw,
   /tmp/** rw,
+
+  # FUSE mount root (mounted by the daemon; served to the agent)
+  /yog/ rw,
+  /yog/** rw,
 
   # Read-only system surface
   /etc/** r,
