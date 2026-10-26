@@ -47,13 +47,14 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   umount,
 
   # Working tree: agent HOME (model-executed bash), daemon HOME (state db +
-  # audit trail), tmp
-  /home/agent/ rw,
-  /home/agent/** rw,
-  /home/yog/ rw,
-  /home/yog/** rw,
-  /tmp/ rw,
-  /tmp/** rw,
+  # audit trail), tmp. `l` (lock) is required for flock(2), which the turso/
+  # libsql native binding uses on the database file.
+  /home/agent/ rwl,
+  /home/agent/** rwl,
+  /home/yog/ rwl,
+  /home/yog/** rwl,
+  /tmp/ rwl,
+  /tmp/** rwl,
 
   # FUSE mount root (mounted by the daemon; served to the agent)
   /yog/ rw,
