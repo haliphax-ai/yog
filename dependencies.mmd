@@ -1,0 +1,125 @@
+flowchart LR
+
+subgraph 0["src"]
+1["cli.ts"]
+subgraph 2["client"]
+3["run.ts"]
+7["sse.ts"]
+end
+4["log.ts"]
+subgraph 5["turn"]
+6["sink.ts"]
+end
+8["host.ts"]
+9["index.ts"]
+subgraph A["server"]
+B["index.ts"]
+C["orchestrator.ts"]
+subgraph D["store"]
+E["sessions.ts"]
+end
+F["workpool.ts"]
+K["serve.ts"]
+16["http.ts"]
+17["sse.ts"]
+end
+subgraph G["worker"]
+H["index.ts"]
+I["client.ts"]
+J["protocol.ts"]
+18["main.ts"]
+19["wrapper.ts"]
+end
+L["mount.ts"]
+M["register.ts"]
+subgraph N["toolkit"]
+O["index.ts"]
+P["registry.ts"]
+Q["types.ts"]
+subgraph R["tools"]
+S["bash.ts"]
+end
+end
+subgraph T["vfs"]
+U["index.ts"]
+V["constants.ts"]
+subgraph W["descriptors"]
+X["list.ts"]
+end
+Y["node.ts"]
+Z["registry.ts"]
+end
+subgraph 10["state"]
+11["index.ts"]
+12["agentfs.ts"]
+13["agents.ts"]
+14["session.ts"]
+end
+15["turn.ts"]
+end
+1-->3
+1-->4
+3-->4
+3-->6
+3-->7
+7-->6
+9-->1
+9-->4
+9-->B
+B-->C
+B-->K
+B-->E
+B-->F
+C-->E
+C-->F
+F-->H
+H-->I
+H-->J
+I-->8
+I-->4
+I-->J
+K-->8
+K-->4
+K-->L
+K-->M
+K-->11
+K-->O
+K-->15
+K-->6
+K-->16
+K-->C
+K-->17
+K-->E
+K-->F
+M-->O
+M-->U
+O-->P
+O-->S
+O-->Q
+P-->Q
+S-->Q
+U-->V
+U-->X
+U-->Y
+U-->Z
+X-->4
+X-->V
+X-->Y
+Y-->V
+Z-->V
+Z-->Y
+11-->12
+11-->13
+11-->14
+12-->8
+12-->13
+15-->4
+15-->11
+15-->O
+15-->6
+16-->4
+16-->17
+18-->8
+18-->4
+18-->J
+18-->19
