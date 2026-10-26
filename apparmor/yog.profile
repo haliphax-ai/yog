@@ -32,10 +32,9 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   /usr/local/bin/node mr,
   /usr/sbin/{fusermount,groupadd,useradd} mr,
 
-  # FUSE device and mounts
+  # FUSE device and mounts (fstype takes literal types — no wildcards)
   /dev/fuse rw,
   mount fstype=fuse,
-  mount fstype=fuse.*,
   umount,
 
   # Working tree: agent HOME (model-executed bash), daemon HOME (state db +
