@@ -9,6 +9,11 @@ set -e
 # inherited by the worker spawns.
 export HOME=/home/yog
 
+# The state volume (/var/lib/yog) may have been created root-owned by Docker
+# (fresh named volume) — ensure the daemon can write it no matter its origin.
+mkdir -p /var/lib/yog/agentfs
+chown -R yog:yog /var/lib/yog
+
 exec /usr/bin/setpriv \
   --reuid=yog \
   --regid=yog \

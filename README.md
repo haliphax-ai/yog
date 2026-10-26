@@ -225,9 +225,13 @@ The `fuse-native` addon needs a FUSE device and mount privileges:
   a dedicated root, `/var/lib/yog` (`YOG_STATE_ROOT`), in per-agent files:
   `/var/lib/yog/agentfs/<agentId>.db`. Agent identity is a runtime value
   (currently the default `agent`), never an env var — multi-agent
-  orchestration opens one database per agent id. The `/yog` mountpoint must
-  exist and be readable/searchable by the harness user (the image creates
-  and owns it).
+  orchestration opens one database per agent id. Set `YOG_STATE_PATH` for a
+  full path override (the launcher passes it through). The `/yog` mountpoint
+  must exist and be readable/searchable by the harness user (the image
+  creates and owns it).
+- The entrypoint re-owns `/var/lib/yog` (the state volume) to the `yog`
+  user on start, so a freshly-created root-owned named volume is usable
+  immediately.
 - `/var/lib/yog` (which holds the state db) is mounted as the named volume
   `yog-state` by the launcher; set `YOG_STATE_BIND=/host/path` to bind-mount
   a host directory there instead. A volume/bind mount is required in

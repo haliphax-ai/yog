@@ -39,5 +39,6 @@ exec docker run \
   -e OPENAI_BASE_URL \
   -e OPENAI_API_KEY \
   -e YOG_STATE_ROOT \
+  -e YOG_STATE_PATH \
   --name yog \
   -t yog run "$model" "$@"

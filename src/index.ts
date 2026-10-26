@@ -108,7 +108,8 @@ async function main(): Promise<void> {
   } catch (err) {
     console.error(
       `warning: opening agent state failed (${(err as Error).message}); ` +
-        "continuing without audit trail (set YOG_STATE_DB to a writable path)",
+        "continuing without audit trail (ensure /var/lib/yog is writable by the yog user, " +
+        "or set YOG_STATE_PATH to a writable path)",
     );
   }
 

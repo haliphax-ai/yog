@@ -69,7 +69,12 @@ export class AgentFSState {
    * full `path` may still be supplied to override entirely.
    */
   static async open(opts: { agentId?: AgentId; path?: string } = {}): Promise<AgentFSState> {
-    const dbPath = opts.path ?? (opts.agentId ? stateDbPath(opts.agentId) : undefined);
+    // A full path wins (tests, explicit overrides); otherwise an env PATH
+    // override; otherwise derive from the agent id.
+    const dbPath =
+      opts.path ??
+      process.env["YOG_STATE_PATH"] ??
+      (opts.agentId ? stateDbPath(opts.agentId) : undefined);
     if (dbPath === undefined) {
       throw new Error("AgentFSState.open requires an agentId or an explicit path");
     }
