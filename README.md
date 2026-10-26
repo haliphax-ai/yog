@@ -221,13 +221,16 @@ The `fuse-native` addon needs a FUSE device and mount privileges:
   non-root process, so the ambient caps are what make the split work). The
   launcher still adds `--cap-add SETUID` and `--cap-add SETGID` to put those
   caps in the container's bounding set.
-- The harness's state database defaults to `$HOME/.agentfs/yog.db`; override
-  with `YOG_STATE_DB` (the launcher passes it through). The `/yog` mountpoint
+- The harness's state database is daemon-owned runtime data — it lives in a
+  dedicated directory, `/var/lib/yog/agentfs/agent.db` (named after the
+  agent, `YOG_AGENT_ID`), **not** under any "home" directory. Override with
+  `YOG_STATE_DB` (the launcher passes it through). The `/yog` mountpoint
   must exist and be readable/searchable by the harness user (the image
   creates and owns it).
-- The daemon home `/home/yog` (which holds the state db) is mounted as the
-  named volume `yog-home` by the launcher. This is required in practice: the
-  turso/libsql native binding's file locking fails with
+- `/var/lib/yog` (which holds the state db) is mounted as the named volume
+  `yog-state` by the launcher; set `YOG_STATE_BIND=/host/path` to bind-mount
+  a host directory there instead. A volume/bind mount is required in
+  practice: the turso/libsql native binding's file locking fails with
   `Failed to unlock file: Permission denied` when the database sits on
   Docker's overlay filesystem. If you see that panic, ensure the volume mount
   is present (or set `YOG_STATE_DB` to a path on a real volume); to confirm

@@ -16,10 +16,17 @@ else
   seccomp_opt="--security-opt seccomp=$here/seccomp/yog.json"
 fi
 
-# The daemon home (/home/yog) holds the agent state database. It lives on a
-# named volume: the turso/libsql file locking misbehaves on Docker's overlay
-# filesystem (EACCES on flock unlock) and a volume also persists state across
-# runs. Override the db path with YOG_STATE_DB if you want it elsewhere.
+# The daemon's state database lives in /var/lib/yog (a dedicated runtime-data
+# directory, not a home). It lives on a named volume: turso/libsql's file
+# locking misbehaves on Docker's overlay filesystem (EACCES on flock unlock),
+# and a volume also persists state across runs. Set YOG_STATE_BIND to a host
+# path to bind-mount it there instead (e.g. YOG_STATE_BIND=$HOME/yog-state).
+if [[ -n "${YOG_STATE_BIND:-}" ]]; then
+  state_mount="--mount type=bind,source=$YOG_STATE_BIND,target=/var/lib/yog"
+else
+  state_mount="--mount type=volume,source=yog-state,target=/var/lib/yog"
+fi
+
 exec docker run \
   --rm \
   $seccomp_opt \
@@ -28,7 +35,7 @@ exec docker run \
   --cap-add SYS_ADMIN \
   --cap-add SETUID \
   --cap-add SETGID \
-  --mount type=volume,source=yog-home,target=/home/yog \
+  $state_mount \
   -e OPENAI_BASE_URL \
   -e OPENAI_API_KEY \
   -e YOG_STATE_DB \

@@ -53,14 +53,16 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   mount fstype=fuse,
   umount,
 
-  # Working tree: agent HOME (model-executed bash), daemon HOME (state db +
-  # audit trail), tmp. `k` (lock) is required for flock(2), which the turso/
-  # libsql native binding uses on the database file (confirmed by audit:
-  # requested_mask="k").
+  # Working tree: agent HOME (model-executed bash), daemon HOME, and the
+  # daemon's state dir (/var/lib/yog). `k` (lock) is required for flock(2),
+  # which the turso/libsql native binding uses on the database file
+  # (confirmed by audit: requested_mask="k").
   /home/agent/ rwk,
   /home/agent/** rwk,
   /home/yog/ rwk,
   /home/yog/** rwk,
+  /var/lib/yog/ rwk,
+  /var/lib/yog/** rwk,
   /tmp/ rwk,
   /tmp/** rwk,
 
