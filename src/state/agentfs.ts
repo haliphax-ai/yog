@@ -11,6 +11,7 @@
  */
 import { AgentFS } from "agentfs-sdk";
 import { copyFile, mkdir } from "../host.ts";
+import { stateDbPath, type AgentId } from "./agents.ts";
 
 export interface ToolCallRecord {
   /** OpenAI tool name (e.g. "bash"). */
@@ -61,16 +62,17 @@ export class AgentFSState {
   }
 
   /**
-   * Open (creating if needed) an agent filesystem at `path` (defaults to
-   * `YOG_STATE_DB` or `.agentfs/yog.db`).
+   * Open (creating if needed) an agent filesystem for an agent.
+   *
+   * The database path is derived from the agent id (`stateDbPath`), never
+   * from an env var — the environment only supplies the storage root. A
+   * full `path` may still be supplied to override entirely.
    */
-  static async open(opts: { path?: string } = {}): Promise<AgentFSState> {
-    // The state db is daemon-owned runtime data — it lives in a dedicated
-    // data directory (/var/lib/yog), not under any "home" directory, and is
-    // named after the agent (YOG_AGENT_ID). The path is configurable via
-    // YOG_STATE_DB.
-    const agentId = process.env["YOG_AGENT_ID"] ?? "agent";
-    const dbPath = opts.path ?? process.env["YOG_STATE_DB"] ?? `/var/lib/yog/agentfs/${agentId}.db`;
+  static async open(opts: { agentId?: AgentId; path?: string } = {}): Promise<AgentFSState> {
+    const dbPath = opts.path ?? (opts.agentId ? stateDbPath(opts.agentId) : undefined);
+    if (dbPath === undefined) {
+      throw new Error("AgentFSState.open requires an agentId or an explicit path");
+    }
     const slash = dbPath.lastIndexOf("/");
     try {
       if (slash > 0) {

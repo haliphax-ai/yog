@@ -4,4 +4,5 @@
  * `agentfs-only-in-state`).
  */
 export { AgentFSState, type ToolCallRecord } from "./agentfs.ts";
+export { DEFAULT_AGENT_ID, stateDbPath, stateRoot, type AgentId } from "./agents.ts";
 export { newSessionId } from "./session.ts";

@@ -35,8 +35,7 @@ ENV YOG_ALLOW_OTHER=1 \
   YOG_AGENT_GID=900 \
   YOG_AGENT_HOME=/home/agent \
   HARNESS_STATE_DIR=/home/agent/.harness \
-  YOG_AGENT_ID=agent \
-  YOG_STATE_DB=/var/lib/yog/agentfs/agent.db
+  YOG_STATE_ROOT=/var/lib/yog
 COPY . /app
 RUN cd /app && npm ci --omit=dev --ignore-scripts && chmod +x /app/entrypoint.sh
 WORKDIR /home/yog

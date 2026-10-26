@@ -11,7 +11,7 @@ import { homedir } from "node:os";
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import { tools, descriptors } from "./register.ts";
-import { AgentFSState, newSessionId } from "./state/index.ts";
+import { AgentFSState, DEFAULT_AGENT_ID, newSessionId } from "./state/index.ts";
 import { setBashExecutor, setShellStateProvider } from "./toolkit/index.ts";
 import { shutdownAllWorkers, WorkerClient } from "./worker/index.ts";
 import { parseCliArgs } from "./cli.ts";
@@ -88,6 +88,9 @@ async function main(): Promise<void> {
   const { modelId, prompt } = parsed;
 
   const sessionId = newSessionId();
+  // Agent identity is a runtime value, not an env var — multi-agent
+  // orchestration will open a state db per agent id.
+  const agentId = DEFAULT_AGENT_ID;
 
   // Startup diagnostics: the daemon/agent split is sensitive to which user
   // the harness runs as, where its home is, and whether the mountpoint is
@@ -101,7 +104,7 @@ async function main(): Promise<void> {
   // opened, the harness continues without it.
   let state: AgentFSState | undefined;
   try {
-    state = await AgentFSState.open();
+    state = await AgentFSState.open({ agentId });
   } catch (err) {
     console.error(
       `warning: opening agent state failed (${(err as Error).message}); ` +

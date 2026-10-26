@@ -221,12 +221,13 @@ The `fuse-native` addon needs a FUSE device and mount privileges:
   non-root process, so the ambient caps are what make the split work). The
   launcher still adds `--cap-add SETUID` and `--cap-add SETGID` to put those
   caps in the container's bounding set.
-- The harness's state database is daemon-owned runtime data — it lives in a
-  dedicated directory, `/var/lib/yog/agentfs/agent.db` (named after the
-  agent, `YOG_AGENT_ID`), **not** under any "home" directory. Override with
-  `YOG_STATE_DB` (the launcher passes it through). The `/yog` mountpoint
-  must exist and be readable/searchable by the harness user (the image
-  creates and owns it).
+- The harness's state database is daemon-owned runtime data — it lives under
+  a dedicated root, `/var/lib/yog` (`YOG_STATE_ROOT`), in per-agent files:
+  `/var/lib/yog/agentfs/<agentId>.db`. Agent identity is a runtime value
+  (currently the default `agent`), never an env var — multi-agent
+  orchestration opens one database per agent id. The `/yog` mountpoint must
+  exist and be readable/searchable by the harness user (the image creates
+  and owns it).
 - `/var/lib/yog` (which holds the state db) is mounted as the named volume
   `yog-state` by the launcher; set `YOG_STATE_BIND=/host/path` to bind-mount
   a host directory there instead. A volume/bind mount is required in
