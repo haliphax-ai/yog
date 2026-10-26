@@ -27,11 +27,17 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   capability setuid,
   capability setgid,
 
-  # Runtime + tool binaries (setpriv transitions root → yog on entry)
+  # Runtime + tool binaries. The harness/worker (node, setpriv, shell) run
+  # confined under this profile (`ix` = inherit). The agent's bash escapes
+  # unconfined (`Ux`) so the model can execute arbitrary commands without
+  # enumerating every utility here; fusermount likewise escapes so the setuid
+  # helper can perform the mount.
   /app/** r,
-  /usr/bin/{node,bash,sh,dash,env,sed,grep,cat,echo,ls,ps,tar,gzip,bzip2,xz,find,head,tail,cut,tr,awk,sort,uniq,wc,date,hostname,id,whoami,dirname,basename,mkdir,rmdir,rm,cp,mv,ln,chmod,chown,touch,file,stat,du,df,mount,umount,fusermount,curl,wget,git,jq,rg,gpg,openssl,tee,printf,seq,nohup,setsid,setpriv,capsh} mr,
-  /usr/local/bin/node mr,
-  /usr/sbin/{fusermount,groupadd,useradd} mr,
+  /usr/bin/bash Ux,
+  /usr/bin/{sh,dash,env,sed,grep,cat,echo,ls,ps,tar,gzip,bzip2,xz,find,head,tail,cut,tr,awk,sort,uniq,wc,date,hostname,id,whoami,dirname,basename,mkdir,rmdir,rm,cp,mv,ln,chmod,chown,touch,file,stat,du,df,mount,umount,curl,wget,git,jq,rg,gpg,openssl,tee,printf,seq,nohup,setsid,setpriv,capsh} ix,
+  /usr/local/bin/node ix,
+  /usr/sbin/fusermount Ux,
+  /usr/sbin/{groupadd,useradd} ix,
 
   # FUSE device and mounts (fstype takes literal types — no wildcards)
   /dev/fuse rw,
