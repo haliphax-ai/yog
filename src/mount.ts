@@ -38,7 +38,9 @@ export async function mountSys(
   const fuse = new FuseCtor(mnt, ops, mountOpts);
 
   return new Promise((resolve, reject) => {
-    fuse.mount((err) => (err ? reject(err) : resolve(fuse)));
+    fuse.mount((err) =>
+      err ? reject(new Error(`could not mount ${mnt}: ${err.message}`)) : resolve(fuse),
+    );
   });
 }
 

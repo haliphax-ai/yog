@@ -72,13 +72,19 @@ export class AgentFSState {
     const dbPath =
       opts.path ?? process.env["YOG_STATE_DB"] ?? join(homedir(), ".agentfs", "yog.db");
     const slash = dbPath.lastIndexOf("/");
-    if (slash > 0) {
-      await mkdir(dbPath.slice(0, slash), { recursive: true });
+    try {
+      if (slash > 0) {
+        await mkdir(dbPath.slice(0, slash), { recursive: true });
+      }
+      const agent = await AgentFS.open({ path: dbPath });
+      const state = new AgentFSState(agent, dbPath);
+      await state.#ensureSessionColumn();
+      return state;
+    } catch (err) {
+      // Surface the resolved path so the caller can act on it (e.g. override
+      // YOG_STATE_DB) instead of guessing what failed.
+      throw new Error(`opening agent state at ${dbPath}: ${(err as Error).message}`);
     }
-    const agent = await AgentFS.open({ path: dbPath });
-    const state = new AgentFSState(agent, dbPath);
-    await state.#ensureSessionColumn();
-    return state;
   }
 
   /** Raw database (for queries/snapshots). */
