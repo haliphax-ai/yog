@@ -85,7 +85,12 @@ export class WorkerClient {
       });
       if (!child.pid) {
         child = spawn(process.execPath, [entry, "--worker"], baseOpts);
-        console.warn("[worker] could not drop to agent user; running worker as harness user");
+        console.warn(
+          "[worker] could not drop to agent user (EPERM); bash will run as the harness user. " +
+            "To enable the daemon/agent split, run the harness with effective CAP_SETUID/CAP_SETGID " +
+            "(e.g. as root, or with --cap-add SETUID,SETGID when starting as root), or run the " +
+            "harness as the agent user itself.",
+        );
       }
     } else {
       child = spawn(process.execPath, [entry, "--worker"], baseOpts);

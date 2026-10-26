@@ -9,6 +9,8 @@
  * Recording is best-effort: callers (the turn loop) treat a failure here as
  * non-fatal and keep the turn going.
  */
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { AgentFS } from "agentfs-sdk";
 import { copyFile, mkdir } from "../host.ts";
 
@@ -65,7 +67,10 @@ export class AgentFSState {
    * `YOG_STATE_DB` or `.agentfs/yog.db`).
    */
   static async open(opts: { path?: string } = {}): Promise<AgentFSState> {
-    const dbPath = opts.path ?? process.env["YOG_STATE_DB"] ?? ".agentfs/yog.db";
+    // Default to the harness user's home (not cwd) so the state db survives
+    // regardless of which working directory the daemon starts in.
+    const dbPath =
+      opts.path ?? process.env["YOG_STATE_DB"] ?? join(homedir(), ".agentfs", "yog.db");
     const slash = dbPath.lastIndexOf("/");
     if (slash > 0) {
       await mkdir(dbPath.slice(0, slash), { recursive: true });

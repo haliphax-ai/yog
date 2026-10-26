@@ -7,6 +7,7 @@
  * chat completion with tools against the given model, exiting when the stream
  * ends.
  */
+import { homedir } from "node:os";
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import { tools, descriptors } from "./register.ts";
@@ -16,6 +17,10 @@ import { shutdownAllWorkers, WorkerClient } from "./worker/index.ts";
 import { parseCliArgs } from "./cli.ts";
 import { mountSys, unmountSys } from "./mount.ts";
 import { runTurn } from "./turn.ts";
+import { exists, mkdir, readdir, stat } from "./host.ts";
+
+/** The path the virtual filesystem is mounted at. */
+const MOUNT_POINT = "/yog";
 
 const USAGE = 'usage: yog run <modelId> "<prompt>"';
 
@@ -38,6 +43,41 @@ function requestExit(signal: NodeJS.Signals): void {
   setTimeout(() => process.exit(130), 3000).unref();
 }
 
+/**
+ * Ensure `mnt` exists and is readable by the current user before mounting over
+ * it. FUSE requires the mountpoint to exist and be accessible to the mounting
+ * user; failing here produces a precise error instead of fuse-native's opaque
+ * "failed to open mountpoint" message.
+ */
+async function ensureMountPoint(mnt: string): Promise<void> {
+  if (!(await exists(mnt))) {
+    await mkdir(mnt, { recursive: true });
+  }
+  const st = await stat(mnt);
+  if (!st.isDirectory()) {
+    throw new Error(`mountpoint ${mnt} exists but is not a directory`);
+  }
+  const currentUid = process.getuid?.() ?? -1;
+  const currentGid = process.getgid?.() ?? -1;
+  // mode bits (rwx for owner = 0o700); access is meaningful only when we can
+  // *read* the directory (r) and *traverse* it (x).
+  const mode = st.mode & 0o777;
+  const isOwner = st.uid === currentUid;
+  const isGroup = st.gid === currentGid;
+  const canRead =
+    (isOwner && (mode & 0o400) !== 0) || (isGroup && (mode & 0o040) !== 0) || (mode & 0o004) !== 0;
+  const canExec =
+    (isOwner && (mode & 0o100) !== 0) || (isGroup && (mode & 0o010) !== 0) || (mode & 0o001) !== 0;
+  if (!canRead || !canExec) {
+    throw new Error(
+      `mountpoint ${mnt} (uid=${st.uid} gid=${st.gid} mode=${mode.toString(8)}) is not ` +
+        `readable+searchable by the current user (uid=${currentUid} gid=${currentGid}); ` +
+        "ensure the mountpoint is owned by / accessible to the harness user",
+    );
+  }
+  await readdir(mnt);
+}
+
 async function main(): Promise<void> {
   const parsed = parseCliArgs(process.argv.slice(2));
   if ("error" in parsed) {
@@ -49,6 +89,14 @@ async function main(): Promise<void> {
 
   const sessionId = newSessionId();
 
+  // Startup diagnostics: the daemon/agent split is sensitive to which user
+  // the harness runs as, where its home is, and whether the mountpoint is
+  // accessible — print the facts up front so misconfiguration is obvious.
+  console.error(
+    `[yog] run uid=${process.getuid?.() ?? "?"} gid=${process.getgid?.() ?? "?"} ` +
+      `home=${homedir()} cwd=${process.cwd()} mount=${MOUNT_POINT}`,
+  );
+
   // The agent state/audit trail is best-effort: if the database cannot be
   // opened, the harness continues without it.
   let state: AgentFSState | undefined;
@@ -56,7 +104,8 @@ async function main(): Promise<void> {
     state = await AgentFSState.open();
   } catch (err) {
     console.error(
-      `warning: opening agent state failed (${(err as Error).message}); continuing without audit trail`,
+      `warning: opening agent state failed (${(err as Error).message}); ` +
+        "continuing without audit trail (set YOG_STATE_DB to a writable path)",
     );
   }
 
@@ -93,10 +142,12 @@ async function main(): Promise<void> {
   // Registries come from the wiring manifest (register.ts).
   let fuse: Awaited<ReturnType<typeof mountSys>> | undefined;
   try {
-    fuse = await mountSys(descriptors.buildOps());
+    await ensureMountPoint(MOUNT_POINT);
+    fuse = await mountSys(descriptors.buildOps(), MOUNT_POINT);
   } catch (err) {
     console.error(
-      `warning: could not mount ./sys (${(err as Error).message}); continuing without the virtual filesystem`,
+      `warning: could not mount ${MOUNT_POINT} (${(err as Error).message}); ` +
+        "continuing without the virtual filesystem",
     );
   }
 

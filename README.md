@@ -209,9 +209,15 @@ The `fuse-native` addon needs a FUSE device and mount privileges:
 - Mounting requires `--cap-add SYS_ADMIN`, and the `fuse` (libfuse2)
   package so the setuid `fusermount` helper exists; both are set up by the
   image. Mounts go through `fusermount` as the `yog` user into `/yog`.
-- The worker's drop to the `agent` user requires `--cap-add
-  SETUID,SETGID` (the daemon runs as a non-root user, not root). Without the
-  capabilities the worker degrades to running as the harness user.
+- The worker's drop to the `agent` user requires the harness process to hold
+  effective `CAP_SETUID`/`CAP_SETGID`. In Docker this means starting the
+  daemon as root (or via a capability-retaining wrapper): `--cap-add` alone
+  is not enough for a directly-executed non-root process, whose capabilities
+  are cleared on exec. Without effective capabilities the worker degrades to
+  running as the harness user (it logs a warning).
+- The harness's state database defaults to `$HOME/.agentfs/yog.db`; override
+  with `YOG_STATE_DB`. The `/yog` mountpoint must exist and be readable/
+  searchable by the harness user (the image creates and owns it).
 - On hosts enforcing AppArmor/seccomp, the default profiles block mount
   syscalls. The image is therefore run with:
 
