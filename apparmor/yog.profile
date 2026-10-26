@@ -58,15 +58,15 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   # Working tree: agent HOME (model-executed bash), daemon HOME, and the
   # daemon's state dir (/var/lib/yog). `k` (lock) is required for flock(2),
   # which the turso/libsql native binding uses on the database file
-  # (confirmed by audit: requested_mask="k"). The state tree gets the full
-  # file surface: read/write/create (new agent dbs), mmap (native addons /
-  # sqlite), and lock.
+  # (confirmed by audit: requested_mask="k"). The state tree gets read/write/
+  # mmap/lock; creating new files is covered by write on the directory (there
+  # is no `c` mode — that was a parser error).
   /home/agent/ rwk,
   /home/agent/** rwk,
   /home/yog/ rwk,
   /home/yog/** rwk,
-  /var/lib/yog/ rwkcm,
-  /var/lib/yog/** rwkcm,
+  /var/lib/yog/ rwkm,
+  /var/lib/yog/** rwkm,
   /tmp/ rwk,
   /tmp/** rwk,
 
