@@ -2,17 +2,43 @@
 set -eo pipefail
 
 model="nvidia/nemotron-3-ultra-550b-a55b:free"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 [[ ! -f "model" ]] || model="$(cat model)"
 [[ ! -f ".env" ]] || source .env
 
+# Seccomp: ship a custom profile (seccomp/yog.json) = Docker's default + an
+# unconditional allowance for mount/umount2 (FUSE). Set YOG_SECCOMP=unconfined
+# to fall back to the old behavior.
+if [[ "${YOG_SECCOMP:-}" == "unconfined" ]]; then
+  seccomp_opt="--security-opt seccomp=unconfined"
+else
+  seccomp_opt="--security-opt seccomp=$here/seccomp/yog.json"
+fi
+
+# The daemon's state database lives in /var/lib/yog (a dedicated runtime-data
+# directory, not a home). It lives on a named volume: turso/libsql's file
+# locking misbehaves on Docker's overlay filesystem (EACCES on flock unlock),
+# and a volume also persists state across runs. Set YOG_STATE_BIND to a host
+# path to bind-mount it there instead (e.g. YOG_STATE_BIND=$HOME/yog-state).
+if [[ -n "${YOG_STATE_BIND:-}" ]]; then
+  state_mount="--mount type=bind,source=$YOG_STATE_BIND,target=/var/lib/yog"
+else
+  state_mount="--mount type=volume,source=yog-state,target=/var/lib/yog"
+fi
+
 exec docker run \
   --rm \
-  --security-opt seccomp=unconfined \
+  $seccomp_opt \
   --security-opt apparmor=yog \
   --device /dev/fuse \
   --cap-add SYS_ADMIN \
+  --cap-add SETUID \
+  --cap-add SETGID \
+  $state_mount \
   -e OPENAI_BASE_URL \
   -e OPENAI_API_KEY \
+  -e YOG_STATE_ROOT \
+  -e YOG_STATE_PATH \
   --name yog \
-  -t yog "$model" "$@"
+  -t yog run "$model" "$@"

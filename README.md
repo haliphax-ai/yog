@@ -6,13 +6,18 @@ are presented to agents as proxied virtual file descriptors.
 
 ## Usage
 
+The harness entrypoint is `yog run <modelId> "<prompt>"` (pre-1.0
+replace-and-delete: the bare `yog <model> <prompt>` form is gone).
+
 ```sh
-npm start -- <modelId> "<prompt>"
+npm start -- run <modelId> "<prompt>"
 ```
 
 - Streams the model response to stdout and exits when the stream ends.
 - Uses `OPENAI_BASE_URL` / `OPENAI_API_KEY` environment variables when set
   (compatible-proxy support), otherwise the SDK defaults.
+- Runs the `bash` tool through a dedicated worker process; the persistent
+  shell state is mirrored into the agentfs database (see below).
 
 ### Docker
 
@@ -33,8 +38,10 @@ place a model id in a `model` file (host cwd) to override it.
 <details><summary>Files</summary><br />
 
 - `src/`
-  - `index.ts` - CLI entry: parses `modelId` + `prompt`, mounts `./sys`,
-    runs the agent turn engine, exits.
+  - `cli.ts` - CLI arg parsing: the `run` subcommand (the bare form is
+    deleted).
+  - `index.ts` - CLI entry: parses args via `cli.ts`, opens the agent state,
+    mounts `/yog`, runs the agent turn engine, exits.
   - `turn.ts` - agent turn engine: streams completions, executes tool calls,
     feeds results back until the model answers without tools.
   - `mount.ts` — mount/unmount helpers (accepts any `FuseOps`).
@@ -56,7 +63,17 @@ place a model id in a `model` file (host cwd) to override it.
       `ToolSpec<TArgs, TResult>`, JSON-schema validation, and the
       `ToolRegistry`.
     - `tools/bash.ts` — the `bash` harness tool (persistent shell state, env
-      hiding).
+      hiding; executes through the worker).
+  - `worker/`
+    - `protocol.ts` — JSONL wire protocol (requests/responses, shell snapshot).
+    - `wrapper.ts` — persistent-shell wrapper + minimal env builder.
+    - `client.ts` — daemon-side worker client (spawn, id-correlated responses).
+    - `main.ts` — worker entrypoint (runs bash on behalf of the harness).
+  - `state/`
+    - `agentfs.ts` — `AgentFSState` wrapper: audit recorder, snapshots, and
+      the agentfs-backed shell home. The only module that imports the agentfs
+      SDK.
+    - `session.ts` — base62 session id generation.
 - `apparmor/`
   - `yog.profile` - the `yog` AppArmor profile to load on the host.
 - `Dockerfile` - container image: node:24, a non-root `agent` user, and the
@@ -91,7 +108,7 @@ const registry = new ToolRegistry([bashTool, myTool]);
 // runTurn(client, modelId, messages, registry)
 ```
 
-## Virtual filesystem (`./sys`)
+## Virtual filesystem (`/yog`)
 
 The mount contains a single file, `list`, which proxies access to an in-memory
 array in the harness process to demonstrate the descriptor tool concept:
@@ -114,7 +131,8 @@ pre-empt mutations:
   (`onRead`, `onWrite`, `onTruncate`, `onDelete`, `onRename`,
   `onOverwrite`, `onChildCreate`, `onChildDelete`, `onChildRename`). No
   hardcoded paths.
-- `list` is `0644`, owned by the harness user - appends and destructive
+- `list` is `0644`, served as owned by the agent user (descriptors default
+  to the agent; they may declare their own uid/gid) - appends and destructive
   rewrites work; it lacks `CanRemove` and `CanRename`, so it can never be
   deleted or moved away. It declares `onOverwrite` so rename-as-replace
   content can be written into it.
@@ -162,21 +180,75 @@ observers can see the descriptor being acted on:
 - standalone truncate: `{ action: 'truncate', items: [...] }`
 - rejected delete: `{ action: 'unlink', error: 'EPERM' }`
 
+### AgentFS state, audit trail, and rewindable home
+
+The harness opens an AgentFS database (default `.agentfs/yog.db`, override
+with `YOG_STATE_DB`) at startup:
+
+- Every tool call is recorded in the insert-only `tool_calls` table, stamped
+  with a base62 `session_id` extension column — the model's actions are
+  queryable in SQL.
+- The persistent bash shell state (cwd/env/functions) is mirrored into the
+  database per session (`session:<id>:shell`), making the harness home
+  rewindable.
+- Snapshot state with `cp .agentfs/yog.db snapshot.db` (the SDK checkpoints
+  WAL on `snapshotTo`); restore by pointing `YOG_STATE_DB` at the copy.
+- Opening/recording failures are non-fatal: the harness logs and continues.
+
+The state layer (`src/state/`) is the only code allowed to import the agentfs
+SDK (enforced by dependency-cruiser).
+
 ## Environment requirements
 
 The `fuse-native` addon needs a FUSE device and mount privileges:
 
 - `/dev/fuse` must be present in the container: `--device /dev/fuse`.
+- The container runs the harness as the non-root `yog` daemon user; its bash
+  worker drops to the non-root `agent` user (the daemon/agent split), so
+  model-executed code never runs as the harness user.
 - Mounting requires `--cap-add SYS_ADMIN`, and the `fuse` (libfuse2)
   package so the setuid `fusermount` helper exists; both are set up by the
-  image. The container runs as the non-root `agent` user; mounts go through
-  `fusermount`.
+  image. Mounts go through `fusermount` as the `yog` user into `/yog`.
+- Seccomp is enabled with a custom profile (`seccomp/yog.json`): Docker's
+  default profile plus an unconditional allowance for `mount`/`umount2`
+  (the default only allows them with CAP_SYS_ADMIN, so this is belt-and-
+  suspenders for the FUSE mount). The launcher references the file on the
+  host; set `YOG_SECCOMP=unconfined` to fall back to the old behavior.
+- The worker's drop to the `agent` user requires the harness process to hold
+  effective `CAP_SETUID`/`CAP_SETGID`. The image's entrypoint starts as root
+  and uses `setpriv` to drop to the `yog` daemon user while granting ambient
+  `CAP_SETUID`/`CAP_SETGID` (a plain `--cap-add` is cleared on exec for a
+  non-root process, so the ambient caps are what make the split work). The
+  launcher still adds `--cap-add SETUID` and `--cap-add SETGID` to put those
+  caps in the container's bounding set.
+- The harness's state database is daemon-owned runtime data — it lives under
+  a dedicated root, `/var/lib/yog` (`YOG_STATE_ROOT`), in per-agent files:
+  `/var/lib/yog/agentfs/<agentId>.db`. Agent identity is a runtime value
+  (currently the default `agent`), never an env var — multi-agent
+  orchestration opens one database per agent id. Set `YOG_STATE_PATH` for a
+  full path override (the launcher passes it through). The `/yog` mountpoint
+  must exist and be readable/searchable by the harness user (the image
+  creates and owns it).
+- The entrypoint re-owns `/var/lib/yog` (the state volume) to the `yog`
+  user on start, so a freshly-created root-owned named volume is usable
+  immediately.
+- `/var/lib/yog` (which holds the state db) is mounted as the named volume
+  `yog-state` by the launcher; set `YOG_STATE_BIND=/host/path` to bind-mount
+  a host directory there instead. A volume/bind mount is required in
+  practice: the turso/libsql native binding's file locking fails with
+  `Failed to unlock file: Permission denied` when the database sits on
+  Docker's overlay filesystem. If you see that panic, ensure the volume mount
+  is present (or set `YOG_STATE_DB` to a path on a real volume); to confirm
+  the cause, rerun with `--security-opt apparmor=unconfined` — AppArmor
+  denies would disappear there, whereas an overlay-filesystem problem would
+  not.
 - On hosts enforcing AppArmor/seccomp, the default profiles block mount
   syscalls. The image is therefore run with:
 
   ```sh
   docker run --device /dev/fuse \
     --cap-add SYS_ADMIN \
+    --cap-add SETUID,SETGID \
     --security-opt seccomp=unconfined \
     --security-opt apparmor=yog \
     ...
@@ -184,11 +256,16 @@ The `fuse-native` addon needs a FUSE device and mount privileges:
 
   `apparmor=yog` references an AppArmor profile named `yog` that must be
   loaded on the host before the container starts. The profile is checked in
-  at `apparmor/yog.profile`:
+  at `apparmor/yog.profile` and must be kept in sync with the home/mount
+  paths (agent + daemon homes, `/yog`, and `capability setuid/setgid` for
+  the worker drop):
 
   ```sh
-  sudo apparmor_parser -r -W apparmor/yog.profile
-  sudo aa-status | grep yog   # confirms it is loaded
+  ./apparmor/install.sh          # copies, reloads, and verifies the profile
+  # equivalent manually:
+  # sudo cp apparmor/yog.profile /etc/apparmor.d/yog
+  # sudo apparmor_parser -r -W /etc/apparmor.d/yog
+  # sudo aa-status | grep yog    # confirms it is loaded
   ```
 
 All of the above is wired into the bundled `yog` launcher:
@@ -206,7 +283,7 @@ system libfuse2 is installed, provide it:
 LD_LIBRARY_PATH=$PWD/node_modules/fuse-native/prebuilds/linux-x64 npm start -- ...
 ```
 
-If mounting fails, the harness logs a warning and continues without `./sys`.
+If mounting fails, the harness logs a warning and continues without `/yog`.
 
 ## Scripts
 

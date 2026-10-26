@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { ListDescriptor } from "../src/vfs/descriptors/list.ts";
 import {
+  AGENT_GID,
+  AGENT_UID,
   type DescriptorFile,
   DescriptorFlags,
   DescriptorFolder,
@@ -29,6 +31,7 @@ function fileDescriptor(
     onDelete?: () => number | void;
     onOverwrite?: (source: DescriptorFile) => number | void;
   } = {},
+  owner: { uid?: number; gid?: number } = {},
 ): DescriptorFile {
   return {
     kind: "file",
@@ -38,6 +41,7 @@ function fileDescriptor(
     render: () => content,
     commit: () => {},
     reset: () => {},
+    ...owner,
     ...hooks,
   };
 }
@@ -937,5 +941,54 @@ describe("flush commits buffered writes before release", () => {
       ops.release!("/list", fd, () => resolve());
     });
     expect(list.items).toEqual(["gamma"]);
+  });
+});
+
+describe("per-descriptor ownership", () => {
+  it("reports the agent user as the mount root owner", async () => {
+    const registry = new DescriptorRegistry();
+    const ops = registry.buildOps();
+    const st = await new Promise<{ uid?: number; gid?: number }>((resolve) => {
+      ops.getattr!("/", (err, s) => resolve(err ? {} : (s ?? {})));
+    });
+    expect(st.uid).toBe(AGENT_UID);
+    expect(st.gid).toBe(AGENT_GID);
+  });
+
+  it("defaults file ownership to the agent user", async () => {
+    const registry = new DescriptorRegistry([["/f", fileDescriptor(DescriptorFlags.CanRead, "x")]]);
+    const ops = registry.buildOps();
+    const st = await new Promise<{ uid?: number; gid?: number }>((resolve) => {
+      ops.getattr!("/f", (err, s) => resolve(err ? {} : (s ?? {})));
+    });
+    expect(st.uid).toBe(AGENT_UID);
+    expect(st.gid).toBe(AGENT_GID);
+  });
+
+  it("honors a descriptor-declared owner", async () => {
+    const registry = new DescriptorRegistry([
+      ["/f", fileDescriptor(DescriptorFlags.CanRead, "x", {}, { uid: 1234, gid: 5678 })],
+    ]);
+    const ops = registry.buildOps();
+    const st = await new Promise<{ uid?: number; gid?: number }>((resolve) => {
+      ops.getattr!("/f", (err, s) => resolve(err ? {} : (s ?? {})));
+    });
+    expect(st.uid).toBe(1234);
+    expect(st.gid).toBe(5678);
+  });
+
+  it("honors a folder-declared owner", async () => {
+    const folder = new DescriptorFolder({
+      flags: DescriptorFlags.CanRead,
+      uid: 1111,
+      gid: 2222,
+    });
+    const registry = new DescriptorRegistry([["/dir", folder]]);
+    const ops = registry.buildOps();
+    const st = await new Promise<{ uid?: number; gid?: number }>((resolve) => {
+      ops.getattr!("/dir", (err, s) => resolve(err ? {} : (s ?? {})));
+    });
+    expect(st.uid).toBe(1111);
+    expect(st.gid).toBe(2222);
   });
 });

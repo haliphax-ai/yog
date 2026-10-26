@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import type { ToolRegistry } from "./toolkit/index.ts";
+import type { ToolCallRecord } from "./state/index.ts";
 
 /**
  * Agent turn engine: streams one chat completion, executes any tool calls it
@@ -11,6 +12,10 @@ import type { ToolRegistry } from "./toolkit/index.ts";
 export interface TurnOptions {
   /** Abort the in-flight model stream (used for graceful SIGINT/SIGTERM). */
   signal?: AbortSignal;
+  /** Session id stamped on audit rows. */
+  sessionId?: string;
+  /** Best-effort audit recorder (failures never abort the turn). */
+  recorder?: { record(rec: ToolCallRecord): Promise<void> };
 }
 
 export async function runTurn(
@@ -69,7 +74,9 @@ export async function runTurn(
     });
 
     for (const [i, tc] of ordered) {
+      const startedAt = Date.now();
       const result = await tools.execute(tc.name, tc.args);
+      const completedAt = Date.now();
       // Tool activity goes to stderr so stdout remains a clean response stream.
       console.error(
         `[tool] ${tc.name}(${tc.args}) -> ` +
@@ -79,6 +86,26 @@ export async function runTurn(
               ? `error: ${result["error"]}`
               : `exitCode=${result["exitCode"]} runtimeMs=${result["runtimeMs"]}`),
       );
+
+      const toolError = result?.["error"] as string | undefined;
+      if (opts.recorder && opts.sessionId) {
+        try {
+          await opts.recorder.record({
+            name: tc.name,
+            parameters: tc.args,
+            result: toolError === undefined && result !== undefined ? result : undefined,
+            error: toolError,
+            startedAt,
+            completedAt,
+            durationMs: completedAt - startedAt,
+            sessionId: opts.sessionId,
+          });
+        } catch (err) {
+          // Non-fatal by contract: an audit failure must never kill the turn.
+          console.error(`[audit] recorder failed: ${(err as Error).message}`);
+        }
+      }
+
       const payload =
         result === undefined
           ? JSON.stringify({ error: `unknown tool "${tc.name}"` })

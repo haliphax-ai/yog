@@ -11,6 +11,14 @@
  *                     and node:child_process
  *   src/vfs/**        leaf domain: descriptors (may use host for out-of-VFS action)
  *   src/toolkit/**    leaf domain: harness tools (may use host for out-of-VFS action)
+ *   src/worker/**     worker process + JSONL client (infra; uses host only)
+ *   src/state/**      agentfs-backed home/state (the only agentfs-SDK importer)
+ *
+ * Encapsulation invariant: no module reaches into another domain's internals.
+ * Every domain exposes a single public door — its `index.ts` barrel — and
+ * modules outside a domain may only import that barrel (enforced by the
+ * generated `domain-entry-only:*` rule family, see DOMAINS below).
+ *
  *   test/**           may import any src/**, never the reverse
  *
  * Key invariant: descriptors and tools reach the host (filesystem AND
@@ -18,6 +26,14 @@
  * node:child_process imports anywhere in src/ other than host are rule
  * violations.
  */
+// Domains that each expose a single public door (`index.ts`). A module
+// outside a domain may only import its barrel — never its internals.
+// dependency-cruiser cannot compare the importer's directory with the target's
+// in one generic regex (no backreferences), so the entry-only rule family is
+// generated per domain from this list; adding a new domain here extends the
+// same guarantee to it automatically.
+const DOMAINS = ["vfs", "toolkit", "worker", "state"];
+
 module.exports = {
   options: {
     exclude: { path: "(node_modules|\\.git|dist|coverage|sys|sys-test|.harness|\\.serena)" },
@@ -100,6 +116,39 @@ module.exports = {
       from: { path: "^src/(?!host\\.ts$)" },
       to: { path: "^(node:)?child_process$" },
     },
+
+    // Only the state layer may import the agentfs SDK.
+    {
+      name: "agentfs-only-in-state",
+      severity: "error",
+      from: { path: "^src/(?!state/)" },
+      to: { path: "^agentfs-sdk$" },
+    },
+
+    // The state layer is a leaf below tools/vfs — it never reaches up.
+    {
+      name: "state-leaf",
+      severity: "error",
+      from: { path: "^src/state/" },
+      to: { path: "^src/(vfs/|toolkit/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)" },
+    },
+
+    // The worker layer is infra below the tool domain — it may only touch host.
+    {
+      name: "worker-leaf",
+      severity: "error",
+      from: { path: "^src/worker/" },
+      to: { path: "^src/(vfs/|toolkit/|state/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)" },
+    },
+
+    // Domain encapsulation: no module reaches into another domain's internals.
+    // Anything outside a domain may only import its barrel (`index.ts`).
+    ...DOMAINS.map((domain) => ({
+      name: `domain-entry-only:${domain}`,
+      severity: "error",
+      from: { path: `^src/(?!${domain}/)` },
+      to: { path: `^src/${domain}/(?!index\\.ts$)` },
+    })),
 
     // Production code never imports tests.
     {

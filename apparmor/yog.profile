@@ -19,26 +19,60 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/nis>
 
   # Capabilities needed for FUSE mounting (used via the setuid fusermount
-  # helper; kept here so direct mount attempts also behave).
-  capability mount,
+  # helper; kept here so direct mount attempts also behave) and for the
+  # daemon/agent split (the harness spawns its bash worker as the agent user).
+  # Note: there is no `capability mount` — mount(2) is gated by sys_admin and
+  # the mount/umount rules below.
   capability sys_admin,
+  capability setuid,
+  capability setgid,
+  # The entrypoint re-owns the state volume (/var/lib/yog) to the yog user.
+  capability chown,
 
-  # Runtime + tool binaries
-  /app/** r,
-  /usr/bin/{node,bash,sh,dash,env,sed,grep,cat,echo,ls,ps,tar,gzip,bzip2,xz,find,head,tail,cut,tr,awk,sort,uniq,wc,date,hostname,id,whoami,dirname,basename,mkdir,rmdir,rm,cp,mv,ln,chmod,chown,touch,file,stat,du,df,mount,umount,fusermount,curl,wget,git,jq,rg,gpg,openssl,tee,printf,seq,nohup,setsid} mr,
-  /usr/sbin/{fusermount,groupadd,useradd} mr,
+  # Runtime + tool binaries. The harness/worker (node, setpriv, shell) run
+  # confined under this profile (`ix` = inherit). The agent's bash escapes
+  # unconfined (`Ux`) so the model can execute arbitrary commands without
+  # enumerating every utility here; fusermount likewise escapes so the setuid
+  # helper can perform the mount.
+  # /app contains native addons (turso/libsql .node bindings) loaded via
+  # dlopen, which requires mmap (`m`) as well as read (`r`).
+  /app/** rm,
+  /usr/bin/bash Ux,
+  /usr/bin/{sh,dash,env,sed,grep,cat,echo,ls,ps,tar,gzip,bzip2,xz,find,head,tail,cut,tr,awk,sort,uniq,wc,date,hostname,id,whoami,dirname,basename,mkdir,rmdir,rm,cp,mv,ln,chmod,chown,touch,file,stat,du,df,mount,umount,curl,wget,git,jq,rg,gpg,openssl,tee,printf,seq,nohup,setsid,setpriv,capsh,ldd} ix,
+  # node (re)opens its own binary and ldd when spawning the worker — exec
+  # (`ix`) alone does not grant read, so give both.
+  /usr/local/bin/node mr,
+  /usr/local/bin/node ix,
+  /usr/bin/ldd r,
+  # fusermount is at /usr/bin on Debian (and /usr/sbin on some distros);
+  # it must escape so its setuid mount helper works.
+  /usr/bin/fusermount Ux,
+  /usr/sbin/fusermount Ux,
+  /usr/sbin/{groupadd,useradd} ix,
 
-  # FUSE device and mounts
+  # FUSE device and mounts (fstype takes literal types — no wildcards)
   /dev/fuse rw,
   mount fstype=fuse,
-  mount fstype=fuse.*,
   umount,
 
-  # Working tree (agent HOME + state dir + tmp)
-  /home/agent/ rw,
-  /home/agent/** rw,
-  /tmp/ rw,
-  /tmp/** rw,
+  # Working tree: agent HOME (model-executed bash), daemon HOME, and the
+  # daemon's state dir (/var/lib/yog). `k` (lock) is required for flock(2),
+  # which the turso/libsql native binding uses on the database file
+  # (confirmed by audit: requested_mask="k"). The state tree gets read/write/
+  # mmap/lock; creating new files is covered by write on the directory (there
+  # is no `c` mode — that was a parser error).
+  /home/agent/ rwk,
+  /home/agent/** rwk,
+  /home/yog/ rwk,
+  /home/yog/** rwk,
+  /var/lib/yog/ rwkm,
+  /var/lib/yog/** rwkm,
+  /tmp/ rwk,
+  /tmp/** rwk,
+
+  # FUSE mount root (mounted by the daemon; served to the agent)
+  /yog/ rwk,
+  /yog/** rwk,
 
   # Read-only system surface
   /etc/** r,

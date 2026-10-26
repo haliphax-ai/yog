@@ -13,14 +13,37 @@ RUN --mount=type=cache,mode=0755,target=/var/cache/apt \
     gnupg \
     jq \
     ripgrep \
+    util-linux \
     && \
   rm -rf /var/lib/apt/lists/*
 RUN groupadd --system --gid 900 agent && \
   useradd --system --uid 900 --gid agent --shell /usr/sbin/nologin agent && \
-  mkdir /home/agent && \
-  chown agent:agent /home/agent
+  groupadd --system --gid 901 yog && \
+  useradd --system --uid 901 --gid yog --shell /usr/sbin/nologin yog && \
+  mkdir -p /home/agent /home/yog /yog /var/lib/yog/agentfs && \
+  chown agent:agent /home/agent && \
+  chown yog:yog /home/yog /yog /var/lib/yog && \
+  echo "user_allow_other" > /etc/fuse.conf
+
+# Daemon/agent split: the harness runs as the `yog` daemon user; its bash
+# worker drops to the `agent` user (needs CAP_SETUID/SETGID in the launcher).
+# /yog is the FUSE mount root, served to the agent user with allow_other. The
+# persistent shell state lives in the agent's home, and the harness's state db
+# lives in the daemon's home.
+ENV YOG_ALLOW_OTHER=1 \
+  YOG_AGENT_UID=900 \
+  YOG_AGENT_GID=900 \
+  YOG_AGENT_HOME=/home/agent \
+  HARNESS_STATE_DIR=/home/agent/.harness \
+  YOG_STATE_ROOT=/var/lib/yog
 COPY . /app
-RUN cd /app && npm ci --omit=dev --ignore-scripts
-WORKDIR /home/agent
-USER agent:agent
-ENTRYPOINT ["node", "/app/src/index.ts"]
+RUN cd /app && npm ci --omit=dev --ignore-scripts && chmod +x /app/entrypoint.sh
+WORKDIR /home/yog
+# The daemon's state database lives in /var/lib/yog (dedicated runtime data
+# dir, not a home) — place it on a volume (see the `yog` launcher) so
+# turso's file locking works and state persists.
+VOLUME ["/var/lib/yog"]
+# The container starts as root only so the entrypoint can setpriv down to the
+# `yog` daemon user with ambient CAP_SETUID/CAP_SETGID (needed to spawn the
+# bash worker as the `agent` user). The harness itself never runs as root.
+ENTRYPOINT ["/app/entrypoint.sh"]

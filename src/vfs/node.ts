@@ -18,6 +18,10 @@ export interface DescriptorNode {
   readonly flags: DescriptorFlags;
   /** Current size in bytes (0 when unspecified). */
   readonly size?: number;
+  /** Owner uid served for this node (defaults to the agent user). */
+  readonly uid?: number;
+  /** Owner gid served for this node (defaults to the agent user). */
+  readonly gid?: number;
   /**
    * Optional housekeeping hook invoked when this node is renamed within the
    * mount. Return a negative errno to refuse the rename.
@@ -80,6 +84,8 @@ export class DescriptorFolder implements DescriptorNode {
   readonly kind = "folder" as const;
   readonly mode: number;
   readonly flags: DescriptorFlags;
+  readonly uid?: number;
+  readonly gid?: number;
 
   /** Generic node hooks — inherited from DescriptorNode, declared here so the class type carries them. */
   onRename?(): number | void;
@@ -109,9 +115,11 @@ export class DescriptorFolder implements DescriptorNode {
 
   #children = new Map<string, DescriptorChild>();
 
-  constructor(opts: { mode?: number; flags?: DescriptorFlags } = {}) {
+  constructor(opts: { mode?: number; flags?: DescriptorFlags; uid?: number; gid?: number } = {}) {
     this.mode = opts.mode ?? DIR_MODE;
     this.flags = opts.flags ?? DescriptorFlags.CanRead;
+    this.uid = opts.uid;
+    this.gid = opts.gid;
   }
 
   get size(): number {

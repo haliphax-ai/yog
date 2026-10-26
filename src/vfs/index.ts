@@ -20,11 +20,18 @@
  * open/create fd handling, write buffering, commit-on-release, truncate,
  * rename, unlink, errno constants) is handled here.
  *
- * This is the barrel module; the pieces live in:
+ * This is the barrel module — the single public door for the VFS domain —
+ * and the pieces live in:
  *   - `./constants.ts` — errno/mode/owner constants, DescriptorFlags, WriteMode
  *   - `./node.ts`      — DescriptorNode/DescriptorFile/DescriptorFolder/DescriptorChild
  *   - `./registry.ts`  — DescriptorRegistry (the FUSE ops adapter)
+ *   - `./descriptors/` — concrete descriptors (ListDescriptor, …)
+ *
+ * Nothing outside `src/vfs/` may import these internals directly (depcruise
+ * `vfs-entry-only`). Descriptors themselves import from `constants.ts` /
+ * `node.ts` rather than this barrel to avoid a cycle.
  */
 export * from "./constants.ts";
 export * from "./node.ts";
 export * from "./registry.ts";
+export { ListDescriptor } from "./descriptors/list.ts";
