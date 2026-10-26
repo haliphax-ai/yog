@@ -203,9 +203,11 @@ SDK (enforced by dependency-cruiser).
 The `fuse-native` addon needs a FUSE device and mount privileges:
 
 - `/dev/fuse` must be present in the container: `--device /dev/fuse`.
-- The container runs the harness as the non-root `yog` daemon user; its bash
-  worker drops to the non-root `agent` user (the daemon/agent split), so
-  model-executed code never runs as the harness user.
+- The container runs the harness as the non-root `yog` daemon user (stable
+  uid 900); its bash worker drops to the non-root `agent` user (the
+  daemon/agent split), so model-executed code never runs as the harness
+  user. Agents are allocated from a pool starting at uid 1100 (above the
+  1000 host-user region); the bootstrap agent is 1100.
 - Mounting requires `--cap-add SYS_ADMIN`, and the `fuse` (libfuse2)
   package so the setuid `fusermount` helper exists; both are set up by the
   image. Mounts go through `fusermount` as the `yog` user into `/yog`.

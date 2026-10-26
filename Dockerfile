@@ -16,13 +16,17 @@ RUN --mount=type=cache,mode=0755,target=/var/cache/apt \
     util-linux \
     && \
   rm -rf /var/lib/apt/lists/*
-RUN groupadd --system --gid 900 agent && \
-  useradd --system --uid 900 --gid agent --shell /usr/sbin/nologin agent && \
-  groupadd --system --gid 901 yog && \
-  useradd --system --uid 901 --gid yog --shell /usr/sbin/nologin yog && \
+# UID scheme: the daemon (yog) is the stable id 900; agents are allocated
+# from a pool starting at 1100 (above the 1000 host-user region) and will be
+# reconciled at runtime as the system grows. The bootstrap agent is the base
+# of that pool.
+RUN groupadd --system --gid 900 yog && \
+  useradd --system --uid 900 --gid yog --shell /usr/sbin/nologin yog && \
+  groupadd --gid 1100 agent && \
+  useradd --uid 1100 --gid agent --shell /usr/sbin/nologin agent && \
   mkdir -p /home/agent /home/yog /yog /var/lib/yog/agentfs && \
-  chown agent:agent /home/agent && \
   chown yog:yog /home/yog /yog /var/lib/yog && \
+  chown agent:agent /home/agent && \
   echo "user_allow_other" > /etc/fuse.conf
 
 # Daemon/agent split: the harness runs as the `yog` daemon user; its bash
@@ -31,8 +35,8 @@ RUN groupadd --system --gid 900 agent && \
 # persistent shell state lives in the agent's home, and the harness's state db
 # lives in the daemon's home.
 ENV YOG_ALLOW_OTHER=1 \
-  YOG_AGENT_UID=900 \
-  YOG_AGENT_GID=900 \
+  YOG_AGENT_UID=1100 \
+  YOG_AGENT_GID=1100 \
   YOG_AGENT_HOME=/home/agent \
   HARNESS_STATE_DIR=/home/agent/.harness \
   YOG_STATE_ROOT=/var/lib/yog
