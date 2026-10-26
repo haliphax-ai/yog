@@ -36,8 +36,12 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   # dlopen, which requires mmap (`m`) as well as read (`r`).
   /app/** rm,
   /usr/bin/bash Ux,
-  /usr/bin/{sh,dash,env,sed,grep,cat,echo,ls,ps,tar,gzip,bzip2,xz,find,head,tail,cut,tr,awk,sort,uniq,wc,date,hostname,id,whoami,dirname,basename,mkdir,rmdir,rm,cp,mv,ln,chmod,chown,touch,file,stat,du,df,mount,umount,curl,wget,git,jq,rg,gpg,openssl,tee,printf,seq,nohup,setsid,setpriv,capsh} ix,
+  /usr/bin/{sh,dash,env,sed,grep,cat,echo,ls,ps,tar,gzip,bzip2,xz,find,head,tail,cut,tr,awk,sort,uniq,wc,date,hostname,id,whoami,dirname,basename,mkdir,rmdir,rm,cp,mv,ln,chmod,chown,touch,file,stat,du,df,mount,umount,curl,wget,git,jq,rg,gpg,openssl,tee,printf,seq,nohup,setsid,setpriv,capsh,ldd} ix,
+  # node (re)opens its own binary and ldd when spawning the worker — exec
+  # (`ix`) alone does not grant read, so give both.
+  /usr/local/bin/node mr,
   /usr/local/bin/node ix,
+  /usr/bin/ldd r,
   /usr/sbin/fusermount Ux,
   /usr/sbin/{groupadd,useradd} ix,
 
@@ -47,18 +51,19 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   umount,
 
   # Working tree: agent HOME (model-executed bash), daemon HOME (state db +
-  # audit trail), tmp. `l` (lock) is required for flock(2), which the turso/
-  # libsql native binding uses on the database file.
-  /home/agent/ rwl,
-  /home/agent/** rwl,
-  /home/yog/ rwl,
-  /home/yog/** rwl,
-  /tmp/ rwl,
-  /tmp/** rwl,
+  # audit trail), tmp. `k` (lock) is required for flock(2), which the turso/
+  # libsql native binding uses on the database file (confirmed by audit:
+  # requested_mask="k").
+  /home/agent/ rwk,
+  /home/agent/** rwk,
+  /home/yog/ rwk,
+  /home/yog/** rwk,
+  /tmp/ rwk,
+  /tmp/** rwk,
 
   # FUSE mount root (mounted by the daemon; served to the agent)
-  /yog/ rw,
-  /yog/** rw,
+  /yog/ rwk,
+  /yog/** rwk,
 
   # Read-only system surface
   /etc/** r,
