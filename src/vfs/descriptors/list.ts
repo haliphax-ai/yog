@@ -1,5 +1,6 @@
 import { DescriptorFlags, EACCES, EISDIR, FILE_MODE } from "../constants.ts";
 import { type DescriptorChild, type DescriptorFile } from "../node.ts";
+import { logger } from "../../log.ts";
 
 /**
  * The list descriptor.
@@ -31,16 +32,16 @@ export class ListDescriptor implements DescriptorFile {
   commit(kind: "append" | "replace", text: string): void {
     if (kind === "append") {
       for (const item of splitItems(text)) this.#items.push(item);
-      console.error({ action: "append", items: this.#items });
+      logger.error({ action: "append", items: this.#items });
     } else {
       this.#items = splitItems(text);
-      console.error({ action: "replace", items: this.#items });
+      logger.error({ action: "replace", items: this.#items });
     }
   }
 
   reset(): void {
     this.#items = [];
-    console.error({ action: "truncate", items: this.#items });
+    logger.error({ action: "truncate", items: this.#items });
   }
 
   /** Accept rename-overwrite: replace the list contents with the source file's content. */

@@ -13,6 +13,7 @@ import {
   type WorkerRequest,
   type WorkerResponse,
 } from "./protocol.ts";
+import { logger } from "../log.ts";
 
 const liveClients = new Set<WorkerClient>();
 
@@ -85,7 +86,7 @@ export class WorkerClient {
       });
       if (!child.pid) {
         child = spawn(process.execPath, [entry, "--worker"], baseOpts);
-        console.warn(
+        logger.warn(
           "[worker] could not drop to agent user (EPERM); bash will run as the harness user. " +
             "To enable the daemon/agent split, run the harness with effective CAP_SETUID/CAP_SETGID " +
             "(e.g. as root, or with --cap-add SETUID,SETGID when starting as root), or run the " +
@@ -171,12 +172,12 @@ export class WorkerClient {
       if (!decoded) return;
       frame = decoded;
     } catch (err) {
-      console.error(`[worker] bad response frame: ${(err as Error).message}`);
+      logger.error(`[worker] bad response frame: ${(err as Error).message}`);
       return;
     }
     const pending = this.#pending.get(frame.id);
     if (!pending) {
-      console.error(`[worker] response for unknown id ${frame.id}`);
+      logger.error(`[worker] response for unknown id ${frame.id}`);
       return;
     }
     this.#pending.delete(frame.id);

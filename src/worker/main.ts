@@ -12,6 +12,7 @@ import { createInterface } from "node:readline";
 import { mkdir, readFile, spawn, writeFile } from "../host.ts";
 import { decodeFrame, encodeFrame, type WorkerResponse, type WorkerRequest } from "./protocol.ts";
 import { buildToolEnv, WRAPPER } from "./wrapper.ts";
+import { logger } from "../log.ts";
 
 let currentChild: ReturnType<typeof spawn> | undefined;
 
@@ -117,7 +118,7 @@ rl.on("line", (line) => {
     try {
       frame = decodeFrame(line);
     } catch (err) {
-      console.error(`[worker] dropping bad frame: ${(err as Error).message}`);
+      logger.error(`[worker] dropping bad frame: ${(err as Error).message}`);
       return;
     }
     if (!frame) return;

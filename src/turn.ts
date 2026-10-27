@@ -3,6 +3,7 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import type { ToolRegistry } from "./toolkit/index.ts";
 import type { ToolCallRecord } from "./state/index.ts";
 
+import { logger } from "./log.ts";
 import { newSessionId } from "./state/index.ts";
 import {
   StdoutSink,
@@ -128,14 +129,21 @@ export class TurnEngine {
           const startedAt = Date.now();
           const result = await tools.execute(tc.name, tc.args);
           const completedAt = Date.now();
-          // Tool activity goes to stderr so stdout remains a clean response stream.
-          console.error(
-            `[tool] ${tc.name}(${tc.args}) -> ` +
-              (result === undefined
-                ? "unknown tool"
-                : result["error"]
-                  ? `error: ${result["error"]}`
-                  : `exitCode=${result["exitCode"]} runtimeMs=${result["runtimeMs"]}`),
+          const outcome =
+            result === undefined
+              ? "unknown tool"
+              : result["error"]
+                ? `error: ${result["error"]}`
+                : `exitCode=${result["exitCode"]} runtimeMs=${result["runtimeMs"]}`;
+          // Tool activity goes to the structured log so stdout remains a clean response stream.
+          logger.error(
+            {
+              tool: tc.name,
+              args: tc.args,
+              ok: result !== undefined && result["error"] === undefined,
+              outcome,
+            },
+            `[tool] ${tc.name}(${tc.args}) -> ${outcome}`,
           );
 
           const toolError = result?.["error"] as string | undefined;
@@ -161,7 +169,7 @@ export class TurnEngine {
               });
             } catch (err) {
               // Non-fatal by contract: an audit failure must never kill the turn.
-              console.error(`[audit] recorder failed: ${(err as Error).message}`);
+              logger.error(`[audit] recorder failed: ${(err as Error).message}`);
             }
           }
 

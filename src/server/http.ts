@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { encodeEvent, type SseEnvelope } from "./sse.ts";
+import { logger } from "../log.ts";
 
 /** Capabilities advertisement served at GET /v1/capabilities. */
 export interface Capabilities {
@@ -388,9 +389,11 @@ export function createHttpServer(deps: HttpDeps): Server {
     res.on("close", onClose);
 
     let sawError = false;
+    const turnLog = logger.child({ sessionId: session.id });
     const emit = async (ev: SseEnvelope): Promise<void> => {
       if (closed || res.writableEnded || res.destroyed) return;
       if (ev.type === "error") sawError = true;
+      turnLog.debug({ event: ev }, "turn event");
       res.write(encodeEvent(ev));
     };
 

@@ -243,8 +243,16 @@ describe("runClient stream output", () => {
     await runClient(opts(base, stdout, stderr));
 
     expect(stdout.text).toBe("Hello world");
-    expect(stderr.text).toContain("tool.call");
-    expect(stderr.text).toContain("tool.result");
+    const logLines = stderr.text
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const call = logLines.find((l) => l.event?.type === "tool.call");
+    expect(call).toBeDefined();
+    expect(call!.event.data).toMatchObject({ id: "c1", name: "bash", args: "{}" });
+    const result = logLines.find((l) => l.event?.type === "tool.result");
+    expect(result).toBeDefined();
+    expect(result!.event.data).toMatchObject({ id: "c1", name: "bash", ok: true, result: "ok" });
     // Assistant transcript must not leak into the status stream.
     expect(stderr.text).not.toContain("Hello world");
   }, 15_000);

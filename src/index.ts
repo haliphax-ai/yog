@@ -12,6 +12,7 @@
  */
 import { parseServeArgs, runCommand } from "./cli.ts";
 import { createDaemon } from "./server/index.ts";
+import { logger } from "./log.ts";
 
 const USAGE = 'usage: yog run <modelId> "<prompt>"\n       yog serve [--host <addr>] [--port <n>]';
 
@@ -25,11 +26,11 @@ let exitRequested = false;
 
 function requestExit(signal: NodeJS.Signals): void {
   if (exitRequested) {
-    console.error(`forced exit after repeated ${signal}`);
+    logger.error(`forced exit after repeated ${signal}`);
     process.exit(130);
   }
   exitRequested = true;
-  console.error(`received ${signal}; aborting run and tearing down`);
+  logger.error(`received ${signal}; aborting run and tearing down`);
   abortController.abort();
   setTimeout(() => process.exit(130), 3000).unref();
 }
@@ -38,8 +39,8 @@ function requestExit(signal: NodeJS.Signals): void {
 async function serve(argv: readonly string[]): Promise<void> {
   const parsed = parseServeArgs(argv);
   if ("error" in parsed) {
-    console.error(parsed.error);
-    console.error(USAGE);
+    logger.error(parsed.error);
+    logger.error(USAGE);
     process.exit(1);
   }
   // createDaemon wires signals (SIGINT/SIGTERM → graceful shutdown → exit),
@@ -48,7 +49,7 @@ async function serve(argv: readonly string[]): Promise<void> {
     ...(parsed.host !== undefined ? { host: parsed.host } : {}),
     ...(parsed.port !== undefined ? { port: parsed.port } : {}),
   });
-  console.error(`[yog] serve listening at ${daemon.url}`);
+  logger.info(`[yog] serve listening at ${daemon.url}`);
 }
 
 /**
@@ -74,6 +75,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error(err instanceof Error ? (err.stack ?? err.message) : String(err));
+  logger.error(err instanceof Error ? (err.stack ?? err.message) : String(err));
   process.exit(1);
 });

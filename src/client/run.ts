@@ -12,6 +12,7 @@
  * user to run `yog serve`.
  */
 import type { TurnEvent } from "../turn/sink.ts";
+import { pino } from "pino";
 import { readSseStream } from "./sse.ts";
 
 /** Default daemon origin when YOG_SERVER_URL is unset. */
@@ -162,6 +163,7 @@ async function execute(
 ): Promise<RunResult> {
   const token = process.env["YOG_API_TOKEN"];
   const auth = token ? { authorization: `Bearer ${token}` } : undefined;
+  const log = pino({}, stderr as unknown as NodeJS.WritableStream);
 
   // 1. Optional capabilities probe — establishes reachability with a friendly
   //    error before any session is created.
@@ -200,9 +202,7 @@ async function execute(
       return;
     }
     if (ev.type === "tool.call" || ev.type === "tool.result") {
-      const name = ev.data.name;
-      if (ev.type === "tool.call") stderr.write(`tool.call ${name}\n`);
-      else stderr.write(`tool.result ${name} ${ev.data.ok ? "ok" : "error"}\n`);
+      log.info({ event: ev }, "turn event");
       return;
     }
     if (ev.type === "turn.finished") {

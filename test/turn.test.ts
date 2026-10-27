@@ -5,6 +5,7 @@ import { z } from "zod";
 import { TurnEngine } from "../src/turn.ts";
 import { RecordingSink, StdoutSink, type TurnEvent } from "../src/turn/sink.ts";
 import { ToolRegistry, type ToolSpec } from "../src/toolkit/index.ts";
+import { logger } from "../src/log.ts";
 
 /** Shape of one streaming chunk as the engine consumes it. */
 interface FakeDelta {
@@ -139,15 +140,20 @@ describe("TurnEngine event sequence", () => {
     }
   });
 
-  it("preserves the [tool] stderr diagnostic and the message replay", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  it("preserves the [tool] structured log diagnostic and the message replay", async () => {
+    const errSpy = vi.spyOn(logger, "error");
     const sink = new RecordingSink();
     const messages = userMessages();
 
     await new TurnEngine(sink).run(fakeClient(scriptRounds), "test-model", messages, registry);
 
     expect(errSpy).toHaveBeenCalledWith(
-      expect.stringMatching(/^\[tool] echo\(\{"text":"hi"\}\) -> /),
+      expect.objectContaining({
+        tool: "echo",
+        args: '{"text":"hi"}',
+        ok: true,
+      }),
+      expect.stringMatching(/^\[tool\] echo\(\{"text":"hi"\}\) -> /),
     );
 
     // Assistant replay + tool result are appended exactly as before.
@@ -240,7 +246,6 @@ describe("StdoutSink output parity", () => {
       out.push(String(chunk));
       return true;
     });
-    vi.spyOn(console, "error").mockImplementation(() => {});
 
     await new TurnEngine(new StdoutSink()).run(
       fakeClient(scriptRounds),

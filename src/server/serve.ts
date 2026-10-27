@@ -17,6 +17,7 @@ import type { TurnSink, TurnEvent } from "../turn/sink.ts";
 import { tools, descriptors } from "../register.ts";
 import { setBashExecutor, setShellStateProvider } from "../toolkit/index.ts";
 import { mkdir } from "../host.ts";
+import { logger } from "../log.ts";
 
 /** Options accepted by {@link createDaemon}. */
 export interface DaemonOptions {
@@ -67,7 +68,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       await mkdir(stateRoot(), { recursive: true });
       store = new SessionStore(join(stateRoot(), "sessions.db"));
     } catch (err) {
-      console.error(
+      logger.warn(
         `[yog] warning: session store unavailable (${(err as Error).message}); continuing`,
       );
     }
@@ -77,9 +78,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     try {
       state = await AgentFSState.open({ agentId: DEFAULT_AGENT_ID });
     } catch (err) {
-      console.error(
-        `[yog] warning: agent state unavailable (${(err as Error).message}); continuing`,
-      );
+      logger.warn(`[yog] warning: agent state unavailable (${(err as Error).message}); continuing`);
     }
 
     // --- worker pool (production caller for the bash tool) ---
@@ -87,9 +86,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     try {
       pool = new WorkerPool();
     } catch (err) {
-      console.error(
-        `[yog] warning: worker pool unavailable (${(err as Error).message}); continuing`,
-      );
+      logger.warn(`[yog] warning: worker pool unavailable (${(err as Error).message}); continuing`);
     }
 
     // --- wire the bash tool through the worker pool ---
@@ -145,7 +142,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     try {
       fuse = await mountSys(descriptors.buildOps(), process.env.YOG_MOUNT ?? "/yog");
     } catch (err) {
-      console.error(`[yog] warning: FUSE mount failed (${(err as Error).message}); continuing`);
+      logger.warn(`[yog] warning: FUSE mount failed (${(err as Error).message}); continuing`);
     }
 
     // --- event bus: executeTurn publishes envelopes, the HTTP adapter
@@ -187,6 +184,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
               // persistence is best effort
             }
           }
+          logger.child({ sessionId }).debug({ event: ev }, "turn event");
           bus.emit(`session:${sessionId}`, envelope);
         },
       };

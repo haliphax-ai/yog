@@ -4,6 +4,7 @@
  * only entrypoint for one-shot turns, and `yog serve` starts the daemon.
  */
 import { runClient } from "./client/run.ts";
+import { logger } from "./log.ts";
 
 export interface CliArgs {
   modelId: string;
@@ -53,8 +54,8 @@ export async function runCommand(
 ): Promise<number> {
   const parsed = parseCliArgs(argv);
   if ("error" in parsed) {
-    console.error(parsed.error);
-    console.error('usage: yog run <modelId> "<prompt>"');
+    logger.error(parsed.error);
+    logger.error('usage: yog run <modelId> "<prompt>"');
     return 1;
   }
   const result = await runClient({
