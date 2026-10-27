@@ -1,11 +1,12 @@
 import { createServer } from "node:http";
+import { EventEmitter } from "node:events";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import type Fuse from "fuse-native";
 import { createHttpServer, type HttpDeps } from "./http.ts";
-import { encodeEvent, type SseEnvelope } from "./sse.ts";
+import { type SseEnvelope } from "./sse.ts";
 import { SessionStore } from "./store/sessions.ts";
 import { WorkerPool } from "./workpool.ts";
 import { SessionOrchestrator } from "./orchestrator.ts";
@@ -14,6 +15,7 @@ import { mountSys, unmountSys } from "../mount.ts";
 import { TurnEngine, type TurnOptions } from "../turn.ts";
 import type { TurnSink, TurnEvent } from "../turn/sink.ts";
 import { tools, descriptors } from "../register.ts";
+import { setBashExecutor, setShellStateProvider } from "../toolkit/index.ts";
 import { mkdir } from "../host.ts";
 
 /** Options accepted by {@link createDaemon}. */
@@ -80,16 +82,62 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       );
     }
 
-    // --- worker pool + orchestrator ---
+    // --- worker pool (production caller for the bash tool) ---
     let pool: WorkerPool | undefined;
-    let orchestrator: SessionOrchestrator | undefined;
     try {
       pool = new WorkerPool();
-      orchestrator = new SessionOrchestrator({ store, pool });
     } catch (err) {
       console.error(
         `[yog] warning: worker pool unavailable (${(err as Error).message}); continuing`,
       );
+    }
+
+    // --- wire the bash tool through the worker pool ---
+    if (pool) {
+      const p = pool;
+      // Bash tool executor: the tool's `(script, opts)` maps onto the pool's
+      // `run(sessionId, script, { stateDir, restore })`. The bash tool has no
+      // session context, so scripts run under a stable daemon-wide key.
+      setBashExecutor(async (script, opts) => {
+        try {
+          const resp = await p.run("daemon", script, {
+            ...(opts?.stateDir !== undefined ? { stateDir: opts.stateDir } : {}),
+            ...(opts?.restore !== undefined ? { restore: opts.restore } : {}),
+          });
+          if (resp.ok) {
+            return {
+              ok: true,
+              stdout: resp.stdout,
+              stderr: resp.stderr,
+              exitCode: resp.exitCode,
+              ...(resp.state ? { state: resp.state } : {}),
+            };
+          }
+          return { ok: false, stdout: "", stderr: "", exitCode: null, error: resp.error };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      });
+      // Shell snapshots persist in agentfs so they survive daemon restarts.
+      if (state) {
+        const st = state;
+        setShellStateProvider({
+          async load() {
+            try {
+              return await st.loadShellSnapshot("daemon");
+            } catch {
+              return undefined;
+            }
+          },
+          async save(s) {
+            try {
+              await st.saveShellSnapshot("daemon", s);
+            } catch {
+              // best effort: a home write failure must not fail the tool call
+            }
+          },
+        });
+      }
     }
 
     // --- best-effort FUSE mount (skip gracefully when unavailable) ---
@@ -100,51 +148,65 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       console.error(`[yog] warning: FUSE mount failed (${(err as Error).message}); continuing`);
     }
 
-    // --- model boundary: OpenAI client + TurnEngine driving the SSE sink ---
+    // --- event bus: executeTurn publishes envelopes, the HTTP adapter
+    // subscribes per session and frames them as SSE ---
+    const bus = new EventEmitter();
+    bus.setMaxListeners(0);
     const modelId = resolveModelId();
-    const model = {
-      async runTurn(
-        sessionId: string,
-        req: Record<string, unknown>,
-        ctx: { emit: (ev: SseEnvelope) => Promise<void>; signal?: AbortSignal },
-      ): Promise<void> {
-        const client = openaiClient();
-        const messages: ChatCompletionMessageParam[] = [
-          { role: "user", content: typeof req.prompt === "string" ? req.prompt : "" },
-        ];
-        const sink: TurnSink = {
-          async emit(ev: TurnEvent): Promise<void> {
-            const envelope = ev as unknown as SseEnvelope;
-            // SSE frame for the wire (encodeEvent), then persist (best effort).
-            void encodeEvent(envelope);
-            await ctx.emit(envelope);
-            if (store) {
-              try {
-                store.addEvent(sessionId, {
-                  type: ev.type,
-                  payload: JSON.stringify(ev.data),
-                  version: ev.version,
-                });
-              } catch {
-                // persistence is best effort: never fail the stream for it
-              }
+
+    /**
+     * Turn entry point injected into the orchestrator. Builds the OpenAI
+     * client + TurnEngine and routes its sink so every event is BOTH
+     * persisted (best effort) and delivered to the HTTP layer for SSE.
+     * The returned turnId (from turn.started) enables turn recovery.
+     */
+    const executeTurn = async (
+      sessionId: string,
+      req: Record<string, unknown>,
+    ): Promise<{ turnId: string | null }> => {
+      const client = openaiClient();
+      const messages: ChatCompletionMessageParam[] = [
+        { role: "user", content: typeof req.prompt === "string" ? req.prompt : "" },
+      ];
+      let turnId: string | null = null;
+      const sink: TurnSink = {
+        async emit(ev: TurnEvent): Promise<void> {
+          const envelope = ev as unknown as SseEnvelope;
+          if (ev.type === "turn.started") {
+            turnId = (ev.data as { turnId?: string }).turnId ?? turnId;
+          }
+          // Persist first (best effort): never fail the stream for it.
+          if (store) {
+            try {
+              store.addEvent(sessionId, {
+                type: ev.type,
+                payload: JSON.stringify(ev.data),
+                version: ev.version,
+              });
+            } catch {
+              // persistence is best effort
             }
-          },
-        };
-        const turnOpts: TurnOptions = {
-          sessionId,
-          ...(ctx.signal ? { signal: ctx.signal } : {}),
-          ...(state ? { recorder: { record: (rec) => state!.recordToolCall(rec) } } : {}),
-        };
-        await new TurnEngine(sink).run(
-          client,
-          typeof req.model === "string" ? req.model : modelId,
-          messages,
-          tools,
-          turnOpts,
-        );
-      },
+          }
+          bus.emit(`session:${sessionId}`, envelope);
+        },
+      };
+      const turnOpts: TurnOptions = {
+        sessionId,
+        ...(state ? { recorder: { record: (rec) => state!.recordToolCall(rec) } } : {}),
+      };
+      await new TurnEngine(sink).run(
+        client,
+        typeof req.model === "string" ? req.model : modelId,
+        messages,
+        tools,
+        turnOpts,
+      );
+      return { turnId };
     };
+
+    // --- orchestrator drives every turn through executeTurn (cross-session
+    // parallelism, per-session FIFO, abort fan-out) ---
+    const orchestrator = new SessionOrchestrator({ store, pool, executeTurn });
 
     const deps: HttpDeps = {
       capabilities: {
@@ -153,9 +215,9 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         tools: ["bash"],
         features: ["sse"],
       },
-      model,
       ...(store ? { store } : {}),
       ...(orchestrator ? { orchestrator } : {}),
+      bus,
     };
 
     const server = createHttpServer(deps);
@@ -166,6 +228,8 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     const shutdown = async (): Promise<void> => {
       await closeServer(server).catch(() => {});
       await pool?.close().catch(() => {});
+      setBashExecutor(undefined);
+      setShellStateProvider(undefined);
       store?.close();
       await Promise.race([unmountSys(fuse), new Promise((r) => setTimeout(r, 1500))]);
       await state?.close().catch(() => {});

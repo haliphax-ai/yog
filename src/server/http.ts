@@ -21,6 +21,35 @@ export interface SessionRecord {
   closed_at?: number | null;
 }
 
+/** Minimal store boundary the adapter drives (real `SessionStore`). */
+export interface StoreBoundary {
+  createSession(opts?: { title?: string }): unknown;
+  getSession(id: string): unknown;
+  closeSession(id: string, closedAt?: string | number): unknown;
+  addTurn?(
+    sessionId: string,
+    turn: { role: string; content: string; status: string; model?: string },
+  ): unknown;
+  addEvent?(sessionId: string, event: { type: string; payload: string; version?: number }): unknown;
+}
+
+/** Handle returned by `orchestrator.runTurn` (see SessionOrchestrator). */
+export interface TurnHandleLike {
+  promise: Promise<unknown>;
+  abort: (reason?: unknown) => void;
+}
+
+/** Minimal orchestrator boundary the adapter drives for a turn. */
+export interface OrchestratorBoundary {
+  runTurn(sessionId: string, req: Record<string, unknown>): TurnHandleLike;
+}
+
+/** Minimal per-daemon event bus boundary (a Node `EventEmitter`). */
+export interface EventBusBoundary {
+  on(event: string, listener: (ev: SseEnvelope) => void): unknown;
+  off(event: string, listener: (ev: SseEnvelope) => void): unknown;
+}
+
 /** Minimal model-provider boundary the adapter drives for a turn. */
 export interface ModelBoundary {
   runTurn(
@@ -37,8 +66,10 @@ export interface ModelBoundary {
 export interface HttpDeps {
   capabilities?: Capabilities;
   model?: ModelBoundary;
-  store?: unknown;
-  orchestrator?: unknown;
+  store?: StoreBoundary | unknown;
+  orchestrator?: OrchestratorBoundary | unknown;
+  /** Per-daemon event bus: executeTurn publishes, this adapter subscribes. */
+  bus?: EventBusBoundary | unknown;
   createTurnEngine?: unknown;
   [key: string]: unknown;
 }
@@ -90,10 +121,24 @@ function checkAuth(req: IncomingMessage): boolean {
   return header === `Bearer ${token}`;
 }
 
+/** Coerce a store row (sqlite) into the adapter's session shape. */
+function normalizeSession(row: unknown): SessionRecord {
+  const rec = (row ?? {}) as Record<string, unknown>;
+  const status = rec.status === "closed" ? "closed" : "open";
+  return {
+    ...rec,
+    id: String(rec.id ?? ""),
+    status,
+    created_at: Number(rec.created_at ?? Date.now()),
+    updated_at: Number(rec.updated_at ?? Date.now()),
+    closed_at: (rec.closed_at as number | null | undefined) ?? null,
+  } as SessionRecord;
+}
+
 /**
  * Create the v1 HTTP/SSE adapter (PLAN §5.2–§5.5). All boundaries are
- * injected so tests can fake the store, orchestrator, model provider and
- * turn-engine factory.
+ * injected so tests can fake the store, orchestrator, event bus, model
+ * provider and turn-engine factory.
  */
 export function createHttpServer(deps: HttpDeps): Server {
   const capabilities: Capabilities = deps.capabilities ?? {
@@ -103,12 +148,26 @@ export function createHttpServer(deps: HttpDeps): Server {
     features: [],
   };
   const sessions = new Map<string, SessionRecord>();
+  const store = deps.store as StoreBoundary | undefined;
+  const orchestrator = deps.orchestrator as OrchestratorBoundary | undefined;
+  const bus = deps.bus as EventBusBoundary | undefined;
+  const hasStore = !!store && typeof store.createSession === "function";
+  const hasOrchestrator = !!orchestrator && typeof orchestrator.runTurn === "function";
 
   return createServer((req: IncomingMessage, res: ServerResponse) => {
     void handle(req, res).catch((err: unknown) => {
       sendError(res, "internal", err instanceof Error ? err.message : String(err));
     });
   });
+
+  /** Look a session up in the store (preferred) or the in-memory fallback. */
+  function lookupSession(id: string): SessionRecord | null {
+    if (hasStore) {
+      const row = store!.getSession(id);
+      return row ? normalizeSession(row) : null;
+    }
+    return sessions.get(id) ?? null;
+  }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method ?? "GET";
@@ -132,6 +191,15 @@ export function createHttpServer(deps: HttpDeps): Server {
 
     // POST /v1/sessions
     if (method === "POST" && segs.length === 2 && segs[1] === "sessions") {
+      if (hasStore) {
+        const row = store!.createSession();
+        if (!row) {
+          sendError(res, "internal", "session store failed to create a session");
+          return;
+        }
+        sendJson(res, 201, { session: normalizeSession(row) });
+        return;
+      }
       const now = Date.now();
       const session: SessionRecord = {
         id: randomUUID(),
@@ -147,7 +215,7 @@ export function createHttpServer(deps: HttpDeps): Server {
     // /v1/sessions/{id}[/turns...]
     if (segs[1] === "sessions" && segs.length >= 3) {
       const id = segs[2] as string;
-      const session = sessions.get(id);
+      const session = lookupSession(id);
 
       if (segs.length === 3) {
         if (method === "GET") {
@@ -164,6 +232,12 @@ export function createHttpServer(deps: HttpDeps): Server {
             return;
           }
           if (session.status === "open") {
+            if (hasStore) {
+              store!.closeSession(id, Date.now());
+              const closed = lookupSession(id);
+              sendJson(res, 200, { session: closed ?? { ...session, status: "closed" } });
+              return;
+            }
             session.status = "closed";
             session.closed_at = Date.now();
             session.updated_at = session.closed_at;
@@ -231,7 +305,7 @@ export function createHttpServer(deps: HttpDeps): Server {
     }
 
     const model = deps.model;
-    if (!model || typeof model.runTurn !== "function") {
+    if (!hasOrchestrator && (!model || typeof model.runTurn !== "function")) {
       sendError(res, "internal", "no model provider configured");
       return;
     }
@@ -244,9 +318,18 @@ export function createHttpServer(deps: HttpDeps): Server {
 
     const controller = new AbortController();
     let closed = false;
+    let handle: TurnHandleLike | undefined;
     const onClose = (): void => {
+      if (closed) return;
       closed = true;
       controller.abort(new Error("client disconnected"));
+      // Fan the abort out to the orchestrator (queued turns are dropped,
+      // in-flight turns get their handle promise rejected).
+      try {
+        handle?.abort(new Error("client disconnected"));
+      } catch {
+        // abort is best effort
+      }
     };
     req.on("close", onClose);
     res.on("close", onClose);
@@ -258,8 +341,66 @@ export function createHttpServer(deps: HttpDeps): Server {
       res.write(encodeEvent(ev));
     };
 
+    // Record the turn row up front (best effort: persistence never fails the
+    // stream); every emitted event below is persisted alongside it.
+    if (store?.addTurn) {
+      try {
+        store.addTurn(session.id, {
+          role: "user",
+          content: typeof body.prompt === "string" ? body.prompt : "",
+          status: "running",
+          ...(typeof body.model === "string" ? { model: body.model } : {}),
+        });
+      } catch {
+        // persistence is best effort
+      }
+    }
+    const persistEvent = (ev: SseEnvelope): void => {
+      if (!store?.addEvent) return;
+      try {
+        const data = (ev as { data?: unknown }).data;
+        store.addEvent(session.id, {
+          type: ev.type,
+          payload: JSON.stringify(data),
+          version: typeof ev.version === "number" ? ev.version : 1,
+        });
+      } catch {
+        // persistence is best effort
+      }
+    };
+
+    const channel = `session:${session.id}`;
+    const onBusEvent = (ev: SseEnvelope): void => {
+      persistEvent(ev);
+      void emit(ev);
+    };
+
     try {
-      await model.runTurn(session.id, body, { emit, signal: controller.signal });
+      if (hasOrchestrator) {
+        // Orchestrator path: the composed executeTurn publishes envelopes to
+        // the per-daemon bus; we subscribe for this session and frame them.
+        bus?.on(channel, onBusEvent);
+        handle = orchestrator!.runTurn(session.id, body);
+        controller.signal.addEventListener("abort", () => handle?.abort(), { once: true });
+        try {
+          await handle.promise;
+        } catch (err) {
+          if (!sawError && !closed && !res.writableEnded) {
+            const e = err as { code?: string; message?: string };
+            await emit({
+              id: 0,
+              type: "error",
+              version: 1,
+              ts: Date.now(),
+              code: e.code ?? "provider_error",
+              data: { code: e.code ?? "provider_error", message: e.message ?? String(err) },
+            } as SseEnvelope);
+          }
+        }
+      } else {
+        // Fallback path (no orchestrator): drive the model provider directly.
+        await model!.runTurn(session.id, body, { emit, signal: controller.signal });
+      }
     } catch (err) {
       if (!sawError && !closed && !res.writableEnded) {
         const e = err as { code?: string; message?: string };
@@ -273,6 +414,7 @@ export function createHttpServer(deps: HttpDeps): Server {
         } as SseEnvelope);
       }
     } finally {
+      bus?.off(channel, onBusEvent);
       req.off("close", onClose);
       res.off("close", onClose);
       if (!res.writableEnded && !res.destroyed) res.end();
