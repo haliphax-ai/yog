@@ -151,6 +151,23 @@ module.exports = {
       to: { path: `^src/${domain}/(?!index\\.ts$)` },
     })),
 
+    // The logging module is the ONLY place that may touch pino; everything
+    // else goes through src/log.ts. Keeps the stream/level policy central.
+    {
+      name: "pino-only-in-log",
+      severity: "error",
+      from: { path: "^src/(?!log\\.ts$)" },
+      to: { path: "^pino$" },
+    },
+
+    // src/log.ts is a leaf: it must not import any internal src module.
+    {
+      name: "log-leaf",
+      severity: "error",
+      from: { path: "^src/log\\.ts$" },
+      to: { path: "^src/" },
+    },
+
     // Production code never imports tests.
     {
       name: "no-prod-import-test",
