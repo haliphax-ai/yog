@@ -25,6 +25,8 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4",
     "@swc/core": "^1.16.20",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.6.5",
