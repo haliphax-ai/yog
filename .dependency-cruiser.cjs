@@ -6,6 +6,7 @@
  *   src/index.ts      CLI entry — composition root; may import anything under src/
  *   src/register.ts   wiring manifest — composes tools + fs domains only
  *   src/turn.ts       orchestration — knows the ToolRegistry, never the VFS/entry
+ *   src/turn/sink.ts  transport-agnostic TurnEvent envelope + sink impls
  *   src/mount.ts      pure FUSE bridge — no internal dependencies
  *   src/host.ts      host proxy — the ONLY module allowed to touch node:fs
  *                     and node:child_process
@@ -32,7 +33,7 @@
 // in one generic regex (no backreferences), so the entry-only rule family is
 // generated per domain from this list; adding a new domain here extends the
 // same guarantee to it automatically.
-const DOMAINS = ["vfs", "toolkit", "worker", "state"];
+const DOMAINS = ["vfs", "toolkit", "worker", "state", "server"];
 
 module.exports = {
   options: {
@@ -55,7 +56,7 @@ module.exports = {
       name: "fs-not-above",
       severity: "error",
       from: { path: "^src/vfs/" },
-      to: { path: "^src/(toolkit/|turn\\.ts|mount\\.ts|index\\.ts|register\\.ts)" },
+      to: { path: "^src/(toolkit/|turn/|turn\\.ts|mount\\.ts|index\\.ts|register\\.ts)" },
     },
 
     // The tool domain never reaches up into the VFS/orchestration/entry.
@@ -63,14 +64,14 @@ module.exports = {
       name: "tools-not-above",
       severity: "error",
       from: { path: "^src/toolkit/" },
-      to: { path: "^src/(vfs/|turn\\.ts|mount\\.ts|index\\.ts|register\\.ts)" },
+      to: { path: "^src/(vfs/|turn/|turn\\.ts|mount\\.ts|index\\.ts|register\\.ts)" },
     },
 
     // The turn engine receives registries injected; it never fetches them.
     {
       name: "turn-not-manifest",
       severity: "error",
-      from: { path: "^src/turn\\.ts$" },
+      from: { path: "^src/turn(\\.ts|/)" },
       to: { path: "^src/(index\\.ts|register\\.ts)$" },
     },
 
@@ -87,7 +88,7 @@ module.exports = {
       name: "register-composes-domains",
       severity: "error",
       from: { path: "^src/register\\.ts$" },
-      to: { path: "^src/(index\\.ts|turn\\.ts|mount\\.ts)$" },
+      to: { path: "^src/(index\\.ts|turn\\.ts|mount\\.ts|turn/.+)$" },
     },
 
     // The host proxy is a leaf: it must not import any internal src module.
@@ -130,7 +131,7 @@ module.exports = {
       name: "state-leaf",
       severity: "error",
       from: { path: "^src/state/" },
-      to: { path: "^src/(vfs/|toolkit/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)" },
+      to: { path: "^src/(vfs/|toolkit/|turn/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)" },
     },
 
     // The worker layer is infra below the tool domain — it may only touch host.
@@ -138,7 +139,7 @@ module.exports = {
       name: "worker-leaf",
       severity: "error",
       from: { path: "^src/worker/" },
-      to: { path: "^src/(vfs/|toolkit/|state/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)" },
+      to: { path: "^src/(vfs/|toolkit/|state/|turn/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)" },
     },
 
     // Domain encapsulation: no module reaches into another domain's internals.
@@ -149,6 +150,23 @@ module.exports = {
       from: { path: `^src/(?!${domain}/)` },
       to: { path: `^src/${domain}/(?!index\\.ts$)` },
     })),
+
+    // The logging module is the ONLY place that may touch pino; everything
+    // else goes through src/log.ts. Keeps the stream/level policy central.
+    {
+      name: "pino-only-in-log",
+      severity: "error",
+      from: { path: "^src/(?!log\\.ts$)" },
+      to: { path: "^pino$" },
+    },
+
+    // src/log.ts is a leaf: it must not import any internal src module.
+    {
+      name: "log-leaf",
+      severity: "error",
+      from: { path: "^src/log\\.ts$" },
+      to: { path: "^src/" },
+    },
 
     // Production code never imports tests.
     {

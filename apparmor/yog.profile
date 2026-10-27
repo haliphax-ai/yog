@@ -86,9 +86,12 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   /dev/ r,
   /dev/** r,
 
-  # Network (OpenAI-compatible API calls)
+  # Network (OpenAI-compatible API calls). The daemon also *listens* on the
+  # configured bind address (YOG_HOST, 0.0.0.0:8111 in the container; the
+  # launcher publishes it to the host as YOG_PORT) — inbound TCP accept on
+  # that address is covered by the same inet tcp rules below, so listening
+  # needs no extra capability beyond these network rules.
   network inet tcp,
   network inet6 tcp,
   network inet dgram,
   network inet6 dgram,
-}

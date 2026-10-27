@@ -8,6 +8,7 @@
   "main": "src/index.ts",
   "scripts": {
     "start": "node src/index.ts",
+    "start:serve": "node src/index.ts serve",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --reporter=dot --silent=true --tagsFilter \"!mount\" .",
     "test:mount": "vitest run --tagsFilter mount test/mount.test.ts",
@@ -17,12 +18,15 @@
   },
   "dependencies": {
     "agentfs-sdk": "^0.6.4",
+    "better-sqlite3": "^13.0.3",
     "fuse-native": "^2.2.6",
     "openai": "^7.43.0",
+    "pino": "^10.4.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@swc/core": "^1.16.20",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.6.5",
     "dependency-cruiser": "^18.7.0",
     "husky": "^9.1.7",
