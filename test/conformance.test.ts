@@ -18,6 +18,9 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDaemon, type Daemon, type DaemonOptions } from "../src/server/serve.ts";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { SessionStore } from "../src/server/store/sessions.ts";
 
 /** Minimal SSE frame parser: splits `event:`/`data:` blocks. */
 interface Frame {
@@ -125,24 +128,32 @@ const CAPABILITIES = {
   features: ["sse"],
 };
 
-function optsWith(model: ReturnType<typeof fakeModel>): DaemonOptions {
+function optsWith(
+  model: ReturnType<typeof fakeModel>,
+  store: SessionStore = new SessionStore(join(tmpdir(), `yog-conf-${Date.now()}.db`)),
+): DaemonOptions {
   return {
     host: "127.0.0.1",
     port: 0,
-    deps: { capabilities: CAPABILITIES, model },
+    deps: { capabilities: CAPABILITIES, model, store },
   };
 }
 
 let daemon: Daemon;
 let base: string;
+let store: SessionStore | undefined;
+let storePath: string;
 
 beforeAll(async () => {
-  daemon = await createDaemon(optsWith(fakeModel("happy")));
+  storePath = join(tmpdir(), `yog-conf-${Date.now()}.db`);
+  store = new SessionStore(storePath);
+  daemon = await createDaemon(optsWith(fakeModel("happy"), store));
   base = daemon.url;
 });
 
 afterAll(async () => {
   await daemon?.close();
+  store?.close();
 });
 
 /** POST /v1/sessions → session id. */
@@ -236,24 +247,98 @@ describe("conformance: SSE turn transcript", () => {
 });
 
 describe("conformance: turn-status recovery endpoint", () => {
-  it("GET /v1/sessions/{id}/turns/{turnId} resolves for a live session (recovery contract)", async () => {
+  it("recovers full terminal turn state from sqlite after SSE completes", async () => {
     const id = await newSession();
-    // The recovery endpoint is what a client hits when the SSE stream dies:
-    // for a known session the route resolves (the adapter answers with the
-    // turn's stored state, or a structured error for a turn it has no state
-    // for — never a raw 404 route miss).
-    const res = await fetch(`${base}/v1/sessions/${id}/turns/turn-conf-1`);
-    expect(res.status).toBe(404);
-    const body = await json(res);
-    expect(body.error.code).toBe("invalid_request");
-    expect(body.error.message).toContain("turn-conf-1");
-  });
+    const res = await fetch(`${base}/v1/sessions/${id}/turns`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "conformance-model", prompt: "hi" }),
+    });
+    expect(res.status).toBe(200);
+    const frames = parseSse(await res.text());
+    const started = frames.find((f) => f.event === "turn.started");
+    expect(started).toBeDefined();
+    const turnId = String(started!.data.data.turnId);
+    // The SSE stream is over: terminal state must be recoverable from the
+    // store-backed route, exactly as a client that lost the stream would.
+    const got = await fetch(`${base}/v1/sessions/${id}/turns/${turnId}`);
+    expect(got.status).toBe(200);
+    const { turn } = await json(got);
+    expect(turn.status).toBe("finished");
+    expect(typeof turn.model).toBe("string");
+    expect(typeof turn.created_at).toBe("number");
+    expect("finished_at" in turn).toBe(true);
+    expect("duration_ms" in turn).toBe(true);
+    const types = turn.events.map((e: any) => e.type);
+    for (const expected of [
+      "turn.started",
+      "message.delta",
+      "tool.call",
+      "tool.result",
+      "turn.finished",
+    ]) {
+      expect(types).toContain(expected);
+    }
+    for (const e of turn.events) {
+      expect(e.id).toBeGreaterThan(0);
+      expect(typeof e.version).toBe("number");
+      expect(typeof e.ts).toBe("number");
+      expect(e.data).toBeDefined();
+    }
+  }, 15_000);
 
   it("unknown session on the recovery route → 404 unknown_session", async () => {
     const res = await fetch(`${base}/v1/sessions/nope/turns/turn-1`);
     expect(res.status).toBe(404);
     expect((await json(res)).error.code).toBe("unknown_session");
   });
+
+  it("session with a missing turn → 404 invalid_request", async () => {
+    const id = await newSession();
+    const res = await fetch(`${base}/v1/sessions/${id}/turns/nope`);
+    expect(res.status).toBe(404);
+    const body = await json(res);
+    expect(body.error.code).toBe("invalid_request");
+    expect(body.error.message).toContain("nope");
+  });
+});
+
+describe("conformance: persistence across restart", () => {
+  it("session and stored turn events survive a daemon restart", async () => {
+    const id = await newSession();
+    const res = await fetch(`${base}/v1/sessions/${id}/turns`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "conformance-model", prompt: "hi" }),
+    });
+    expect(res.status).toBe(200);
+    const frames = parseSse(await res.text());
+    const started = frames.find((f) => f.event === "turn.started");
+    expect(started).toBeDefined();
+    const turnId = String(started!.data.data.turnId);
+
+    await daemon.close();
+    store!.close();
+
+    // Boot a second daemon over the same sqlite file: everything persisted
+    // must still be reachable.
+    const store2 = new SessionStore(storePath);
+    daemon = await createDaemon(optsWith(fakeModel("happy"), store2));
+    store = store2;
+    base = daemon.url;
+
+    const sess = await fetch(`${base}/v1/sessions/${id}`);
+    expect(sess.status).toBe(200);
+    expect((await json(sess)).session.id).toBe(id);
+
+    const got = await fetch(`${base}/v1/sessions/${id}/turns/${turnId}`);
+    expect(got.status).toBe(200);
+    const { turn } = await json(got);
+    expect(turn.status).toBe("finished");
+    const types = turn.events.map((e: any) => e.type);
+    expect(types).toContain("turn.started");
+    expect(types).toContain("turn.finished");
+  }, 15_000);
 });
 
 describe("conformance: error-code mapping", () => {

@@ -31,6 +31,8 @@ export interface StoreBoundary {
     turn: { role: string; content: string; status: string; model?: string },
   ): unknown;
   addEvent?(sessionId: string, event: { type: string; payload: string; version?: number }): unknown;
+  listTurns?(sessionId: string): unknown[];
+  listEvents?(sessionId: string): unknown[];
 }
 
 /** Handle returned by `orchestrator.runTurn` (see SessionOrchestrator). */
@@ -253,8 +255,59 @@ export function createHttpServer(deps: HttpDeps): Server {
           sendError(res, "unknown_session", `session ${id} not found`);
           return;
         }
+        const turnId = segs[4] as string;
+        if (hasStore && typeof store!.listTurns === "function") {
+          // Recovery contract: rebuild the turn from sqlite. The wire turnId
+          // (string, from turn.started) usually differs from the row id, so
+          // match numerically and fall back to the session's latest turn.
+          const rows = (store!.listTurns(id) ?? []) as Array<Record<string, unknown>>;
+          const wanted = Number(turnId);
+          const row =
+            (Number.isFinite(wanted) ? rows.find((r) => Number(r.id) === wanted) : undefined) ??
+            rows[rows.length - 1] ??
+            undefined;
+          if (!row) {
+            sendJson(res, 404, {
+              error: { code: "invalid_request", message: `turn ${turnId} not found` },
+            });
+            return;
+          }
+          const events: unknown[] = [];
+          if (typeof store!.listEvents === "function") {
+            for (const ev of (store!.listEvents(id) ?? []) as Array<Record<string, unknown>>) {
+              const payload = ev.payload;
+              let data: unknown;
+              if (typeof payload === "string") {
+                try {
+                  data = JSON.parse(payload);
+                } catch {
+                  continue; // skip unparseable rows
+                }
+              } else if (payload !== null && typeof payload === "object") {
+                data = payload; // store returns parsed payloads
+              } else {
+                continue;
+              }
+              events.push({ id: ev.seq, type: ev.type, version: ev.version, ts: ev.ts, data });
+            }
+          }
+          sendJson(res, 200, {
+            turn: {
+              id: turnId,
+              status: events.some((e) => (e as { type?: string }).type === "turn.finished")
+                ? "finished"
+                : row.status,
+              model: row.model,
+              created_at: row.created_at,
+              finished_at: row.finished_at ?? null,
+              duration_ms: row.duration_ms ?? null,
+              events,
+            },
+          });
+          return;
+        }
         sendJson(res, 404, {
-          error: { code: "invalid_request", message: `turn ${segs[4]} not found` },
+          error: { code: "invalid_request", message: `turn ${turnId} not found` },
         });
         return;
       }
@@ -398,8 +451,15 @@ export function createHttpServer(deps: HttpDeps): Server {
           }
         }
       } else {
-        // Fallback path (no orchestrator): drive the model provider directly.
-        await model!.runTurn(session.id, body, { emit, signal: controller.signal });
+        // Fallback path (no orchestrator): drive the model provider directly,
+        // persisting each event so terminal state stays recoverable.
+        await model!.runTurn(session.id, body, {
+          emit: async (ev) => {
+            persistEvent(ev);
+            await emit(ev);
+          },
+          signal: controller.signal,
+        });
       }
     } catch (err) {
       if (!sawError && !closed && !res.writableEnded) {
