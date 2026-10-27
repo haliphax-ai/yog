@@ -9,10 +9,23 @@ set -e
 # inherited by the worker spawns.
 export HOME=/home/yog
 
+# Server bind: inside the container the daemon must be reachable from the
+# host via the published port, so it listens on all interfaces. YOG_HOST is
+# exported only as a default — an explicit `-e YOG_HOST=...` on `docker run`
+# overrides it (docker -e wins over ENV in the image).
+export YOG_HOST="${YOG_HOST:-0.0.0.0}"
+
 # The state volume (/var/lib/yog) may have been created root-owned by Docker
 # (fresh named volume) — ensure the daemon can write it no matter its origin.
 mkdir -p /var/lib/yog/agentfs
 chown -R yog:yog /var/lib/yog
+
+# Default command: start the HTTP/SSE daemon (`yog serve`). Explicit args
+# are passed through, so the launcher can run the one-shot client in the
+# same image (`entrypoint.sh run <model> "<prompt>"`).
+if [ "$#" -eq 0 ]; then
+  set -- serve
+fi
 
 exec /usr/bin/setpriv \
   --reuid=yog \
