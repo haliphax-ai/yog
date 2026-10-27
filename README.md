@@ -7,7 +7,7 @@ are presented to agents as proxied virtual file descriptors.
 ## Client/server split
 
 The harness is split into two processes that speak a versioned HTTP/SSE
-contract (PLAN §5):
+contract:
 
 - **`yog serve`** — the long-lived daemon (`src/server/`). It owns every
   boundary: the sqlite session store, the worker pool, the session
