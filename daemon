@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+[[ ! -f "model" ]] || model="$(cat model)"
+[[ ! -f ".env" ]] || source .env
+
+# Published port on the host (also the port the daemon binds inside the
+# container — YOG_PORT is passed through so both sides always agree).
+port="${YOG_PORT:-8111}"
+daemon_name="${YOG_DAEMON_NAME:-yog-daemon}"
+
+# Seccomp: ship a custom profile (seccomp/yog.json) = Docker's default + an
+# unconditional allowance for mount/umount2 (FUSE). Set YOG_SECCOMP=unconfined
+# to fall back to the old behavior.
+if [[ "${YOG_SECCOMP:-}" == "unconfined" ]]; then
+  seccomp_opt="--security-opt seccomp=unconfined"
+else
+  seccomp_opt="--security-opt seccomp=$here/seccomp/yog.json"
+fi
+
+# The daemon's state database lives in /var/lib/yog (a dedicated runtime-data
+# directory, not a home). It lives on a named volume: turso/libsql's file
+# locking misbehaves on Docker's overlay filesystem (EACCES on flock unlock),
+# and a volume also persists state across runs. Set YOG_STATE_BIND to a host
+# path to bind-mount it there instead (e.g. YOG_STATE_BIND=$HOME/yog-state).
+if [[ -n "${YOG_STATE_BIND:-}" ]]; then
+  state_mount="--mount type=bind,source=$YOG_STATE_BIND,target=/var/lib/yog"
+else
+  state_mount="--mount type=volume,source=yog-state,target=/var/lib/yog"
+fi
+
+# One-shot UX: start the daemon detached (publishing YOG_PORT to the host),
+# wait for its capabilities endpoint, run a single client turn against it,
+# then tear the daemon down. The client shares the daemon's network namespace
+# (`--network container:...`), so YOG_SERVER_URL can stay on loopback.
+cleanup() {
+  docker stop "$daemon_name" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+# 1. Daemon (entrypoint defaults to `yog serve` when no args are given).
+docker run --rm -it \
+  $seccomp_opt \
+  --security-opt apparmor=yog \
+  --device /dev/fuse \
+  --cap-add SYS_ADMIN \
+  --cap-add SETUID \
+  --cap-add SETGID \
+  $state_mount \
+  -e OPENAI_BASE_URL \
+  -e OPENAI_API_KEY \
+  -e YOG_STATE_ROOT \
+  -e YOG_STATE_PATH \
+  -e YOG_HOST=0.0.0.0 \
+  -e YOG_PORT="$port" \
+  -p "$port:$port" \
+  --name "$daemon_name" \
+  yog
