@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import knex from "knex";
 import { randomUUID } from "node:crypto";
+import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import { logger } from "../../log.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -53,6 +54,20 @@ export class SessionStore {
       );
       CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
       CREATE INDEX IF NOT EXISTS idx_turn_events_turn ON turn_events(turn_id, seq);
+      CREATE TABLE IF NOT EXISTS session_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        turn_id INTEGER,
+        seq INTEGER NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT,
+        tool_call_id TEXT,
+        name TEXT,
+        tool_calls_json TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_session_seq ON session_messages(session_id, seq);
+      CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id);
     `);
 
     // Startup recovery: drop stale data, then unblock any turn left running.
@@ -165,6 +180,112 @@ export class SessionStore {
     }));
   }
 
+  /**
+   * Append a batch of messages to a session's canonical transcript (§4.2).
+   *
+   * `seq` is assigned per message from `MAX(seq)+1` for the session and
+   * **never resets** — it continues across dormancy and revival, so a
+   * transcript rehydrated after a detach resumes at the next free seq.
+   * All inserts run in a single transaction: either every row lands or
+   * none does, and the caller-visible rows carry the assigned seqs.
+   *
+   * NOTE (§4.8): unlike `addEvent`, which infers the turn as "the latest
+   * turn of the session", transcript rows are addressed by explicit ids
+   * and seqs — do not copy the infer-latest-turn pattern here. A turn that
+   * rehydrates a dormant session still appends with the session's next seq
+   * (continue `MAX(seq)+1` across dormancy — never reset per lifecycle).
+   */
+  appendMessages(sessionId: string, msgs: ChatCompletionMessageParam[], turnId?: number): any[] {
+    const now = Date.now();
+    const rows = this.db.transaction(() => {
+      const maxRow = this.db
+        .prepare(
+          "SELECT COALESCE(MAX(seq), 0) AS maxSeq FROM session_messages WHERE session_id = ?",
+        )
+        .get(sessionId) as { maxSeq: number } | undefined;
+      let seq = (maxRow?.maxSeq ?? 0) + 1;
+      const insert = this.db.prepare(
+        `INSERT INTO session_messages
+           (session_id, turn_id, seq, role, content, tool_call_id, name, tool_calls_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      const out: any[] = [];
+      for (const m of msgs) {
+        const role = (m as any).role;
+        const content = (m as any).content ?? null;
+        const tool_call_id = (m as any).tool_call_id ?? null;
+        const name = (m as any).name ?? null;
+        let tool_calls_json: string | null = null;
+        const tool_calls = (m as any).tool_calls;
+        if (Array.isArray(tool_calls) && tool_calls.length > 0) {
+          tool_calls_json = JSON.stringify(tool_calls);
+        }
+        const info = insert.run(
+          sessionId,
+          turnId ?? null,
+          seq,
+          role,
+          content,
+          tool_call_id,
+          name,
+          tool_calls_json,
+          now,
+        );
+        out.push({
+          id: Number(info.lastInsertRowid),
+          session_id: sessionId,
+          turn_id: turnId ?? null,
+          seq,
+          role,
+          content,
+          tool_call_id,
+          name,
+          tool_calls_json,
+          created_at: now,
+        });
+        seq += 1;
+      }
+      return out;
+    })();
+    return rows;
+  }
+
+  /**
+   * Read a session's canonical transcript (§4.2).
+   *
+   * Returns ordered rows mapped to `ChatCompletionMessageParam`-shaped
+   * objects, plus metadata (`seq`, `turnId`, `ts`) so callers can address
+   * rows explicitly. `afterSeq` pages forward from a known seq; `limit`
+   * caps the batch. Pass neither for the full transcript from the start.
+   */
+  getTranscript(sessionId: string, opts: { afterSeq?: number; limit?: number } = {}): any[] {
+    const afterSeq = opts.afterSeq ?? 0;
+    const limit = opts.limit;
+    const sql = limit
+      ? `SELECT * FROM session_messages
+         WHERE session_id = ? AND seq > ?
+         ORDER BY seq ASC LIMIT ?`
+      : `SELECT * FROM session_messages
+         WHERE session_id = ? AND seq > ?
+         ORDER BY seq ASC`;
+    const rows: any[] = limit
+      ? this.db.prepare(sql).all(sessionId, afterSeq, limit)
+      : this.db.prepare(sql).all(sessionId, afterSeq);
+    return rows.map((row) => {
+      const msg: any = { role: row.role };
+      if (row.content !== null) msg.content = row.content;
+      if (row.tool_call_id !== null) msg.tool_call_id = row.tool_call_id;
+      if (row.name !== null) msg.name = row.name;
+      if (row.tool_calls_json !== null) msg.tool_calls = JSON.parse(row.tool_calls_json);
+      return {
+        ...msg,
+        seq: row.seq,
+        turnId: row.turn_id,
+        ts: row.created_at,
+      };
+    });
+  }
+
   /** Delete closed sessions older than the retention window, plus their turns/events. */
   pruneOldSessions(): void {
     const cutoff = Date.now() - RETENTION_DAYS * DAY_MS;
@@ -178,6 +299,7 @@ export class SessionStore {
     const selectTurns = this.db.prepare("SELECT id FROM turns WHERE session_id = ?");
     const deleteEvents = this.db.prepare("DELETE FROM turn_events WHERE turn_id = ?");
     const deleteTurns = this.db.prepare("DELETE FROM turns WHERE session_id = ?");
+    const deleteMessages = this.db.prepare("DELETE FROM session_messages WHERE session_id = ?");
     const deleteSession = this.db.prepare("DELETE FROM sessions WHERE id = ?");
 
     const prune = this.db.transaction(() => {
@@ -186,6 +308,9 @@ export class SessionStore {
           deleteEvents.run(turn.id);
         }
         deleteTurns.run(id);
+        // Cascade to the canonical transcript (§4.2): a pruned session
+        // forfeits its messages along with its turns and events.
+        deleteMessages.run(id);
         deleteSession.run(id);
       }
     });
