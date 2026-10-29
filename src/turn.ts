@@ -79,6 +79,11 @@ export class TurnEngine {
         });
 
         const toolCalls = new Map<number, { id: string; name: string; args: string }>();
+        // Accumulate this round's assistant text. It is only ever appended to
+        // `messages` on the no-tool-calls path (plan §4.3): a tool-call round
+        // streams text too, but its assistant row carries `tool_calls` and the
+        // text is discarded exactly as before.
+        let assistantText = "";
 
         for await (const chunk of stream) {
           const delta = chunk.choices[0]?.delta;
@@ -86,6 +91,7 @@ export class TurnEngine {
 
           if (delta.content) {
             await emit("message.delta", { text: delta.content });
+            assistantText += delta.content;
           }
 
           for (const tc of delta.tool_calls ?? []) {
@@ -99,6 +105,13 @@ export class TurnEngine {
         }
 
         if (toolCalls.size === 0) {
+          // Plan §4.3: the caller diffs by index, so the final assistant text
+          // message must be in `messages` before the turn ends. A round that
+          // streamed text but also made tool calls keeps its `content: null`
+          // tool_calls row as-is; only the terminal no-tool round appends.
+          if (assistantText) {
+            messages.push({ role: "assistant", content: assistantText });
+          }
           await emit("turn.finished", {
             turnId,
             durationMs: Date.now() - turnStartedAt,

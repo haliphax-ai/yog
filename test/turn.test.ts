@@ -157,7 +157,9 @@ describe("TurnEngine event sequence", () => {
     );
 
     // Assistant replay + tool result are appended exactly as before.
-    expect(messages).toHaveLength(3);
+    // Assistant replay + tool result are appended exactly as before, and the
+    // final no-tool round's text is now appended too (plan §4.3).
+    expect(messages).toHaveLength(4);
     const assistant = messages[1]!;
     expect(assistant.role).toBe("assistant");
     if (assistant.role === "assistant" && assistant.tool_calls) {
@@ -172,7 +174,47 @@ describe("TurnEngine event sequence", () => {
       expect(toolMsg.tool_call_id).toBe("call_1");
       expect(JSON.parse(toolMsg.content as string)).toMatchObject({ echo: "hi" });
     }
+    const finalAssistant = messages[3]!;
+    expect(finalAssistant.role).toBe("assistant");
+    if (finalAssistant.role === "assistant") {
+      expect(finalAssistant.content).toBe("Done");
+      expect(finalAssistant.tool_calls).toBeUndefined();
+      // The intermediate tool_calls row is untouched.
+      const intermediate = messages[1]!;
+      expect(intermediate.role).toBe("assistant");
+      if (intermediate.role === "assistant" && intermediate.tool_calls) {
+        expect(intermediate.tool_calls).toHaveLength(1);
+      }
+    }
   });
+});
+
+it("appends the final assistant text message on the no-tool-calls path", async () => {
+  const sink = new RecordingSink();
+  const messages = userMessages();
+
+  // Single round, no tools: the model answers with text.
+  const rounds: FakeChunk[][] = [
+    [
+      { choices: [{ delta: { content: "Hello" } }] },
+      { choices: [{ delta: { content: " world" } }] },
+    ],
+  ];
+
+  await new TurnEngine(sink).run(fakeClient(rounds), "test-model", messages, registry);
+
+  // The caller's array now ends with the accumulated assistant text.
+  expect(messages).toHaveLength(2);
+  const last = messages[1]!;
+  expect(last.role).toBe("assistant");
+  if (last.role === "assistant") {
+    expect(last.content).toBe("Hello world");
+    expect(last.tool_calls).toBeUndefined();
+  }
+
+  // turn.finished is emitted AFTER the append (the caller diffs by index).
+  const finished = sink.events.find((e) => e.type === "turn.finished")!;
+  expect(finished).toBeDefined();
 });
 
 describe("TurnEngine failure handling", () => {
