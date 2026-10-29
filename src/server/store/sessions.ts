@@ -107,7 +107,7 @@ export class SessionStore {
     turn: { role: string; content: string; status: string; model?: string },
   ): any {
     const now = Date.now();
-    const requestJson = JSON.stringify({ role: turn.role, content: turn.content });
+    const requestJson = JSON.stringify({ prompt: turn.content, model: turn.model ?? "unknown" });
     const finished = turn.status === "running" ? null : now;
     const info = this.db
       .prepare(
@@ -195,7 +195,11 @@ export class SessionStore {
    * rehydrates a dormant session still appends with the session's next seq
    * (continue `MAX(seq)+1` across dormancy — never reset per lifecycle).
    */
-  appendMessages(sessionId: string, msgs: ChatCompletionMessageParam[], turnId?: number): any[] {
+  appendMessages(
+    sessionId: string,
+    msgs: ChatCompletionMessageParam[],
+    turnId: number | null = null,
+  ): any[] {
     const now = Date.now();
     const rows = this.db.transaction(() => {
       const maxRow = this.db
@@ -336,8 +340,7 @@ function hydrateTurn(row: any): any {
   }
   return {
     ...row,
-    role: parsed.role ?? null,
-    content: parsed.content ?? null,
+    prompt: parsed.prompt ?? null,
     request: parsed,
   };
 }

@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
+import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { encodeEvent, type SseEnvelope } from "./sse.ts";
@@ -34,6 +35,15 @@ export interface StoreBoundary {
   addEvent?(sessionId: string, event: { type: string; payload: string; version?: number }): unknown;
   listTurns?(sessionId: string): unknown[];
   listEvents?(sessionId: string): unknown[];
+  getTranscript?(
+    sessionId: string,
+    opts?: { afterSeq?: number; limit?: number },
+  ): Array<ChatCompletionMessageParam & { seq: number; turnId: number | null; ts: number }>;
+  appendMessages?(
+    sessionId: string,
+    msgs: ChatCompletionMessageParam[],
+    turnId?: number | null,
+  ): unknown[];
 }
 
 /** Handle returned by `orchestrator.runTurn` (see SessionOrchestrator). */
@@ -398,15 +408,21 @@ export function createHttpServer(deps: HttpDeps): Server {
     };
 
     // Record the turn row up front (best effort: persistence never fails the
-    // stream); every emitted event below is persisted alongside it.
+    // stream); every emitted event below is persisted alongside it. The row
+    // id is stamped on the transcript rows this turn produces (§4.8).
+    let turnRowId: number | null = null;
     if (store?.addTurn) {
       try {
-        store.addTurn(session.id, {
+        const row = store.addTurn(session.id, {
           role: "user",
           content: typeof body.prompt === "string" ? body.prompt : "",
           status: "running",
           ...(typeof body.model === "string" ? { model: body.model } : {}),
         });
+        turnRowId =
+          row && typeof (row as { id?: number }).id === "number"
+            ? ((row as { id?: number }).id as number)
+            : null;
       } catch {
         // persistence is best effort
       }
@@ -455,14 +471,39 @@ export function createHttpServer(deps: HttpDeps): Server {
         }
       } else {
         // Fallback path (no orchestrator): drive the model provider directly,
-        // persisting each event so terminal state stays recoverable.
-        await model!.runTurn(session.id, body, {
-          emit: async (ev) => {
-            persistEvent(ev);
-            await emit(ev);
-          },
-          signal: controller.signal,
-        });
+        // persisting each event so terminal state stays recoverable. Hydrate
+        // the prior transcript (§4.4) and pass the full message list to the
+        // model so context carries across turns. On success, append this
+        // turn's messages to the canonical transcript; a failed turn
+        // persists nothing (the catch is a no-op for the transcript).
+        const fallbackPrior = (
+          store?.getTranscript ? store.getTranscript(session.id) : []
+        ) as ChatCompletionMessageParam[];
+        const fallbackMessages: ChatCompletionMessageParam[] = [
+          ...fallbackPrior,
+          { role: "user", content: typeof body.prompt === "string" ? body.prompt : "" },
+        ];
+        const fallbackStartLen = fallbackPrior.length;
+        const fallbackReq = { ...body, messages: fallbackMessages };
+        try {
+          await model!.runTurn(session.id, fallbackReq, {
+            emit: async (ev) => {
+              persistEvent(ev);
+              await emit(ev);
+            },
+            signal: controller.signal,
+          });
+          if (store?.appendMessages && fallbackMessages.length > fallbackStartLen) {
+            try {
+              store.appendMessages(session.id, fallbackMessages.slice(fallbackStartLen), turnRowId);
+            } catch {
+              // persistence is best effort
+            }
+          }
+        } catch {
+          // Failed turn persists nothing (except its event log, which is
+          // diagnostic). The transcript stays at the last turn boundary.
+        }
       }
     } catch (err) {
       if (!sawError && !closed && !res.writableEnded) {

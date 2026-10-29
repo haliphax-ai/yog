@@ -162,9 +162,59 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       req: Record<string, unknown>,
     ): Promise<{ turnId: string | null }> => {
       const client = openaiClient();
+      const prompt = typeof req.prompt === "string" ? req.prompt : "";
+      const model = typeof req.model === "string" ? req.model : modelId;
+
+      // Hydrate prior context from the canonical transcript (§4.4). On the
+      // first turn the transcript is empty; a retry replays from the last
+      // turn boundary. Naive full replay for now (context policy is §3).
+      const prior = (store ? store.getTranscript(sessionId) : []) as Array<Record<string, unknown>>;
       const messages: ChatCompletionMessageParam[] = [
-        { role: "user", content: typeof req.prompt === "string" ? req.prompt : "" },
+        ...(prior as unknown as ChatCompletionMessageParam[]),
+        { role: "user", content: prompt },
       ];
+      const startLen = prior.length;
+
+      // Turn ownership moves into executeTurn (§4.8): the orchestrator path
+      // owns the turn lifecycle, and the row id stamps turn_id on the
+      // persisted transcript rows. The store-less fallback in http.ts keeps
+      // its own best-effort addTurn.
+      let turnRowId: number | null = null;
+      if (store) {
+        try {
+          const turnRow = store.addTurn(sessionId, {
+            role: "user",
+            content: prompt,
+            status: "running",
+            model,
+          });
+          turnRowId =
+            turnRow && typeof (turnRow as { id?: number }).id === "number"
+              ? ((turnRow as { id?: number }).id as number)
+              : null;
+        } catch {
+          // persistence is best effort
+        }
+      }
+
+      // Persist the user message up front (§4.4): the canonical transcript
+      // holds every message of a completed turn, including the opening user
+      // prompt. Writing it before the engine runs means a failed turn still
+      // leaves the user row behind — but appendMessages rolls the whole
+      // batch back on failure, so the transcript stays at the last turn
+      // boundary either way. startLen is captured here so the success path
+      // can slice exactly this turn's new messages.
+      if (store && turnRowId !== null) {
+        const firstMsg = messages[messages.length - 1];
+        if (firstMsg) {
+          try {
+            store.appendMessages(sessionId, [firstMsg], turnRowId);
+          } catch {
+            // persistence is best effort
+          }
+        }
+      }
+
       let turnId: string | null = null;
       const sink: TurnSink = {
         async emit(ev: TurnEvent): Promise<void> {
@@ -192,13 +242,22 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         sessionId,
         ...(state ? { recorder: { record: (rec) => state!.recordToolCall(rec) } } : {}),
       };
-      await new TurnEngine(sink).run(
-        client,
-        typeof req.model === "string" ? req.model : modelId,
-        messages,
-        tools,
-        turnOpts,
-      );
+      try {
+        await new TurnEngine(sink).run(client, model, messages, tools, turnOpts);
+        // On success, persist everything this turn produced (§4.4): the
+        // transcript only ever contains complete turns. A failed turn
+        // persists nothing (the catch is a no-op for the transcript).
+        if (store && messages.length > startLen) {
+          try {
+            store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
+          } catch {
+            // persistence is best effort
+          }
+        }
+      } catch {
+        // Failed turn persists nothing (except its event log, which is
+        // diagnostic). The transcript stays at the last turn boundary.
+      }
       return { turnId };
     };
 

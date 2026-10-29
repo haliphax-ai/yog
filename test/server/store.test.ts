@@ -51,8 +51,8 @@ describe("SessionStore", () => {
 
     const turns = reopened.listTurns(session.id);
     expect(turns).toHaveLength(2);
-    expect(turns[0].content).toBe("hello");
-    expect(turns[1].content).toBe("hi");
+    expect(turns[0].prompt).toBe("hello");
+    expect(turns[1].prompt).toBe("hi");
     reopened.close();
   });
 
