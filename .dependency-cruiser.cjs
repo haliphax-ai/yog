@@ -188,10 +188,12 @@ module.exports = {
     },
 
     // Nothing should drift into unowned dead code (skip ambient .d.ts).
+    // knex loads migrations dynamically, so the static graph never sees an
+    // importer edge for them; they are registered, not orphaned.
     {
       name: "no-orphans",
       severity: "warn",
-      from: { orphan: true, pathNot: "\\.d\\.ts$" },
+      from: { orphan: true, pathNot: "\\.d\\.ts$|^src/server/store/migrations/" },
       to: {},
     },
   ],
