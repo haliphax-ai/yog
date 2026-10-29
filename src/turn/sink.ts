@@ -1,9 +1,9 @@
 /**
  * Typed turn events and the transport-agnostic sink seam.
  *
- * The turn engine emits a self-describing envelope per event (see PLAN.md
- * §5.4); the envelope matches the ratified contract exactly, so any future
- * transport adapter (SSE, WebSocket, UDP, …) can forward it verbatim. The
+ * The turn engine emits a self-describing envelope per event; the envelope
+ * matches the ratified contract exactly, so any future transport adapter
+ * (SSE, WebSocket, UDP, …) can forward it verbatim. The
  * engine awaits every `emit`, which is where backpressure falls out: a slow
  * transport throttles the turn. Sink implementations make no assumptions
  * about ordering, reliability, connection state, or latency.
@@ -32,6 +32,8 @@ export type TurnEventDataMap = {
   "turn.finished": { turnId: string; durationMs: number; stopReason?: string };
   /** Terminal error; the turn stops. */
   error: { code: string; message: string; details?: unknown };
+  /** Terminal abort: the operator ended the turn (transcript was healed). */
+  "turn.aborted": { reason: string };
 };
 
 /** Every semantic event name the turn engine can emit. */

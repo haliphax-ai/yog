@@ -1,5 +1,5 @@
 /**
- * Phase 6 GREEN tests: `yog run --session` / `--resume` (PLAN.md §4.7, §8.6).
+ * `yog run --session` / `--resume`.
  *
  * The default one-shot flow stays untouched — create → turn → DELETE — but the
  * two new optional flags change it:
@@ -228,7 +228,7 @@ describe("runClient --session <id>", () => {
     const body = JSON.parse(turn!.body ?? "{}") as Record<string, unknown>;
     expect(body["prompt"]).toBe(PROMPT);
     expect(body["model"]).toBe(MODEL);
-    // Clients never send history (PLAN.md §4.6): no messages array on the wire.
+    // Clients never send history: no messages array on the wire.
     expect(body["messages"]).toBeUndefined();
   }, 15_000);
 });

@@ -30,6 +30,8 @@ export class WorkerClient {
     number,
     { resolve: (v: WorkerResponse) => void; reject: (e: Error) => void }
   >();
+  /** Request ids currently in flight (bash children running in the worker). */
+  readonly #inFlightIds = new Set<number>();
   #nextId = 1;
   #closed = false;
   #lineBuffer = "";
@@ -119,6 +121,7 @@ export class WorkerClient {
       ...(stateDir !== undefined ? { stateDir } : {}),
       ...(restore ? { restore } : {}),
     };
+    this.#inFlightIds.add(id);
     return new Promise((resolve, reject) => {
       this.#pending.set(id, { resolve, reject });
       let line: string;
@@ -126,12 +129,44 @@ export class WorkerClient {
         line = encodeFrame(id, request);
       } catch (err) {
         this.#pending.delete(id);
+        this.#inFlightIds.delete(id);
         reject(err instanceof Error ? err : new Error(String(err)));
         return;
       }
       if (!this.#child.stdin?.write(line)) {
         this.#pending.delete(id);
+        this.#inFlightIds.delete(id);
         reject(new Error("worker stdin closed"));
+      }
+    });
+  }
+
+  /**
+   * Kill the bash child currently running in this worker (turn abort). The
+   * worker snapshots shell state via the wrapper's EXIT trap before the
+   * child dies, so persistence is unaffected. The killed run's daemon-side
+   * promise settles as a normal (killed) response — the tool layer surfaces
+   * the kill through its own audit trail.
+   */
+  async abortBash(): Promise<boolean> {
+    if (this.#closed) return false;
+    if (this.#inFlightIds.size === 0) return false;
+    const id = this.#nextId++;
+    const request: WorkerRequest = { type: "bash.abort" };
+    this.#inFlightIds.delete(id);
+    return await new Promise<boolean>((resolve, reject) => {
+      this.#pending.set(id, {
+        resolve: (resp) => {
+          const rec = resp as { ok?: boolean; aborted?: boolean };
+          resolve(rec.aborted === true);
+        },
+        reject,
+      });
+      try {
+        this.#child.stdin?.write(encodeFrame(id, request));
+      } catch (err) {
+        this.#pending.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
   }
@@ -181,11 +216,13 @@ export class WorkerClient {
       return;
     }
     this.#pending.delete(frame.id);
+    this.#inFlightIds.delete(frame.id);
     pending.resolve(frame.payload as WorkerResponse);
   }
 
   #failAll(err: Error): void {
     for (const [, pending] of this.#pending) pending.reject(err);
     this.#pending.clear();
+    this.#inFlightIds.clear();
   }
 }

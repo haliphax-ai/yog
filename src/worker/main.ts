@@ -10,11 +10,39 @@
  */
 import { createInterface } from "node:readline";
 import { mkdir, readFile, spawn, writeFile } from "../host.ts";
+import type { WorkerAbortResponse } from "./protocol.ts";
 import { decodeFrame, encodeFrame, type WorkerResponse, type WorkerRequest } from "./protocol.ts";
 import { buildToolEnv, WRAPPER } from "./wrapper.ts";
 import { logger } from "../log.ts";
 
 let currentChild: ReturnType<typeof spawn> | undefined;
+
+/**
+ * Kill the currently-running bash child (turn abort). The wrapper's EXIT
+ * trap captures cwd/env/functions before the process dies, so persistent
+ * shell state survives the kill; the next `bash.run` reads that snapshot
+ * back. The response carries how the child died (signal or exit code) for
+ * diagnostics and the abort audit trail.
+ */
+function abortCurrentChild(): WorkerAbortResponse {
+  const child = currentChild;
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    return { ok: true, aborted: false };
+  }
+  // The wrapper runs `detached` (own process group), so the negative pid
+  // signals the whole tree — bash would otherwise defer the signal while a
+  // foreground child is running. EPERM/ESRCH fall back to the direct kill.
+  try {
+    if (child.pid !== undefined) process.kill(-child.pid, "SIGTERM");
+    else child.kill("SIGTERM");
+  } catch {
+    child.kill("SIGTERM");
+  }
+  // `signalCode`/`exitCode` are null until the process is reaped, so after a
+  // kill request the response reports SIGTERM even if the child was already
+  // on its way out.
+  return { ok: true, aborted: true, exitCode: null, signal: "SIGTERM" };
+}
 
 /** Run one script through the persistent-shell wrapper. */
 async function runBash(
@@ -28,9 +56,13 @@ async function runBash(
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
+      // `detached` gives the wrapper its own process group so an abort can
+      // kill the whole tree (bash defers a plain SIGTERM while a foreground
+      // child like `sleep` is running — the group kill reaches the child).
       child = spawn("bash", ["-c", WRAPPER, "harness", script], {
         cwd: process.cwd(),
         env: buildToolEnv(stateDir),
+        detached: true,
       });
     } catch (err) {
       resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -113,17 +145,25 @@ const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 let chain: Promise<void> = Promise.resolve();
 
 rl.on("line", (line) => {
-  chain = chain.then(async () => {
-    let frame: { id: number; payload: unknown } | undefined;
-    try {
-      frame = decodeFrame(line);
-    } catch (err) {
-      logger.error(`[worker] dropping bad frame: ${(err as Error).message}`);
-      return;
-    }
-    if (!frame) return;
+  // bash.abort is handled out-of-band: it does not touch the shell, and it
+  // must preempt the currently-running script (the serial chain would hold
+  // it hostage until that script exits — the opposite of aborting it).
+  let frame: { id: number; payload: unknown } | undefined;
+  try {
+    frame = decodeFrame(line);
+  } catch (err) {
+    logger.error(`[worker] dropping bad frame: ${(err as Error).message}`);
+    return;
+  }
+  if (!frame) return;
 
-    const payload = frame.payload as WorkerRequest;
+  const payload = frame.payload as WorkerRequest;
+  if (payload.type === "bash.abort") {
+    process.stdout.write(encodeFrame(frame.id, abortCurrentChild()));
+    return;
+  }
+
+  chain = chain.then(async () => {
     let resp: WorkerResponse;
     if (payload.type === "bash.run") {
       resp = await runBash(payload.script, payload.stateDir, payload.restore);

@@ -1,5 +1,5 @@
 /**
- * Phase 5 RED tests: `yog run` as a pure network client (PLAN.md §7).
+ * `yog run` as a pure network client.
  *
  * A mock HTTP/SSE server (node:http, 127.0.0.1, ephemeral port) plays the
  * daemon. The client must walk the ratified flow —

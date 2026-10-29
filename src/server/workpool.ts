@@ -42,6 +42,8 @@ export class WorkerPool {
   readonly #clients: Promise<WorkerClient[]>;
   readonly #preferred = new Map<string, number>();
   readonly #current = new Map<string, number>();
+  /** scriptId (session id) → the worker index running its current script. */
+  readonly #running = new Map<string, number>();
   readonly #inFlight: number[];
   #closed = false;
 
@@ -57,7 +59,13 @@ export class WorkerPool {
     return this.#current.get(sessionId);
   }
 
-  /** Run `script` for `sessionId` on its pinned (or a free) member. */
+  /**
+   * Run `script` for `sessionId` on its pinned (or a free) member.
+   *
+   * The id is also the abort key: while the script runs, the pool maps it
+   * to the worker executing it so {@link abortScript} can address the kill
+   * to the right worker.
+   */
   async run(
     sessionId: string,
     script: string,
@@ -69,13 +77,30 @@ export class WorkerPool {
     this.#current.set(sessionId, idx);
     if (!this.#preferred.has(sessionId)) this.#preferred.set(sessionId, idx);
     this.#inFlight[idx] = (this.#inFlight[idx] ?? 0) + 1;
+    this.#running.set(sessionId, idx);
     try {
       const client = clients[idx];
       if (!client) throw new Error(`no worker at index ${idx}`);
       return await client.runBash(script, opts?.stateDir, opts?.restore);
     } finally {
       this.#inFlight[idx] = (this.#inFlight[idx] ?? 1) - 1;
+      if (this.#running.get(sessionId) === idx) this.#running.delete(sessionId);
     }
+  }
+
+  /**
+   * Kill the script currently running for `sessionId` (turn abort). The
+   * worker snapshots shell state via the wrapper's EXIT trap before the
+   * child dies, so persistence is unaffected. Returns false when the
+   * session has no script running right now.
+   */
+  async abortScript(sessionId: string): Promise<boolean> {
+    const idx = this.#running.get(sessionId);
+    if (idx === undefined) return false;
+    const clients = await this.#clients;
+    const client = clients[idx];
+    if (!client) return false;
+    return await client.abortBash();
   }
 
   /** Shut down every member. */

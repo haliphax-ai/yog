@@ -1,5 +1,5 @@
 /**
- * SSE framing helpers for the v0 HTTP/SSE wire format (PLAN.md §5.4).
+ * SSE framing helpers for the v0 HTTP/SSE wire format.
  *
  * Each event envelope is emitted as a two-line frame followed by a blank
  * line:

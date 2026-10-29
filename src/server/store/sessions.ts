@@ -356,6 +356,26 @@ export class SessionStore {
     await this.db("turns").where("status", "running").update({ status: "interrupted" });
   }
 
+  /**
+   * Settle a turn row: status → `status` (default `finished`), finished_at
+   * stamped, duration computed. Best effort by contract — callers never let
+   * a bookkeeping failure fail the turn itself.
+   */
+  async finishTurn(sessionId: string, turnId: number | null, status = "finished"): Promise<void> {
+    if (turnId === null) return;
+    const now = Date.now();
+    const row = await this.getTurn(turnId);
+    if (!row || row.session_id !== sessionId) return;
+    const startedAt = Number(row.created_at ?? now);
+    await this.db("turns")
+      .where("id", turnId)
+      .update({
+        status,
+        finished_at: now,
+        duration_ms: Math.max(0, now - startedAt),
+      });
+  }
+
   close(): void {
     void this.db.destroy();
   }

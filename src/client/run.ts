@@ -1,5 +1,5 @@
 /**
- * Network run client — `yog run` as a pure HTTP/SSE client (PLAN.md §7).
+ * Network run client — `yog run` as a pure HTTP/SSE client.
  *
  * Default flow: (optional) GET /v1/capabilities → POST /v1/sessions →
  * POST /v1/sessions/{id}/turns (SSE) → DELETE /v1/sessions/{id}.

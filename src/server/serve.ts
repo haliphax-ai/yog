@@ -15,7 +15,12 @@ import { mountSys, unmountSys } from "../mount.ts";
 import { TurnEngine, type TurnOptions } from "../turn.ts";
 import type { TurnSink, TurnEvent } from "../turn/sink.ts";
 import { tools, descriptors } from "../register.ts";
-import { setBashExecutor, setShellStateProvider } from "../toolkit/index.ts";
+import {
+  abortBash,
+  setBashAbort,
+  setBashExecutor,
+  setShellStateProvider,
+} from "../toolkit/index.ts";
 import { mkdir } from "../host.ts";
 import { logger } from "../log.ts";
 
@@ -93,11 +98,11 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     if (pool) {
       const p = pool;
       // Bash tool executor: the tool's `(script, opts)` maps onto the pool's
-      // `run(sessionId, script, { stateDir, restore })`. The bash tool has no
-      // session context, so scripts run under a stable daemon-wide key.
+      // `run(scriptId, script, { stateDir, restore })`. The script id is the
+      // abort key: a session's current script is the one an abort kills.
       setBashExecutor(async (script, opts) => {
         try {
-          const resp = await p.run("daemon", script, {
+          const resp = await p.run(opts?.scriptId ?? "daemon", script, {
             ...(opts?.stateDir !== undefined ? { stateDir: opts.stateDir } : {}),
             ...(opts?.restore !== undefined ? { restore: opts.restore } : {}),
           });
@@ -151,6 +156,11 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     bus.setMaxListeners(0);
     const modelId = resolveModelId();
 
+    // --- turn abort plumbing: the abort endpoint kills the session's
+    // in-flight bash script (script key = session id), which snapshots the
+    // persistent shell state before the child dies ---
+    setBashAbort(async (sessionId) => (pool ? pool.abortScript(sessionId) : false));
+
     /**
      * Turn entry point injected into the orchestrator. Builds the OpenAI
      * client + TurnEngine and routes its sink so every event is BOTH
@@ -160,6 +170,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     const executeTurn = async (
       sessionId: string,
       req: Record<string, unknown>,
+      ctx: { signal?: AbortSignal } = {},
     ): Promise<{ turnId: string | null }> => {
       const client = openaiClient();
       const prompt = typeof req.prompt === "string" ? req.prompt : "";
@@ -228,9 +239,18 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
           bus.emit(`session:${sessionId}`, envelope);
         },
       };
+      // Tool-call ids the engine stubbed during the unwind (heal path). Only
+      // a turn that healed carries persistable content on failure.
+      const healedIds: string[] = [];
       const turnOpts: TurnOptions = {
         sessionId,
         ...(state ? { recorder: { record: (rec) => state!.recordToolCall(rec) } } : {}),
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
+        // Abort sentinel probed at every await point inside the engine: an
+        // abort arriving mid-tool-call or mid-stream still unwinds the turn.
+        isAborted: () => ctx.signal?.aborted === true,
+        abortReason: "turn aborted by operator",
+        onHeal: (ids) => void healedIds.push(...ids),
       };
       try {
         await new TurnEngine(sink).run(client, model, messages, tools, turnOpts);
@@ -247,9 +267,23 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
             // persistence is best effort
           }
         }
+        // Settle the row as finished — the bookkeeping record of a complete
+        // turn, never a gate on the stream's success.
+        await store?.finishTurn?.(sessionId, turnRowId, "finished").catch(() => {});
       } catch {
         // Failed turn persists nothing (except its event log, which is
-        // diagnostic). The transcript stays at the last turn boundary.
+        // diagnostic). The transcript stays at the last turn boundary —
+        // unless the engine healed stub tool messages during the unwind
+        // (abort or error mid-tool-loop): that healed batch is persisted so
+        // the next turn hydrates a valid transcript.
+        if (healedIds.length > 0 && store && messages.length > startLen) {
+          try {
+            await store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
+          } catch {
+            // persistence is best effort
+          }
+        }
+        await store?.finishTurn?.(sessionId, turnRowId, "aborted").catch(() => {});
       }
       return { turnId };
     };
@@ -263,11 +297,14 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         contractVersion: "v1",
         models: [modelId],
         tools: ["bash"],
-        features: ["sse", "transcript"],
+        features: ["sse", "transcript", "abort"],
       },
       ...(store ? { store } : {}),
       ...(orchestrator ? { orchestrator } : {}),
       bus,
+      // Turn-abort kill chain (POST /v1/sessions/{id}/abort): kill the
+      // session's running bash script, then let the orchestrator unwind.
+      onAbortKillTool: (sessionId: string) => abortBash(sessionId),
     };
 
     const server = createHttpServer(deps);
@@ -279,6 +316,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       await closeServer(server).catch(() => {});
       await pool?.close().catch(() => {});
       setBashExecutor(undefined);
+      setBashAbort(undefined);
       setShellStateProvider(undefined);
       store?.close();
       await Promise.race([unmountSys(fuse), new Promise((r) => setTimeout(r, 1500))]);

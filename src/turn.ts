@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
-import type { ToolRegistry } from "./toolkit/index.ts";
+import type { ToolCall, ToolRegistry } from "./toolkit/index.ts";
 import type { ToolCallRecord } from "./state/index.ts";
 
 import { logger } from "./log.ts";
@@ -13,6 +13,67 @@ import {
   type TurnEventType,
   type TurnSink,
 } from "./turn/sink.ts";
+
+/** Tool calls currently executing per session (for the abort endpoint). */
+const activeToolCalls = new Map<string, { id: string; name: string; args: string }>();
+
+/** Make an abort-shaped error (mirrors the orchestrator's normalization). */
+function makeAbortError(reason?: unknown): Error {
+  if (reason instanceof Error) return reason;
+  const err = new Error(reason === undefined || reason === null ? "turn aborted" : String(reason));
+  err.name = "AbortError";
+  return err;
+}
+
+/** One OpenAI tool-call round's assistant row shape (subset). */
+export interface AssistantToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+/** Build the assistant message row that carries `calls` (replay path). */
+export function assistantToolCallMessage(calls: AssistantToolCall[]): ChatCompletionMessageParam {
+  return { role: "assistant", content: null, tool_calls: calls } as ChatCompletionMessageParam;
+}
+
+/**
+ * Build the canonical stub tool message for an unanswered tool call:
+ * an `error` result so a hydrated follow-up turn sees a definite answer
+ * instead of a dangling call (which providers reject).
+ */
+export function toolStubMessage(toolCallId: string): ChatCompletionMessageParam {
+  return {
+    role: "tool",
+    tool_call_id: toolCallId,
+    content: JSON.stringify({ error: "tool call aborted before a result was produced" }),
+  } as ChatCompletionMessageParam;
+}
+
+/**
+ * Collect the tool-call ids the transcript announced (assistant rows with
+ * `tool_calls`) that never received a `tool` answer message. Any unwind
+ * mid-tool-loop (operator abort, provider error) leaves such calls behind;
+ * stubbing them keeps the transcript hydratable for the next turn.
+ */
+export function unansweredToolCallIds(messages: ChatCompletionMessageParam[]): Set<string> {
+  const announced = new Set<string>();
+  for (const m of messages) {
+    const rec = m as { role?: string; tool_calls?: Array<{ id?: string }> };
+    if (rec.role === "assistant" && Array.isArray(rec.tool_calls)) {
+      for (const tc of rec.tool_calls) {
+        if (typeof tc?.id === "string") announced.add(tc.id);
+      }
+    }
+  }
+  for (const m of messages) {
+    const rec = m as { role?: string; tool_call_id?: string };
+    if (rec.role === "tool" && typeof rec.tool_call_id === "string") {
+      announced.delete(rec.tool_call_id);
+    }
+  }
+  return announced;
+}
 
 /**
  * Agent turn engine: streams one chat completion, executes any tool calls it
@@ -29,6 +90,23 @@ export interface TurnOptions {
   sessionId?: string;
   /** Best-effort audit recorder (failures never abort the turn). */
   recorder?: { record(rec: ToolCallRecord): Promise<void> };
+  /**
+   * Abort sentinel probed at every await point (round boundary, tool call).
+   * When it flips, the engine stops streaming/executing and throws the
+   * abort error — the loop cannot miss an abort that arrives mid-tool.
+   */
+  isAborted?: () => boolean;
+  /**
+   * Abort reason (message/code) for the terminal error event when the turn
+   * unwinds via `isAborted`.
+   */
+  abortReason?: string;
+  /**
+   * Called when the engine heals the transcript during an unwind (abort or
+   * terminal error mid-tool-loop): the caller learns which tool-call ids
+   * were stubbed so it can persist the healed batch.
+   */
+  onHeal?: (stubbedToolCallIds: string[]) => void;
 }
 
 /**
@@ -68,6 +146,14 @@ export class TurnEngine {
     try {
       await emit("turn.started", { turnId, model: modelId, ts: Date.now() });
 
+      // Abort probe: checked at every await boundary so an abort arriving
+      // mid-tool-call or mid-stream still unwinds the turn deterministically.
+      const abortErr = () => makeAbortError(opts.abortReason ?? "turn aborted");
+      const checkAbort = (): void => {
+        if (opts.isAborted?.() === true) throw abortErr();
+      };
+      checkAbort();
+
       // Bound the tool-call loop so a misbehaving model cannot spin forever.
       for (let round = 0; round < 16; round++) {
         const stream = await client.chat.completions.create({
@@ -86,6 +172,7 @@ export class TurnEngine {
         let assistantText = "";
 
         for await (const chunk of stream) {
+          checkAbort();
           const delta = chunk.choices[0]?.delta;
           if (!delta) continue;
 
@@ -101,6 +188,12 @@ export class TurnEngine {
             if (tc.function?.name) entry.name = tc.function.name;
             if (tc.function?.arguments) entry.args += tc.function.arguments;
             toolCalls.set(index, entry);
+            // Track announced calls as they stream: a mid-stream abort
+            // unwinds before the assistant row is pushed, and the heal path
+            // reconstructs the call from this tracker entry.
+            if (entry.id && entry.name && opts.sessionId !== undefined) {
+              activeToolCalls.set(opts.sessionId, { ...entry });
+            }
           }
         }
 
@@ -122,25 +215,47 @@ export class TurnEngine {
         const ordered = [...toolCalls.entries()].sort(([a], [b]) => a - b);
 
         // Replay the assistant turn, then append one tool message per call.
-        messages.push({
-          role: "assistant",
-          content: null,
-          tool_calls: ordered.map(([i, tc]) => ({
-            id: tc.id || `call_${i}`,
-            type: "function" as const,
-            function: { name: tc.name, arguments: tc.args },
-          })),
-        });
+        const assistantCallRow: AssistantToolCall[] = ordered.map(([i, tc]) => ({
+          id: tc.id || `call_${i}`,
+          type: "function" as const,
+          function: { name: tc.name, arguments: tc.args },
+        }));
+        messages.push(assistantToolCallMessage(assistantCallRow));
 
         for (const [i, tc] of ordered) {
+          const tcId = tc.id || `call_${i}`;
           await emit("tool.call", {
-            id: tc.id || `call_${i}`,
+            id: tcId,
             name: tc.name,
             args: tc.args,
           });
 
+          // Track the in-flight call so an abort can kill it and stub any
+          // calls in this round that never produced a result.
+          if (opts.sessionId !== undefined) {
+            activeToolCalls.set(opts.sessionId, { id: tcId, name: tc.name, args: tc.args });
+          }
+          // An abort that fired between rounds (or while the model stream
+          // was draining) unwinds here — before the tool starts — so the
+          // just-announced call lands in the heal path's stub set.
+          checkAbort();
+
           const startedAt = Date.now();
-          const result = await tools.execute(tc.name, tc.args);
+          const result = await tools.execute(tc.name, tc.args, {
+            ...(opts.signal ? { signal: opts.signal } : {}),
+            ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+            onStart: (call: ToolCall) =>
+              void activeToolCalls.set(opts.sessionId ?? "", {
+                id: tcId,
+                name: call.name,
+                args: tc.args,
+              }),
+            onEnd: () => {
+              if (activeToolCalls.get(opts.sessionId ?? "")?.id === tcId) {
+                activeToolCalls.delete(opts.sessionId ?? "");
+              }
+            },
+          });
           const completedAt = Date.now();
           const outcome =
             result === undefined
@@ -162,7 +277,7 @@ export class TurnEngine {
           const toolError = result?.["error"] as string | undefined;
 
           await emit("tool.result", {
-            id: tc.id || `call_${i}`,
+            id: tcId,
             name: tc.name,
             ok: result !== undefined && toolError === undefined,
             result,
@@ -192,14 +307,53 @@ export class TurnEngine {
               : JSON.stringify(result);
           messages.push({
             role: "tool",
-            tool_call_id: tc.id || `call_${i}`,
+            tool_call_id: tcId,
             content: payload,
           });
         }
       }
     } catch (err) {
-      if (opts.signal?.aborted) {
-        // Abort: propagate untouched so the caller maps it to the signal exit code.
+      // Heal first, unconditionally (any unwind mid-tool-loop): every
+      // announced tool call without a result gets a stub `tool` message, so
+      // the persisted transcript stays hydratable — the next turn replays a
+      // definite answer instead of a dangling call (providers reject that).
+      // A mid-stream abort can leave the announced tool calls in the
+      // tracker without their assistant row in `messages` (the row is only
+      // pushed after the stream completes). Reconstruct it so the healed
+      // transcript keeps the call the model actually made.
+      const tracked =
+        opts.sessionId !== undefined ? activeToolCalls.get(opts.sessionId) : undefined;
+      if (
+        tracked &&
+        !messages.some((m) =>
+          (m as { tool_calls?: { id?: string }[] }).tool_calls?.some((tc) => tc.id === tracked.id),
+        )
+      ) {
+        messages.push(
+          assistantToolCallMessage([
+            {
+              id: tracked.id,
+              type: "function",
+              function: { name: tracked.name, arguments: tracked.args },
+            },
+          ]),
+        );
+      }
+
+      const heal: ChatCompletionMessageParam[] = [...unansweredToolCallIds(messages)].map(
+        (toolCallId) => toolStubMessage(toolCallId),
+      );
+      if (heal.length > 0) {
+        messages.push(...heal);
+        opts.onHeal?.(heal.map((m) => (m as { tool_call_id: string }).tool_call_id));
+      }
+
+      const aborted = opts.signal?.aborted === true || opts.isAborted?.() === true;
+      if (aborted) {
+        // Abort: terminal `turn.aborted` (not `error`) — the operator ended
+        // the turn on purpose; transports surface it and the transcript was
+        // healed above. Propagate untouched so the caller maps its exit path.
+        await emit("turn.aborted", { reason: opts.abortReason ?? "turn aborted" });
         throw err;
       }
       // Terminal error: emit first (so transports see it), then rethrow so the
@@ -210,8 +364,29 @@ export class TurnEngine {
         ...(err instanceof Error ? { details: { name: err.name, stack: err.stack } } : {}),
       });
       throw err;
+    } finally {
+      // The turn settled (finished or unwound): the abort endpoint must not
+      // report a phantom in-flight tool on later calls.
+      if (opts.sessionId !== undefined) clearActiveToolCall(opts.sessionId);
     }
   }
+}
+
+/**
+ * The tool call currently executing (or last started without settling) for
+ * `sessionId`, for the abort endpoint: kill the tool first, then unwind.
+ */
+export function activeToolCallFor(
+  sessionId: string,
+): { id: string; name: string; args: string } | undefined {
+  return activeToolCalls.get(sessionId);
+}
+
+/**
+ * Drop the active-call tracking entry for `sessionId` (turn fully settled).
+ */
+export function clearActiveToolCall(sessionId: string): void {
+  activeToolCalls.delete(sessionId);
 }
 
 /**

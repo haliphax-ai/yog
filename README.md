@@ -26,11 +26,12 @@ The daemon is reached through `YOG_SERVER_URL` (default
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/v1/capabilities` | Advertise server: contract version, models, tools, `features` (`["sse", "transcript"]`) |
+| GET | `/v1/capabilities` | Advertise server: contract version, models, tools, `features` (`["sse", "transcript", "abort"]`) |
 | POST | `/v1/sessions` | Create a session, optional body `{ title?, system? }` → `{ session: { id, … } }` (201) |
 | GET | `/v1/sessions/{id}` | Session status → `{ session }` |
 | DELETE | `/v1/sessions/{id}` | **Detach** (advisory, `?purge=true` hard-deletes) → `{ session }` |
 | POST | `/v1/sessions/{id}/turns` | Run a turn; streams an SSE transcript (a dormant session is implicitly revived) |
+| POST | `/v1/sessions/{id}/abort` | **Abort the current turn**: kill the tool call in flight, close the model stream, heal the transcript |
 | GET | `/v1/sessions/{id}/transcript` | **Rehydration dump**: the session's canonical transcript → `{ session, messages }` |
 | GET | `/v1/sessions/{id}/turns/{turnId}` | **Turn-status recovery/replay**: fetch terminal turn state when the SSE stream died |
 
@@ -52,7 +53,28 @@ The SSE stream frames each self-describing envelope
 | `tool.call` | `{ id, name, args }` | model invoked a tool |
 | `tool.result` | `{ id, name, ok, result? }` | tool outcome |
 | `turn.finished` | `{ turnId, durationMs }` | normal end |
+| `turn.aborted` | `{ reason }` | operator aborted the turn; transcript was healed |
 | `error` | `{ code, message }` | terminal failure (e.g. `provider_error`) |
+
+**Abort.** `POST /v1/sessions/{id}/abort` ends the session's current turn:
+
+1. The tool call in flight is killed (a running bash script gets SIGTERM; the
+   shell-state snapshot still lands via the wrapper's EXIT trap, so cwd/env
+   persist).
+2. The model stream is closed and the turn unwinds.
+3. Any tool call the model announced but that never produced a result is
+   healed in the transcript with a stub `tool` message
+   (`{"error": "tool call aborted before a result was produced"}`) — the
+   next turn hydrates a complete conversation and can be resumed.
+4. The turn row is settled with status `aborted`, and the SSE stream frames
+   the terminal `turn.aborted` event.
+
+Response: `{ ok, status, session: { id }, aborted: { requested, status,
+activeToolCall } }` — `status` is `aborted` when a live turn was unwound and
+`idle` when the session had nothing to abort (still `ok: true`, idempotent).
+`aborted.activeToolCall` names the tool call that was killed, if any.
+Aborts are session-scoped: other sessions' turns are untouched. Abort is a
+capability: `GET /v1/capabilities` advertises it under `features`.
 
 **Deltas are disposable; terminal states are authoritative.** If the SSE
 connection dies mid-turn, the client reads the `turnId` from `turn.started`
@@ -193,7 +215,7 @@ docker run --rm --network container:yog-daemon \
     - `serve.ts` - composition root for the daemon (`createDaemon`).
     - `http.ts` - v1 HTTP/SSE adapter (routes, validation, error mapping).
     - `sse.ts` - SSE framing helpers (server side).
-    - `orchestrator.ts` - parallel sessions, FIFO turns per session.
+    - `orchestrator.ts` - parallel sessions, FIFO turns per session, turn abort.
     - `workpool.ts` - worker pool (`YOG_WORKERS`).
     - `store/sessions.ts` - sqlite session/turn/event store (better-sqlite3).
   - `turn.ts` - agent turn engine: streams completions, executes tool calls,

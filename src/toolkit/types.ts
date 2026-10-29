@@ -14,6 +14,16 @@ export interface ToolResult {
   [key: string]: unknown;
 }
 
+/**
+ * Execution context passed through the registry into every tool run. Carries
+ * the abort plumbing: the turn engine stamps the session id (the abort key
+ * for the running script) on each call.
+ */
+export interface ToolContext {
+  /** Abort key: the session id owning this tool call. */
+  sessionId?: string;
+}
+
 export interface ToolSpec<
   TArgs extends Record<string, unknown> = Record<string, unknown>,
   TResult extends ToolResult = ToolResult,
@@ -26,5 +36,5 @@ export interface ToolSpec<
   schema: z.ZodType<TArgs>;
   /** Response shape used when the call is aborted (validation error / exception). */
   failure(error: string): TResult;
-  run(args: TArgs): Promise<TResult>;
+  run(args: TArgs, ctx?: ToolContext): Promise<TResult>;
 }

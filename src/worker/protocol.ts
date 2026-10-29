@@ -34,7 +34,32 @@ export interface BashRunRequest {
   readonly restore?: Partial<ShellSnapshot>;
 }
 
-export type WorkerRequest = BashRunRequest;
+export type WorkerRequest = BashRunRequest | BashAbortRequest;
+
+/** Ask the worker to kill its currently-running bash child (turn abort). */
+export interface BashAbortRequest {
+  readonly type: "bash.abort";
+}
+
+/** Acknowledgement for `bash.abort`: no child was running. */
+export interface BashAbortIdle {
+  readonly ok: true;
+  readonly aborted: false;
+}
+
+/**
+ * The running child was killed. Shell state was snapshotted by the
+ * wrapper's EXIT trap before the process died; no new snapshot is returned
+ * here (the worker's next `bash.run` reads it back from the state dir).
+ */
+export interface BashAbortKilled {
+  readonly ok: true;
+  readonly aborted: true;
+  readonly exitCode: number | null;
+  readonly signal: string | null;
+}
+
+export type WorkerAbortResponse = BashAbortIdle | BashAbortKilled;
 
 /** Successful bash execution result. */
 export interface BashRunOk {

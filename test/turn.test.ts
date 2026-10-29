@@ -276,8 +276,16 @@ describe("TurnEngine failure handling", () => {
     controller.abort();
     await assertion;
 
-    // Abort is not a provider error: no `error` event, no `turn.finished`.
-    expect(sink.events.map((e) => e.type)).toEqual(["turn.started", "message.delta"]);
+    // Abort is not a provider error: no `error` event, no `turn.finished` —
+    // the terminal event is `turn.aborted` (the operator ended the turn).
+    expect(sink.events.map((e) => e.type)).toEqual([
+      "turn.started",
+      "message.delta",
+      "turn.aborted",
+    ]);
+    const aborted = sink.events[2]!;
+    if (aborted.type !== "turn.aborted") throw new Error("expected turn.aborted");
+    expect(typeof aborted.data.reason).toBe("string");
   });
 });
 

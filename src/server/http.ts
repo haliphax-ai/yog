@@ -3,6 +3,7 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { encodeEvent, type SseEnvelope } from "./sse.ts";
+import { activeToolCallFor } from "../turn.ts";
 import { logger } from "../log.ts";
 
 /** Capabilities advertisement served at GET /v1/capabilities. */
@@ -46,6 +47,8 @@ export interface StoreBoundary {
     msgs: ChatCompletionMessageParam[],
     turnId?: number | null,
   ): unknown[];
+  /** Settle a turn row (status + finished_at + duration). */
+  finishTurn?(sessionId: string, turnId: number | null, status?: string): unknown;
 }
 
 /** Handle returned by `orchestrator.runTurn` (see SessionOrchestrator). */
@@ -57,6 +60,11 @@ export interface TurnHandleLike {
 /** Minimal orchestrator boundary the adapter drives for a turn. */
 export interface OrchestratorBoundary {
   runTurn(sessionId: string, req: Record<string, unknown>): TurnHandleLike;
+  /** Abort the session's current turn; false when no turn is live. */
+  abortTurn?(
+    sessionId: string,
+    killTool?: (sessionId: string) => Promise<boolean> | boolean,
+  ): Promise<boolean>;
 }
 
 /** Minimal per-daemon event bus boundary (a Node `EventEmitter`). */
@@ -427,6 +435,47 @@ export function createHttpServer(deps: HttpDeps): Server {
         return;
       }
 
+      // POST /v1/sessions/{id}/abort — operator-driven turn abort (§"abort").
+      // Kills the tool call in flight, closes the model stream, and heals the
+      // transcript (stub tool messages) so the session can be resumed.
+      if (method === "POST" && segs.length === 4 && segs[3] === "abort") {
+        if (!session) {
+          sendError(res, "unknown_session", `session ${id} not found`);
+          return;
+        }
+        if (hasOrchestrator && typeof orchestrator!.abortTurn === "function") {
+          const kill = deps.onAbortKillTool as
+            | ((sessionId: string) => Promise<boolean> | boolean)
+            | undefined;
+          // Capture the in-flight call before unwinding: the tracker clears
+          // as the turn settles, and the response reports what *was* killed.
+          const inFlight = activeToolCallFor(id) ?? null;
+          const aborted = await orchestrator!.abortTurn(id, (sid) => (kill ? kill(sid) : false));
+          const after = await lookupSession(id);
+          sendJson(res, 200, {
+            ok: true,
+            status: aborted ? "aborted" : "idle",
+            aborted: {
+              requested: aborted,
+              sessionId: id,
+              activeToolCall: inFlight,
+            },
+            session: after ?? session,
+          });
+          return;
+        }
+        // No orchestrator (model-provider fallback): the SSE stream's
+        // request-close handler owns cancellation and there is no turn
+        // identity to heal server-side — nothing to abort.
+        sendJson(res, 200, {
+          ok: true,
+          status: "idle",
+          aborted: { requested: false, sessionId: id, activeToolCall: null },
+          session,
+        });
+        return;
+      }
+
       // POST /v1/sessions/{id}/turns — stream SSE.
       if (method === "POST" && segs.length === 4 && segs[3] === "turns") {
         if (!session) {
@@ -590,7 +639,12 @@ export function createHttpServer(deps: HttpDeps): Server {
         try {
           await handle.promise;
         } catch (err) {
-          if (!sawError && !closed && !res.writableEnded) {
+          // Operator aborts surface as `turn.aborted` from the engine — a
+          // synthetic `error` envelope on top would contradict it. The SSE
+          // controller's own abort is the disconnect path (already silenced
+          // by `closed`).
+          const isAbort = (err as Error | undefined)?.name === "AbortError";
+          if (!isAbort && !sawError && !closed && !res.writableEnded) {
             const e = err as { code?: string; message?: string };
             await emit({
               id: 0,

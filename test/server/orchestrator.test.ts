@@ -127,3 +127,63 @@ describe("SessionOrchestrator per-session FIFO", () => {
     expect(r1.end).toBeLessThanOrEqual(r2.end);
   });
 });
+
+describe("SessionOrchestrator abortTurn", () => {
+  it("aborts an in-flight turn and signals executeTurn", async () => {
+    let sawSignal = false;
+    const executeTurn = async (
+      _sessionId: string,
+      _req: TurnRequest,
+      ctx?: { signal?: AbortSignal },
+    ) => {
+      await new Promise<void>((resolve) => {
+        ctx?.signal?.addEventListener("abort", () => {
+          sawSignal = true;
+          resolve();
+        });
+        setTimeout(resolve, 5000);
+      });
+      return { ok: true };
+    };
+    const orchestrator = new SessionOrchestrator({ executeTurn });
+
+    const handle = orchestrator.runTurn("abort-me", { prompt: "slow" });
+    await delay(20); // let the turn start
+    const aborted = await orchestrator.abortTurn("abort-me");
+
+    expect(aborted).toBe(true);
+    expect(sawSignal).toBe(true);
+    await expect(handle.promise).rejects.toThrow(/abort/);
+  });
+
+  it("returns false when the session has no live turn", async () => {
+    const orchestrator = new SessionOrchestrator({ executeTurn: async () => ({}) });
+    await expect(orchestrator.abortTurn("no-turn-here")).resolves.toBe(false);
+  });
+
+  it("runs killTool before the abort signal fans out", async () => {
+    const order: string[] = [];
+    const executeTurn = async (
+      _sessionId: string,
+      _req: TurnRequest,
+      ctx?: { signal?: AbortSignal },
+    ) => {
+      await new Promise<void>((resolve) => {
+        ctx?.signal?.addEventListener("abort", () => {
+          order.push("signal");
+          resolve();
+        });
+        setTimeout(resolve, 5000);
+      });
+      return {};
+    };
+    const orchestrator = new SessionOrchestrator({ executeTurn });
+    orchestrator.runTurn("kill-order", { prompt: "slow" });
+    await delay(20);
+    await orchestrator.abortTurn("kill-order", () => {
+      order.push("killTool");
+      return true;
+    });
+    expect(order).toEqual(["killTool", "signal"]);
+  });
+});

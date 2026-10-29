@@ -20,6 +20,12 @@ export interface ShellStateProvider {
 
 /** Options the bash tool forwards to the injected executor. */
 export interface BashRequestOpts {
+  /**
+   * Abort key for the script (a running script is addressable by this id).
+   * The turn engine stamps the session id here; callers without a session
+   * fall back to the daemon-wide key.
+   */
+  scriptId?: string;
   /** Directory for the persistent shell-state snapshot. */
   stateDir?: string;
   /** Prior snapshot to restore before running. */
@@ -43,8 +49,12 @@ export interface BashExecutionResult {
  */
 export type BashExecutor = (script: string, opts?: BashRequestOpts) => Promise<BashExecutionResult>;
 
+/** Abort the script currently running for `key`; false when none is running. */
+export type BashAbort = (key: string) => Promise<boolean>;
+
 let bashExecutor: BashExecutor | undefined;
 let shellProvider: ShellStateProvider | undefined;
+let bashAborts: BashAbort | undefined;
 
 /** Inject the bash executor (owned by the composition root). */
 export function setBashExecutor(executor: BashExecutor | undefined): void {
@@ -56,8 +66,32 @@ export function setShellStateProvider(provider: ShellStateProvider | undefined):
   shellProvider = provider;
 }
 
+/**
+ * Inject the abort hook (owned by the composition root): kills the worker's
+ * active bash child for `key`. The worker snapshots shell state via the
+ * wrapper's EXIT trap before the child dies, so persistence is unaffected.
+ */
+export function setBashAbort(abort: BashAbort | undefined): void {
+  bashAborts = abort;
+}
+
+/**
+ * Abort the script `key` is currently running. Returns false when no abort
+ * hook is wired or nothing is running for `key` — the caller decides whether
+ * that is an error.
+ */
+export async function abortBash(key: string): Promise<boolean> {
+  if (!bashAborts) return false;
+  try {
+    return await bashAborts(key);
+  } catch {
+    return false;
+  }
+}
+
 export const bashTool: ToolSpec<BashArgs, BashResult> = {
   name: "bash",
+
   description:
     "Run a bash script in a persistent shell environment. " +
     "cwd, exported variables, and shell functions persist between calls; " +
@@ -75,7 +109,7 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
     return { stdout: null, stderr: null, runtimeMs: null, exitCode: null, error };
   },
 
-  async run(args): Promise<BashResult> {
+  async run(args, ctx): Promise<BashResult> {
     const start = performance.now();
     try {
       if (!bashExecutor) {
@@ -98,6 +132,7 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
       }
 
       const resp = await bashExecutor(args.script, {
+        ...(ctx?.sessionId !== undefined ? { scriptId: ctx.sessionId } : {}),
         stateDir: process.env["HARNESS_STATE_DIR"],
         ...(restore ? { restore } : {}),
       });

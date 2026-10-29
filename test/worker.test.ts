@@ -164,3 +164,43 @@ describe("WorkerClient", () => {
     }
   });
 });
+
+describe("WorkerClient abort", () => {
+  it("abortBash returns false when the worker is idle", async () => {
+    const client = await startWorker();
+    await expect(client.abortBash()).resolves.toBe(false);
+  });
+
+  it("kills a running bash child promptly and snapshots shell state", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "yog-worker-abort-"));
+    const client = await startWorker();
+    try {
+      const pending = client.runBash("cd /tmp && export ABORTED_VAR=yes && sleep 30", stateDir);
+      // The child exists as soon as the wrapper is up; under parallel test
+      // load that can take longer than a fixed sleep, so poll for it.
+      const t0 = Date.now();
+      let aborted = false;
+      while (Date.now() - t0 < 5000) {
+        if (await client.abortBash()) {
+          aborted = true;
+          break;
+        }
+        await sleep(100);
+      }
+      expect(aborted).toBe(true);
+      // The child dies quickly: the pending run settles well under its 30s.
+      const r = await Promise.race([pending, sleep(3000).then(() => null)]);
+      expect(r).not.toBeNull();
+      expect(r!.ok).toBe(true);
+      expect(Date.now() - t0).toBeLessThan(5000);
+
+      // The wrapper's EXIT trap captured cwd/env before the child died.
+      const next = await client.runBash('printf "%s|%s" "$PWD" "$ABORTED_VAR"', stateDir);
+      expectOk(next);
+      expect(next.stdout).toBe("/tmp|yes");
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+      await client.close();
+    }
+  });
+});

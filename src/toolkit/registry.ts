@@ -21,6 +21,31 @@ export function toFunctionTool(spec: ToolSpec): ChatCompletionFunctionTool {
   };
 }
 
+/** One in-flight (or just-finished) tool call, as observed by the hooks. */
+export interface ToolCall {
+  /** Tool name (e.g. `bash`). */
+  name: string;
+  /** Validated arguments object. */
+  args: Record<string, unknown>;
+}
+
+/**
+ * Optional context for a registry execution. The turn engine passes the
+ * engine's abort signal, the owning session id (the tool-level abort key),
+ * and start/end hooks so the server can address the tool call that is
+ * currently running for a session.
+ */
+export interface ToolExecuteContext {
+  /** Already-aborted signal ⇒ the call fails before the tool runs. */
+  signal?: AbortSignal;
+  /** Owning session id — forwarded to the tool as the abort key. */
+  sessionId?: string;
+  /** Fired just before the tool runs. */
+  onStart?: (call: ToolCall) => void;
+  /** Fired when the tool settles (result or throw). */
+  onEnd?: (call: ToolCall) => void;
+}
+
 /** Format a zod error the way the harness reports validation failures. */
 export function formatZodError(error: z.ZodError): string {
   return error.issues
@@ -68,10 +93,23 @@ export class ToolRegistry {
    * abort with `error` set when validation fails, and convert thrown
    * exceptions into `error` on the response. Returns undefined when the tool
    * name is unknown.
+   *
+   * The optional context carries turn-abort plumbing: `signal` (an already
+   * aborted signal rejects the call immediately) and the observation hooks
+   * the server uses to address a running call (`onStart`/`onEnd`). Existing
+   * two-argument callers are unaffected — context is optional.
    */
-  async execute(name: string, rawArgs: string | null): Promise<ToolResult | undefined> {
+  async execute(
+    name: string,
+    rawArgs: string | null,
+    ctx: ToolExecuteContext = {},
+  ): Promise<ToolResult | undefined> {
     const tool = this.tools.get(name);
     if (!tool) return undefined;
+
+    if (ctx.signal?.aborted) {
+      return tool.failure("aborted before the tool call started");
+    }
 
     let parsed: unknown;
     try {
@@ -85,10 +123,33 @@ export class ToolRegistry {
       return tool.failure(formatZodError(result.error));
     }
 
+    const call: ToolCall = { name, args: parsed as Record<string, unknown> };
+    const runP = tool.run(result.data as Record<string, unknown>, {
+      ...(ctx.sessionId !== undefined ? { sessionId: ctx.sessionId } : {}),
+    });
+    if (ctx.signal) {
+      // Turn abort mid-call: reject so the turn engine's unwind/heal path
+      // runs (the announced-but-unanswered call is stubbed there). The
+      // tool's own late settlement is discarded — the turn is unwinding.
+      // An already-aborted signal rejects immediately: the `abort` event
+      // fired before this listener could attach, so check the flag first.
+      void runP.catch(() => undefined);
+      const abortErr = new Error("tool call aborted");
+      abortErr.name = "AbortError";
+      if (ctx.signal.aborted) throw abortErr;
+      return await Promise.race([
+        runP,
+        new Promise<never>((_resolve, reject) => {
+          ctx.signal!.addEventListener("abort", () => reject(abortErr), { once: true });
+        }),
+      ]);
+    }
     try {
-      return await tool.run(result.data as Record<string, unknown>);
+      return await runP;
     } catch (err) {
-      return tool.failure(err instanceof Error ? err.message : String(err));
+      return tool.failure(err instanceof Error ? (err.message as string) : String(err));
+    } finally {
+      ctx.onEnd?.(call);
     }
   }
 }

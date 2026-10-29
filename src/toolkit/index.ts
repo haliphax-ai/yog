@@ -11,8 +11,15 @@
  */
 export * from "./types.ts";
 export * from "./registry.ts";
-export { bashTool, setBashExecutor, setShellStateProvider } from "./tools/bash.ts";
+export {
+  abortBash,
+  bashTool,
+  setBashAbort,
+  setBashExecutor,
+  setShellStateProvider,
+} from "./tools/bash.ts";
 export type {
+  BashAbort,
   BashArgs,
   BashExecutionResult,
   BashExecutor,
