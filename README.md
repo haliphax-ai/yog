@@ -26,15 +26,21 @@ The daemon is reached through `YOG_SERVER_URL` (default
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/v1/capabilities` | Advertise server: contract version, models, tools, features |
-| POST | `/v1/sessions` | Create a session → `{ session: { id, … } }` (201) |
+| GET | `/v1/capabilities` | Advertise server: contract version, models, tools, `features` (`["sse", "transcript"]`) |
+| POST | `/v1/sessions` | Create a session, optional body `{ title?, system? }` → `{ session: { id, … } }` (201) |
 | GET | `/v1/sessions/{id}` | Session status → `{ session }` |
 | DELETE | `/v1/sessions/{id}` | **Detach** (advisory, `?purge=true` hard-deletes) → `{ session }` |
 | POST | `/v1/sessions/{id}/turns` | Run a turn; streams an SSE transcript (a dormant session is implicitly revived) |
+| GET | `/v1/sessions/{id}/transcript` | **Rehydration dump**: the session's canonical transcript → `{ session, messages }` |
 | GET | `/v1/sessions/{id}/turns/{turnId}` | **Turn-status recovery/replay**: fetch terminal turn state when the SSE stream died |
 
 Turn requests are JSON: `{ "prompt": "...", "model": "..." }` (`prompt` is
-required; `model` defaults to the server's model).
+required; `model` defaults to the server's model). **Clients never send
+history** — the server owns the transcript: it hydrates prior context before
+each turn and persists everything the turn produced, so a turn request carries
+only the new prompt. `POST /v1/sessions` accepts an optional `{ title?,
+system? }`; `system` seeds the first transcript message (role `system`) so it
+is part of every turn's context.
 
 The SSE stream frames each self-describing envelope
 (`{ id, type, version, ts, data }`) as `event:<type>` / `data:<envelope-json>`:
@@ -55,6 +61,35 @@ and recovers the terminal state from
 turn with its stored events, or a 404 `{ error: { code, message } }`
 envelope for an unknown session/turn.
 
+### Transcripts, resume, and session dormancy
+
+`GET /v1/sessions/{id}/transcript` is the rehydration dump: it returns
+`{ session, messages }` where each message is
+`{ seq, turnId, ts, role, content, toolCallId?, name?, toolCalls? }` —
+monotonic `seq` per session, in conversation order. It accepts
+`?after=<seq>&limit=<n>` pagination for clients holding partial state, and it
+serves dormant sessions too: dormancy never blocks reads.
+
+There is no terminal "closed" state short of retention. `DELETE
+/v1/sessions/{id}` **detaches**: status `open` → `dormant`, `detached_at`
+stamped, nothing forfeited (transcript, turns, events all stay), idempotent.
+A turn on a dormant session implicitly **revives** it — status back to
+`open`, `detached_at` cleared, retention clock reset; there is no reopen
+endpoint, reusing the id *is* the reopen. A pruned session is the only truly
+terminal state: `?purge=true` deletes immediately, and dormant sessions past
+the 30-day retention window are pruned at daemon startup, both followed by
+404 `unknown_session` everywhere.
+
+### Session flags on the client
+
+`yog run` gains optional flags (default one-shot behavior unchanged):
+
+- `--session <id>` — skip create; reuse the session for the turn; skip the
+  trailing `DELETE` (the session outlives the client process).
+- `--resume` — fetch the transcript first and render prior history before
+  streaming the new turn (the rendered history is never sent back; the
+  server rehydrates its own copy).
+
 Errors are `{ error: { code, message } }` JSON with a stable code→status
 mapping: `invalid_request`/`unknown_model` → 400, `unauthorized` → 401,
 `unknown_session` → 404, `rate_limited` → 429, `internal` → 500,
@@ -62,10 +97,12 @@ mapping: `invalid_request`/`unknown_model` → 400, `unauthorized` → 401,
 turn or a read). Set `YOG_API_TOKEN` on the daemon
 to require `Authorization: Bearer <token>` (the client forwards it).
 
-`test/conformance.test.ts` boots an ephemeral daemon and exercises this
-contract exactly like an external client (plain `fetch`): capabilities,
-session lifecycle, a full SSE turn transcript, turn-status recovery, and the
-error-code mapping.
+`test/conformance.test.ts` (and its transcript extension,
+`test/conformance.transcript.test.ts`) boots an ephemeral daemon and
+exercises this contract exactly like an external client (plain `fetch`):
+capabilities, session lifecycle, a full SSE turn transcript, server-owned
+transcripts (multi-turn hydration, resume, dormancy, purge, pagination),
+turn-status recovery, and the error-code mapping.
 
 ## Usage
 
@@ -97,6 +134,7 @@ yog run <modelId> "<prompt>"             # one-shot client turn against it
 | `YOG_STATE_PATH` | *(derived from root)* | full-path override for the agent state db |
 | `YOG_STATE_DB` | `.agentfs/yog.db` | legacy agentfs db path override |
 | `YOG_API_TOKEN` | *(unset)* | require/forward `Authorization: Bearer …` on the contract |
+| `YOG_DB_SLOW_MS` | `50` | daemon: log a warning with SQL + timing when a store query exceeds this (log-only tripwire) |
 | `YOG_MODEL` / `OPENAI_MODEL` | `gpt-4o-mini` | model id advertised by capabilities and used for turns |
 | `OPENAI_BASE_URL` / `OPENAI_API_KEY` | *(SDK defaults)* | provider endpoint + key |
 | `YOG_MOUNT` | `/yog` | FUSE mountpoint |
