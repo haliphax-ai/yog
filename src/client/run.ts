@@ -1,8 +1,11 @@
 /**
  * Network run client — `yog run` as a pure HTTP/SSE client (PLAN.md §7).
  *
- * Flow: (optional) GET /v1/capabilities → POST /v1/sessions →
+ * Default flow: (optional) GET /v1/capabilities → POST /v1/sessions →
  * POST /v1/sessions/{id}/turns (SSE) → DELETE /v1/sessions/{id}.
+ * Optional flags (§4.7): `--session <id>` reuses an existing id (no create
+ * POST, no trailing DELETE — the session outlives the client process) and
+ * `--resume` renders the GET .../transcript history before the new turn.
  *
  * If the SSE stream dies mid-turn, the client falls back to
  * GET /v1/sessions/{id}/turns/{turnId} (turnId comes from `turn.started`)
@@ -31,6 +34,18 @@ export interface RunClientOptions {
   model?: string;
   /** User prompt for the turn. */
   prompt: string;
+  /**
+   * Reuse an existing session instead of creating one: skip the create POST
+   * and the trailing DELETE (the session outlives the client process). The
+   * turn runs on the given id exactly as it would on a freshly created one.
+   */
+  session?: string;
+  /**
+   * Fetch the transcript first and render prior history before streaming the
+   * new turn. Clients never send history (§4.6): the server owns the
+   * canonical transcript — this only rehydrates the local render.
+   */
+  resume?: boolean;
   /** Assistant text sink (message.delta). Defaults to stdout. */
   stdout?: WritableLike;
   /** Status sink (tool activity, errors). Defaults to stderr. */
@@ -126,6 +141,31 @@ function parseEnvelope(json: string): TurnEvent | undefined {
 }
 
 /**
+ * Render prior transcript history (§4.6 wire shape) before the new turn.
+ * `--resume` only rehydrates the local render — the fetched message list
+ * never crosses the wire back to the server (clients never send history).
+ */
+async function renderResumeHistory(
+  base: string,
+  sessionId: string,
+  auth: Record<string, string> | undefined,
+  signal: AbortSignal | undefined,
+  stdout: WritableLike,
+): Promise<void> {
+  const res = await fetch(`${base}/v1/sessions/${sessionId}/transcript`, {
+    headers: auth,
+    signal,
+  });
+  if (!res.ok) throw await httpError(res, "fetching transcript failed");
+  const body = (await res.json()) as { messages?: { role?: unknown; content?: unknown }[] };
+  for (const msg of body.messages ?? []) {
+    if (typeof msg.content !== "string") continue;
+    const role = typeof msg.role === "string" ? msg.role : "unknown";
+    stdout.write(`[${role}] ${msg.content}\n`);
+  }
+}
+
+/**
  * Run one turn against a running daemon.
  *
  * Resolves with `{ exitCode: 0 }` on success and `{ exitCode: 1, error }` on
@@ -173,17 +213,35 @@ async function execute(
   });
   if (!capsRes.ok) throw await httpError(capsRes, "capabilities request failed");
 
-  // 2. Create the session.
-  const createRes = await fetch(`${base}/v1/sessions`, {
-    method: "POST",
-    headers: auth,
-    signal: opts.signal,
-  });
-  if (!createRes.ok) throw await httpError(createRes, "creating session failed");
-  const created = (await createRes.json()) as { session?: { id?: string } };
-  const sessionId = created?.session?.id;
-  if (!sessionId || typeof sessionId !== "string") {
-    throw new Error("creating session failed: response has no session id");
+  // 2. Resolve the session: `--session <id>` reuses an existing id as-is —
+  //    no create POST, and no trailing DELETE in the finally below (§4.7);
+  //    the default still creates a fresh session for the one-shot flow.
+  let sessionId: string;
+  if (opts.session !== undefined) {
+    if (opts.session === "") {
+      throw new Error("session id must be a non-empty string");
+    }
+    sessionId = opts.session;
+  } else {
+    const createRes = await fetch(`${base}/v1/sessions`, {
+      method: "POST",
+      headers: auth,
+      signal: opts.signal,
+    });
+    if (!createRes.ok) throw await httpError(createRes, "creating session failed");
+    const created = (await createRes.json()) as { session?: { id?: string } };
+    const createdId = created?.session?.id;
+    if (!createdId || typeof createdId !== "string") {
+      throw new Error("creating session failed: response has no session id");
+    }
+    sessionId = createdId;
+  }
+
+  // 1b. `--resume` rehydrates the local render from the server's canonical
+  //     transcript (§4.6/§4.7) before the new turn streams — strictly before
+  //     the turn POST, and only rendered, never sent back.
+  if (opts.resume === true) {
+    await renderResumeHistory(base, sessionId, auth, opts.signal, stdout);
   }
 
   // Track turn state across the stream and its fallback.
@@ -222,6 +280,8 @@ async function execute(
     const turnRes = await fetch(`${base}/v1/sessions/${sessionId}/turns`, {
       method: "POST",
       headers: { "content-type": "application/json", ...auth },
+      // Clients never send history (§4.6): the body carries only the prompt
+      // (plus an explicit model, if given) — never a messages array.
       body: JSON.stringify({ ...(opts.model ? { model: opts.model } : {}), prompt: opts.prompt }),
       signal: opts.signal,
     });
@@ -277,9 +337,13 @@ async function execute(
     }
   } finally {
     // 4. Close the session (best effort — never masks the turn outcome).
-    await fetch(`${base}/v1/sessions/${sessionId}`, { method: "DELETE", headers: auth }).catch(
-      () => undefined,
-    );
+    // Skipped under `--session`: the reused session outlives the client
+    // process and must stay addressable for the next invocation (§4.7).
+    if (opts.session === undefined) {
+      await fetch(`${base}/v1/sessions/${sessionId}`, { method: "DELETE", headers: auth }).catch(
+        () => undefined,
+      );
+    }
   }
   return result;
 }
