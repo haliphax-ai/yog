@@ -115,7 +115,7 @@ afterAll(async () => {
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 
-describe("executeTurn (orchestrator path)", () => {
+describe("executeTurn (http fallback hydrate/persist path — model dep, no orchestrator)", () => {
   it("hydrates prior transcript and persists this turn's messages", async () => {
     const sessionRes = await fetch(`${base}/v1/sessions`, {
       method: "POST",

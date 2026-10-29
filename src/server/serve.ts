@@ -197,24 +197,12 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         }
       }
 
-      // Persist the user message up front (§4.4): the canonical transcript
-      // holds every message of a completed turn, including the opening user
-      // prompt. Writing it before the engine runs means a failed turn still
-      // leaves the user row behind — but appendMessages rolls the whole
-      // batch back on failure, so the transcript stays at the last turn
-      // boundary either way. startLen is captured here so the success path
-      // can slice exactly this turn's new messages.
-      if (store && turnRowId !== null) {
-        const firstMsg = messages[messages.length - 1];
-        if (firstMsg) {
-          try {
-            store.appendMessages(sessionId, [firstMsg], turnRowId);
-          } catch {
-            // persistence is best effort
-          }
-        }
-      }
-
+      // Nothing is persisted up front: the transcript only ever contains
+      // complete turns (§4.4). The success path below persists
+      // `messages.slice(startLen)` — which includes this turn's user prompt —
+      // in one appendMessages call, so a failed turn persists nothing
+      // (its event log is diagnostic and stays) and a successful turn leaves
+      // no duplicated user row behind.
       let turnId: string | null = null;
       const sink: TurnSink = {
         async emit(ev: TurnEvent): Promise<void> {
@@ -245,8 +233,11 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       try {
         await new TurnEngine(sink).run(client, model, messages, tools, turnOpts);
         // On success, persist everything this turn produced (§4.4): the
-        // transcript only ever contains complete turns. A failed turn
-        // persists nothing (the catch is a no-op for the transcript).
+        // transcript only ever contains complete turns — the batch starts at
+        // this turn's user prompt (`startLen` was captured before it, so the
+        // slice includes it). A failed turn persists nothing: the catch is a
+        // no-op for the transcript and a retry replays from the last turn
+        // boundary.
         if (store && messages.length > startLen) {
           try {
             store.appendMessages(sessionId, messages.slice(startLen), turnRowId);

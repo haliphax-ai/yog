@@ -24,6 +24,22 @@ export class SessionStore {
     this.db.pragma("busy_timeout = 5000");
     this.db.pragma("synchronous = NORMAL");
 
+    // Adopt pre-plan volumes (§4.1: the schema path accepts both fresh and
+    // pre-existing sessions.db files). The legacy schema stamped the detach
+    // time in `closed_at`; mirror the knex migration chain's re-key (002 + 003)
+    // so a volume opened directly through this constructor (without the
+    // serve.ts migration run) still speaks the current vocabulary. Guarded:
+    // a no-op on fresh volumes (no sessions table yet) and current volumes
+    // (detached_at already present).
+    const legacyCols = this.db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
+    if (
+      legacyCols.length > 0 &&
+      legacyCols.some((c) => c.name === "closed_at") &&
+      !legacyCols.some((c) => c.name === "detached_at")
+    ) {
+      this.db.exec("ALTER TABLE sessions RENAME COLUMN closed_at TO detached_at");
+    }
+
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
