@@ -126,6 +126,17 @@ module.exports = {
       to: { path: "^agentfs-sdk$" },
     },
 
+    // Database drivers are owned by their data-access module: all operations on
+    // sessions.db live in src/server/store/ (knex + better-sqlite3 driver), all
+    // operations on the agentfs db in src/state/ (agentfs SDK — pre-existing
+    // agentfs-only-in-state rule). No other module imports a database driver.
+    {
+      name: "db-drivers-only-in-store",
+      severity: "error",
+      from: { path: "^src/(?!server/store/|state/)" },
+      to: { path: "^(knex|better-sqlite3|agentfs-sdk)$" },
+    },
+
     // The state layer is a leaf below tools/vfs — it never reaches up.
     {
       name: "state-leaf",

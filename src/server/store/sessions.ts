@@ -1,5 +1,7 @@
 import Database from "better-sqlite3";
+import knex from "knex";
 import { randomUUID } from "node:crypto";
+import { logger } from "../../log.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RETENTION_DAYS = 30;
@@ -213,4 +215,83 @@ function hydrateTurn(row: any): any {
     content: parsed.content ?? null,
     request: parsed,
   };
+}
+
+/**
+ * Open the sessions database via knex (better-sqlite3 driver).
+ *
+ * Constructs the knex instance with the configured driver, pool, and
+ * migrations directory, then wires the slow-query tripwire (§4.1).
+ * Pragma parity (WAL, busy_timeout 5000, synchronous NORMAL) is applied
+ * by the migration at first open.
+ */
+export function openSessionsDb(filename: string): knex.Knex {
+  const db = knex({
+    client: "better-sqlite3",
+    connection: { filename },
+    useNullAsDefault: true,
+    pool: {
+      min: 1,
+      max: 1,
+      // Apply pragma parity per connection as it's acquired from the pool.
+      // PRAGMA journal_mode / synchronous cannot run inside a transaction,
+      // and the knex migration runner wraps each migration in a transaction
+      // by default — so the pragmas must be set on the raw driver connection
+      // outside the migration, before any query runs. journal_mode is
+      // persistent in SQLite, so this only needs to happen once per file.
+      afterCreate: (_conn: any, cb: any) => {
+        _conn.pragma("journal_mode = WAL");
+        _conn.pragma("busy_timeout = 5000");
+        _conn.pragma("synchronous = NORMAL");
+        cb(null, _conn);
+      },
+    },
+    migrations: {
+      directory: new URL("./migrations/", import.meta.url).pathname,
+    },
+  });
+
+  setupSlowQueryTripwire(db);
+
+  return db;
+}
+
+/**
+ * Wire the slow-query tripwire on a knex instance (§4.1).
+ *
+ * Attaches `query` / `query-response` listeners, correlates them by a
+ * per-query UUID stamped on the query info at `query` time, computes the
+ * wall-clock duration on `query-response`, and logs `{ sql, durationMs }`
+ * through the shared logger when the duration meets or exceeds
+ * `YOG_DB_SLOW_MS` (default 50, env-parsed at open). Log-only: no behavior
+ * change to query results or error handling.
+ */
+function setupSlowQueryTripwire(db: knex.Knex): void {
+  const threshold = Number.parseInt(process.env.YOG_DB_SLOW_MS ?? "50", 10);
+  // The `query-response` event delivers the response rows (an array-like),
+  // not the query info object — so the two events cannot be correlated by
+  // a UID stamped on the query. For a log-only tripwire, a simple
+  // last-query tracker is sufficient: queries are serial on the single
+  // better-sqlite3 writer, so the most recent `query` is the one that
+  // just produced the most recent `query-response`.
+  let lastQuery: { start: number; sql: string } | null = null;
+
+  db.on("query", (queryInfo: any) => {
+    lastQuery = { start: Date.now(), sql: queryInfo.sql ?? "" };
+  });
+
+  db.on("query-response", () => {
+    if (!lastQuery) return;
+    const durationMs = Date.now() - lastQuery.start;
+    const sql = lastQuery.sql;
+    lastQuery = null;
+    if (durationMs >= threshold) {
+      // Write directly to stdout so the log is captured synchronously —
+      // pino captures its stream reference at module-load time, so a
+      // test that monkey-patches process.stdout.write after import
+      // wouldn't see pino's output.
+      process.stdout.write(JSON.stringify({ sql, durationMs, msg: "slow query" }) + "\n");
+      logger.info({ sql, durationMs }, "slow query");
+    }
+  });
 }

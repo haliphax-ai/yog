@@ -20,6 +20,7 @@
     "agentfs-sdk": "^0.6.4",
     "better-sqlite3": "^13.0.3",
     "fuse-native": "^2.2.6",
+    "knex": "^3.3.0",
     "openai": "^7.43.0",
     "pino": "^10.4.0",
     "zod": "^4.6.7"
@@ -29,6 +30,7 @@
     "@commitlint/config-conventional": "^21.2.4",
     "@swc/core": "^1.16.20",
     "@types/better-sqlite3": "^9.6.0",
+    "@types/knex": "^0.15.2",
     "@types/node": "^26.6.5",
     "dependency-cruiser": "^18.7.0",
     "husky": "^9.1.7",
