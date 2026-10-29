@@ -32,10 +32,10 @@ describe("SessionStore", () => {
     expect(listed[0].title).toBe("first");
     expect(listed[0].status).toBe("open");
 
-    store.closeSession(session.id);
-    const afterClose = store.listSessions();
-    expect(afterClose[0].status).toBe("closed");
-    expect(afterClose[0].closed_at).toBeTruthy();
+    store.detachSession(session.id);
+    const afterDetach = store.listSessions();
+    expect(afterDetach[0].status).toBe("dormant");
+    expect(afterDetach[0].detached_at).toBeTruthy();
   });
 
   it("keeps sessions and turns durable across a reopen of the same db file", () => {
@@ -60,11 +60,11 @@ describe("SessionStore", () => {
     const oldSession = store.createSession({ title: "old" });
     store.addTurn(oldSession.id, { role: "user", content: "ancient", status: "done" });
     store.addEvent(oldSession.id, { type: "message", payload: "ancient-event" });
-    store.closeSession(oldSession.id, daysAgo(31));
+    store.detachSession(oldSession.id, daysAgo(31));
 
     const recentSession = store.createSession({ title: "recent" });
     store.addTurn(recentSession.id, { role: "user", content: "fresh", status: "done" });
-    store.closeSession(recentSession.id, daysAgo(5));
+    store.detachSession(recentSession.id, daysAgo(5));
 
     store.pruneOldSessions();
 

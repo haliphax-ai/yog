@@ -154,7 +154,9 @@ describe("session lifecycle", () => {
     const del = await fetch(`${base}/v1/sessions/${session.id}`, { method: "DELETE" });
     expect(del.status).toBe(200);
     const after = await json(await fetch(`${base}/v1/sessions/${session.id}`));
-    expect(after.session.status).toBe("closed");
+    // DELETE is a detach (§4.5): advisory dormant, revivable — no terminal closed state.
+    expect(after.session.status).toBe("dormant");
+    expect(after.session.detached_at).toBeTruthy();
   });
 
   it("unknown session → 404 with code unknown_session", async () => {

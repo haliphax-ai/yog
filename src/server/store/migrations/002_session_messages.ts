@@ -35,6 +35,11 @@ export async function up(knex: any): Promise<void> {
   // are now `dormant`. Rows already `dormant` (fresh from this migration)
   // are untouched by the WHERE clause.
   await knex.raw("UPDATE sessions SET status = 'dormant' WHERE status = 'closed'");
+  // NOTE: the `closed_at` → `detached_at` column rename (§4.5) is migration
+  // 003 (builder-based); this migration leaves the sessions table shape
+  // untouched. Migration 003 must re-key any legacy `closed` rows stamped by
+  // pre-003 detach paths onto `detached_at`, since this UPDATE makes them
+  // `dormant` while their detach timestamp still sits in `closed_at`.
 }
 
 export async function down(knex: any): Promise<void> {

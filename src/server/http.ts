@@ -17,17 +17,19 @@ export interface Capabilities {
 /** Session record tracked by the adapter (in-memory; store remains injectable). */
 export interface SessionRecord {
   id: string;
-  status: "open" | "closed";
+  status: "open" | "dormant";
   created_at: number;
   updated_at: number;
-  closed_at?: number | null;
+  detached_at?: number | null;
 }
 
 /** Minimal store boundary the adapter drives (real `SessionStore`). */
 export interface StoreBoundary {
-  createSession(opts?: { title?: string }): unknown;
+  createSession(opts?: { title?: string; system?: string }): unknown;
   getSession(id: string): unknown;
-  closeSession(id: string, closedAt?: string | number): unknown;
+  detachSession(id: string, detachedAt?: string | number): unknown;
+  reviveSession?(id: string): unknown;
+  purgeSession?(id: string): number;
   addTurn?(
     sessionId: string,
     turn: { role: string; content: string; status: string; model?: string },
@@ -92,7 +94,6 @@ const ERROR_STATUS: Record<string, number> = {
   invalid_request: 400,
   unknown_model: 400,
   unknown_session: 404,
-  session_closed: 409,
   unauthorized: 401,
   provider_error: 502,
   rate_limited: 429,
@@ -137,14 +138,14 @@ function checkAuth(req: IncomingMessage): boolean {
 /** Coerce a store row (sqlite) into the adapter's session shape. */
 function normalizeSession(row: unknown): SessionRecord {
   const rec = (row ?? {}) as Record<string, unknown>;
-  const status = rec.status === "closed" ? "closed" : "open";
+  const status = rec.status === "dormant" ? "dormant" : "open";
   return {
     ...rec,
     id: String(rec.id ?? ""),
     status,
     created_at: Number(rec.created_at ?? Date.now()),
     updated_at: Number(rec.updated_at ?? Date.now()),
-    closed_at: (rec.closed_at as number | null | undefined) ?? null,
+    detached_at: (rec.detached_at as number | null | undefined) ?? null,
   } as SessionRecord;
 }
 
@@ -204,8 +205,34 @@ export function createHttpServer(deps: HttpDeps): Server {
 
     // POST /v1/sessions
     if (method === "POST" && segs.length === 2 && segs[1] === "sessions") {
+      // Body is optional: `{ title?, system? }` (§4.6). `system` seeds the
+      // first transcript message (role `system`) so it is part of every
+      // turn's hydrate. Read it up front so the store path can honor it.
+      let body: Record<string, unknown> = {};
+      try {
+        const raw = await readBody(req);
+        const parsed: unknown = raw ? JSON.parse(raw) : {};
+        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+          body = parsed as Record<string, unknown>;
+        }
+      } catch {
+        sendError(res, "invalid_request", "request body must be a JSON object");
+        return;
+      }
+      if (body.title !== undefined && typeof body.title !== "string") {
+        sendError(res, "invalid_request", "title must be a string");
+        return;
+      }
+      if (body.system !== undefined && typeof body.system !== "string") {
+        sendError(res, "invalid_request", "system must be a string");
+        return;
+      }
+
       if (hasStore) {
-        const row = store!.createSession();
+        const row = store!.createSession({
+          ...(typeof body.title === "string" ? { title: body.title } : {}),
+          ...(typeof body.system === "string" ? { system: body.system } : {}),
+        });
         if (!row) {
           sendError(res, "internal", "session store failed to create a session");
           return;
@@ -219,16 +246,17 @@ export function createHttpServer(deps: HttpDeps): Server {
         status: "open",
         created_at: now,
         updated_at: now,
+        ...(typeof body.title === "string" ? { title: body.title } : {}),
       };
       sessions.set(session.id, session);
       sendJson(res, 201, { session });
       return;
     }
 
-    // /v1/sessions/{id}[/turns...]
+    // /v1/sessions/{id}[/turns...|transcript...]
     if (segs[1] === "sessions" && segs.length >= 3) {
       const id = segs[2] as string;
-      const session = lookupSession(id);
+      let session = lookupSession(id);
 
       if (segs.length === 3) {
         if (method === "GET") {
@@ -244,20 +272,68 @@ export function createHttpServer(deps: HttpDeps): Server {
             sendError(res, "unknown_session", `session ${id} not found`);
             return;
           }
-          if (session.status === "open") {
-            if (hasStore) {
-              store!.closeSession(id, Date.now());
-              const closed = lookupSession(id);
-              sendJson(res, 200, { session: closed ?? { ...session, status: "closed" } });
+          const purge =
+            new URL(req.url ?? "", "http://localhost").searchParams.get("purge") === "true";
+          if (purge) {
+            // Immediate irreversible delete (§4.5). After this the session
+            // row is gone: subsequent GET session/transcript/POST turn all
+            // hit the 404 unknown_session path.
+            if (hasStore && typeof store!.purgeSession === "function") {
+              const deleted = store!.purgeSession(id);
+              if (deleted === 0) {
+                sendError(res, "unknown_session", `session ${id} not found`);
+                return;
+              }
+              sendJson(res, 200, { ok: true, deleted: true, id });
               return;
             }
-            session.status = "closed";
-            session.closed_at = Date.now();
-            session.updated_at = session.closed_at;
+            // In-memory fallback: purge is a hard delete.
+            sessions.delete(id);
+            sendJson(res, 200, { ok: true, deleted: true, id });
+            return;
+          }
+          // Detach (§4.5): status open → dormant, detached_at stamped,
+          // nothing forfeited. Idempotent — a second DELETE on an already
+          // dormant session is a no-op and still returns 200.
+          if (session.status === "open") {
+            if (hasStore && typeof store!.detachSession === "function") {
+              store!.detachSession(id, Date.now());
+              const detached = lookupSession(id);
+              sendJson(res, 200, { session: detached ?? { ...session, status: "dormant" } });
+              return;
+            }
+            session.status = "dormant";
+            session.detached_at = Date.now();
+            session.updated_at = session.detached_at;
           }
           sendJson(res, 200, { session });
           return;
         }
+      }
+
+      // GET /v1/sessions/{id}/transcript — the rehydration dump (§4.6).
+      // Readable while the row exists, including dormant sessions within the
+      // 30-day retention window; dormancy never blocks reads.
+      if (method === "GET" && segs.length === 4 && segs[3] === "transcript") {
+        if (!session) {
+          sendError(res, "unknown_session", `session ${id} not found`);
+          return;
+        }
+        if (hasStore && typeof store!.getTranscript === "function") {
+          const params = new URL(req.url ?? "", "http://localhost").searchParams;
+          const afterSeq = params.get("after") ? Number(params.get("after")) : undefined;
+          const limit = params.get("limit") ? Number(params.get("limit")) : undefined;
+          const messages = store!.getTranscript(id, {
+            ...(afterSeq !== undefined && Number.isFinite(afterSeq) ? { afterSeq: afterSeq } : {}),
+            ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
+          });
+          sendJson(res, 200, { session, messages });
+          return;
+        }
+        // Store-less fallback (test mode): documented minimal response — an
+        // empty transcript rather than a crash (§4.8).
+        sendJson(res, 200, { session, messages: [] });
+        return;
       }
 
       // GET /v1/sessions/{id}/turns/{turnId} — terminal turn state.
@@ -329,6 +405,25 @@ export function createHttpServer(deps: HttpDeps): Server {
           sendError(res, "unknown_session", `session ${id} not found`);
           return;
         }
+        // Revive (§4.5): a turn on a dormant session implicitly reopens it —
+        // status → open, detached_at cleared, retention clock reset. The
+        // session_closed (409) error code is gone: nothing about dormancy
+        // rejects a turn. The mutation is best-effort; the stream still runs
+        // if the store write fails.
+        if (session.status === "dormant") {
+          if (hasStore && typeof store!.reviveSession === "function") {
+            try {
+              store!.reviveSession(id);
+              const revived = lookupSession(id);
+              if (revived) session = revived;
+            } catch {
+              // revival is best effort; proceed with the turn
+            }
+          } else {
+            session.status = "open";
+            session.detached_at = null;
+          }
+        }
         await streamTurn(req, res, session);
         return;
       }
@@ -342,8 +437,12 @@ export function createHttpServer(deps: HttpDeps): Server {
     res: ServerResponse,
     session: SessionRecord,
   ): Promise<void> {
+    // The caller revives dormant sessions before reaching here, so the only
+    // non-open status left is a genuine internal inconsistency. The
+    // `session_closed` (409) error code is gone (§4.6): nothing about
+    // dormancy rejects a turn.
     if (session.status !== "open") {
-      sendError(res, "session_closed", `session ${session.id} is closed`);
+      sendError(res, "internal", `session ${session.id} is not open (status=${session.status})`);
       return;
     }
 
@@ -442,8 +541,14 @@ export function createHttpServer(deps: HttpDeps): Server {
     };
 
     const channel = `session:${session.id}`;
+    // Event-persistence dedup (§4.8): on the orchestrator path, the composed
+    // `executeTurn` in serve.ts publishes each envelope to the bus *and*
+    // persists it through its own sink (`store.addEvent`). The bus
+    // subscriber's only job here is to deliver the envelope to SSE — it
+    // must NOT persist again, or every event lands in `turn_events`
+    // twice. On the fallback path (no orchestrator) there is no sink, so
+    // `persistEvent` is the sole writer and stays.
     const onBusEvent = (ev: SseEnvelope): void => {
-      persistEvent(ev);
       void emit(ev);
     };
 

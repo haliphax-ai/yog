@@ -32,7 +32,7 @@ export class SessionStore {
         status TEXT NOT NULL DEFAULT 'open',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
-        closed_at INTEGER
+        detached_at INTEGER
       );
       CREATE TABLE IF NOT EXISTS turns (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,16 +75,23 @@ export class SessionStore {
     this.interruptRunningTurns();
   }
 
-  createSession(opts: { title?: string } = {}): any {
+  createSession(opts: { title?: string; system?: string } = {}): any {
     const now = Date.now();
     const id = randomUUID();
     this.db
       .prepare(
-        `INSERT INTO sessions (id, title, agent_id, status, created_at, updated_at, closed_at)
+        `INSERT INTO sessions (id, title, agent_id, status, created_at, updated_at, detached_at)
          VALUES (?, ?, ?, 'open', ?, ?, NULL)`,
       )
       .run(id, opts.title ?? null, "", now, now);
-    return this.getSession(id);
+    const session = this.getSession(id);
+    // `system` seeds the first transcript message (role `system`) so it is
+    // part of every turn's hydrate (§4.6). Written here so the seed is
+    // present before any turn runs and is itself a persisted transcript row.
+    if (opts.system !== undefined && opts.system !== null) {
+      this.appendMessages(id, [{ role: "system", content: String(opts.system) }], null);
+    }
+    return session;
   }
 
   getSession(id: string): any {
@@ -95,16 +102,74 @@ export class SessionStore {
     return this.db.prepare("SELECT * FROM sessions ORDER BY created_at, id").all();
   }
 
-  closeSession(id: string, closedAt?: string | number): void {
-    const ts = toMs(closedAt) ?? Date.now();
+  /**
+   * Detach a session (§4.5): advisory "done for now". Status `open` →
+   * `dormant`, `detached_at` stamped. Nothing is forfeited — transcript,
+   * turns, events, and agentfs shell state all stay. Idempotent: a second
+   * call on an already-dormant session is a no-op (the row is already
+   * detached), so the route returns 200 either way. Also idempotent when
+   * called on an already-open session that was never detached? No — an open
+   * session is exactly the one that gets detached here; the guard simply
+   * makes a *second* detach after a revive a fresh stamp (a new clock start,
+   * not a stale one).
+   */
+  detachSession(id: string, detachedAt?: string | number): void {
+    const ts = toMs(detachedAt) ?? Date.now();
     this.db
-      .prepare(`UPDATE sessions SET status = 'closed', closed_at = ?, updated_at = ? WHERE id = ?`)
+      .prepare(
+        `UPDATE sessions
+         SET status = 'dormant', detached_at = ?, updated_at = ?
+         WHERE id = ? AND status = 'open'`,
+      )
       .run(ts, ts, id);
+  }
+
+  /**
+   * Revive a dormant session (§4.5): status `dormant` → `open`,
+   * `detached_at` cleared. Retention clock resets (a pruned session is the
+   * only truly terminal state). Idempotent on an already-open session.
+   */
+  reviveSession(id: string): void {
+    this.db
+      .prepare(
+        `UPDATE sessions
+         SET status = 'open', detached_at = NULL, updated_at = ?
+         WHERE id = ? AND status = 'dormant'`,
+      )
+      .run(Date.now(), id);
+  }
+
+  /**
+   * Immediate irreversible delete (§4.5 `?purge=true`). Removes the session
+   * row and cascades to turns, turn_events, and session_messages. The
+   * `session_messages` FK has ON DELETE CASCADE; the other tables do not, so
+   * they are deleted explicitly. Returns the number of session rows deleted
+   * (0 if the id did not exist).
+   */
+  purgeSession(id: string): number {
+    const deleteEvents = this.db.prepare(
+      `DELETE FROM turn_events WHERE turn_id IN (SELECT id FROM turns WHERE session_id = ?)`,
+    );
+    const deleteTurns = this.db.prepare("DELETE FROM turns WHERE session_id = ?");
+    const deleteMessages = this.db.prepare("DELETE FROM session_messages WHERE session_id = ?");
+    const deleteSession = this.db.prepare("DELETE FROM sessions WHERE id = ?");
+    let changes = 0;
+    const txn = this.db.transaction(() => {
+      deleteEvents.run(id);
+      deleteTurns.run(id);
+      deleteMessages.run(id);
+      const info = deleteSession.run(id);
+      changes = info.changes;
+    });
+    txn();
+    return changes;
   }
 
   addTurn(
     sessionId: string,
-    turn: { role: string; content: string; status: string; model?: string },
+    turn: { role: string; content: string; status: string; model?: string } & {
+      revive?: boolean;
+    },
   ): any {
     const now = Date.now();
     const requestJson = JSON.stringify({ prompt: turn.content, model: turn.model ?? "unknown" });
@@ -123,6 +188,18 @@ export class SessionStore {
         finished,
         finished === null ? null : finished - now,
       );
+    // Implicit revive (§4.5): a turn on a dormant session flips it back to
+    // `open` and clears `detached_at` (retention clock reset). Store-owned,
+    // best-effort (a missing/detached row must not fail the turn), and
+    // idempotent — on an already-open session the guarded UPDATE matches
+    // zero rows.
+    if (turn.revive) {
+      try {
+        this.reviveSession(sessionId);
+      } catch {
+        // revival is best effort; the turn itself still runs
+      }
+    }
     return this.getTurn(Number(info.lastInsertRowid));
   }
 
@@ -290,12 +367,21 @@ export class SessionStore {
     });
   }
 
-  /** Delete closed sessions older than the retention window, plus their turns/events. */
+  /**
+   * Prune dormant sessions past the retention window (§4.5).
+   *
+   * The 30-day clock is keyed on `detached_at` (the last detach), not
+   * `created_at`: a session that was detached and then revived clears
+   * `detached_at`, resetting the clock. A pruned session is the only
+   * truly terminal state (`unknown_session` 404 thereafter). Cascade
+   * includes `session_messages` (§4.2).
+   */
   pruneOldSessions(): void {
     const cutoff = Date.now() - RETENTION_DAYS * DAY_MS;
     const doomed: any[] = this.db
       .prepare(
-        `SELECT id FROM sessions WHERE status = 'closed' AND closed_at IS NOT NULL AND closed_at < ?`,
+        `SELECT id FROM sessions
+         WHERE status = 'dormant' AND detached_at IS NOT NULL AND detached_at < ?`,
       )
       .all(cutoff);
     if (doomed.length === 0) return;

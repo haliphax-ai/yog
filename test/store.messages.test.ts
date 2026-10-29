@@ -123,7 +123,7 @@ describe("migration 002: session_messages schema", () => {
     const session = store.createSession({ title: "t" }) as any;
 
     store.appendMessages(session.id, [{ role: "user", content: "first" }]);
-    store.closeSession(session.id);
+    store.detachSession(session.id);
 
     // Reopen the same store (simulating daemon restart): seq continues.
     const store2 = new SessionStore(dbPath);
@@ -206,8 +206,8 @@ describe("migration 002: session_messages schema", () => {
     store.appendMessages(s1.id, [{ role: "user", content: "bye" }]);
     store.appendMessages(s2.id, [{ role: "user", content: "hi" }]);
 
-    // Force s1 into the retention window: closed_at far in the past.
-    store.closeSession(s1.id, Date.now() - 31 * 24 * 60 * 60 * 1000);
+    // Force s1 into the retention window: detached_at far in the past.
+    store.detachSession(s1.id, Date.now() - 31 * 24 * 60 * 60 * 1000);
 
     store.pruneOldSessions();
 

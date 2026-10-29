@@ -188,13 +188,16 @@ describe("conformance: session lifecycle", () => {
 
     const del = await fetch(`${base}/v1/sessions/${id}`, { method: "DELETE" });
     expect(del.status).toBe(200);
-    expect((await json(del)).session.status).toBe("closed");
+    expect((await json(del)).session.status).toBe("dormant");
 
+    // Detach is advisory (§4.5): nothing is forfeited, the session stays
+    // readable, and there is no terminal `closed` state short of pruning.
     const after = await json(await fetch(`${base}/v1/sessions/${id}`));
-    expect(after.session.status).toBe("closed");
+    expect(after.session.status).toBe("dormant");
+    expect(after.session.detached_at).toBeTruthy();
   });
 
-  it("refuses a turn on a closed session (session_closed → 409)", async () => {
+  it("a turn on a dormant session implicitly revives it (status open, detached_at cleared)", async () => {
     const id = await newSession();
     await fetch(`${base}/v1/sessions/${id}`, { method: "DELETE" });
     const res = await fetch(`${base}/v1/sessions/${id}/turns`, {
@@ -202,8 +205,13 @@ describe("conformance: session lifecycle", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ prompt: "hi" }),
     });
-    expect(res.status).toBe(409);
-    expect((await json(res)).error.code).toBe("session_closed");
+    // Revive is implicit: the turn streams (no session_closed 409 — §4.6).
+    expect(res.status).toBe(200);
+    await res.text();
+
+    const after = await json(await fetch(`${base}/v1/sessions/${id}`));
+    expect(after.session.status).toBe("open");
+    expect(after.session.detached_at).toBeNull();
   });
 });
 
