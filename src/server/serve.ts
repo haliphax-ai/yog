@@ -270,7 +270,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         contractVersion: "v1",
         models: [modelId],
         tools: ["bash"],
-        features: ["sse"],
+        features: ["sse", "transcript"],
       },
       ...(store ? { store } : {}),
       ...(orchestrator ? { orchestrator } : {}),

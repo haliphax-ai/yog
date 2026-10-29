@@ -150,16 +150,38 @@ function normalizeSession(row: unknown): SessionRecord {
 }
 
 /**
+ * §4.6 wire shape for one transcript message: the store's snake_case columns
+ * (`tool_call_id`, `tool_calls`) become camelCase (`toolCallId`, `toolCalls`);
+ * only the contract's known keys cross the boundary. The store itself stays
+ * snake_case — its rows feed the model hydrate (OpenAI message shape) — the
+ * conversion is a route-layer concern.
+ */
+function toWireMessage(m: unknown): Record<string, unknown> {
+  const row = (m ?? {}) as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of ["seq", "turnId", "ts", "role", "content", "name"] as const) {
+    if (key in row) out[key] = row[key];
+  }
+  if (row.tool_call_id !== undefined) out.toolCallId = row.tool_call_id;
+  if (row.tool_calls !== undefined) out.toolCalls = row.tool_calls;
+  return out;
+}
+
+/**
  * Create the v1 HTTP/SSE adapter (PLAN §5.2–§5.5). All boundaries are
  * injected so tests can fake the store, orchestrator, event bus, model
  * provider and turn-engine factory.
  */
 export function createHttpServer(deps: HttpDeps): Server {
+  // Last-resort advertisement (injected capabilities win). The adapter
+  // implements SSE streaming and the transcript rehydration dump, so the
+  // default advertises both (§4.6); the composition root (serve.ts) passes
+  // the same set explicitly.
   const capabilities: Capabilities = deps.capabilities ?? {
     contractVersion: "v1",
     models: [],
     tools: [],
-    features: [],
+    features: ["sse", "transcript"],
   };
   const sessions = new Map<string, SessionRecord>();
   const store = deps.store as StoreBoundary | undefined;
@@ -323,10 +345,14 @@ export function createHttpServer(deps: HttpDeps): Server {
           const params = new URL(req.url ?? "", "http://localhost").searchParams;
           const afterSeq = params.get("after") ? Number(params.get("after")) : undefined;
           const limit = params.get("limit") ? Number(params.get("limit")) : undefined;
-          const messages = store!.getTranscript(id, {
-            ...(afterSeq !== undefined && Number.isFinite(afterSeq) ? { afterSeq: afterSeq } : {}),
-            ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
-          });
+          const messages = store!
+            .getTranscript(id, {
+              ...(afterSeq !== undefined && Number.isFinite(afterSeq)
+                ? { afterSeq: afterSeq }
+                : {}),
+              ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
+            })
+            .map(toWireMessage);
           sendJson(res, 200, { session, messages });
           return;
         }

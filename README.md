@@ -29,8 +29,8 @@ The daemon is reached through `YOG_SERVER_URL` (default
 | GET | `/v1/capabilities` | Advertise server: contract version, models, tools, features |
 | POST | `/v1/sessions` | Create a session → `{ session: { id, … } }` (201) |
 | GET | `/v1/sessions/{id}` | Session status → `{ session }` |
-| DELETE | `/v1/sessions/{id}` | Close / release a session → `{ session }` |
-| POST | `/v1/sessions/{id}/turns` | Run a turn; streams an SSE transcript |
+| DELETE | `/v1/sessions/{id}` | **Detach** (advisory, `?purge=true` hard-deletes) → `{ session }` |
+| POST | `/v1/sessions/{id}/turns` | Run a turn; streams an SSE transcript (a dormant session is implicitly revived) |
 | GET | `/v1/sessions/{id}/turns/{turnId}` | **Turn-status recovery/replay**: fetch terminal turn state when the SSE stream died |
 
 Turn requests are JSON: `{ "prompt": "...", "model": "..." }` (`prompt` is
@@ -57,8 +57,9 @@ envelope for an unknown session/turn.
 
 Errors are `{ error: { code, message } }` JSON with a stable code→status
 mapping: `invalid_request`/`unknown_model` → 400, `unauthorized` → 401,
-`unknown_session` → 404, `session_closed` → 409, `rate_limited` → 429,
-`internal` → 500, `provider_error` → 502. Set `YOG_API_TOKEN` on the daemon
+`unknown_session` → 404, `rate_limited` → 429, `internal` → 500,
+`provider_error` → 502 (no `session_closed` — dormancy never rejects a
+turn or a read). Set `YOG_API_TOKEN` on the daemon
 to require `Authorization: Bearer <token>` (the client forwards it).
 
 `test/conformance.test.ts` boots an ephemeral daemon and exercises this

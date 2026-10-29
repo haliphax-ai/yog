@@ -1,17 +1,14 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, beforeAll } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "../../src/server/store/sessions.ts";
 
 /**
- * Phase 5 GREEN part A — STORE-level detach/purge/revive semantics (§4.5).
+ * Phase 5 lifecycle tests — STORE-level detach/purge/revive semantics (§4.5)
+ * and ROUTE-level contract wiring (§4.6).
  *
- * Route-level cases (DELETE /v1/sessions/{id}[?purge=true], POST turns
- * revive, GET transcript-on-dormant) are covered by task 11 (route wiring);
- * this file's route-level section is expected RED until then.
- *
- * Store-level assertions (this task's GREEN scope):
+ * Store-level assertions (GREEN part A):
  *   - detach: status dormant, detached_at stamped, nothing forfeited,
  *     idempotent
  *   - purge: immediate irreversible delete, cascades to turns,
@@ -20,6 +17,19 @@ import { SessionStore } from "../../src/server/store/sessions.ts";
  *     the addTurn revive flag), idempotent, resets the retention clock
  *   - prune: targets dormant sessions with detached_at < cutoff, cascade
  *     includes session_messages
+ *
+ * Route-level assertions (GREEN part B — HTTP adapter wiring):
+ *   - POST /v1/sessions accepts { title?, system? }; system seeds the first
+ *     transcript message (role system)
+ *   - GET /v1/sessions/{id}/transcript: the rehydration dump, pagination via
+ *     ?after=<seq>&limit=<n>, readable while the row exists — including
+ *     dormant sessions within retention — 404 unknown_session only after
+ *     purge/prune
+ *   - DELETE /v1/sessions/{id} is an idempotent detach; ?purge=true hard
+ *     deletes; unknown id → 404 unknown_session
+ *   - POST /v1/sessions/{id}/turns on a dormant session implicitly revives
+ *     it (no session_closed 409; unknown id → 404 unknown_session)
+ *   - capabilities advertise features: ["sse", "transcript"]
  */
 
 let dir: string;
@@ -249,6 +259,216 @@ describe("event persistence dedup (§4.8)", () => {
       expect(persisted).toHaveLength(0);
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+});
+
+describe("routes: phase 5 part B (§4.6)", () => {
+  let createHttpServer: typeof import("../../src/server/http.ts").createHttpServer;
+
+  beforeAll(async () => {
+    ({ createHttpServer } = await import("../../src/server/http.ts"));
+  });
+
+  const jsonBody = async (res: Response): Promise<any> => JSON.parse(await res.text());
+
+  /** Boot the adapter against the block-scoped `store` + a no-op orchestrator. */
+  async function listen(): Promise<{ url: string; close: () => Promise<void> }> {
+    const server = createHttpServer({
+      orchestrator: { runTurn: () => ({ promise: Promise.resolve(), abort: () => {} }) },
+      store,
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const port = (server.address() as { port: number }).port;
+    return {
+      url: `http://127.0.0.1:${port}`,
+      close: () => new Promise<void>((r) => server.close(() => r())),
+    };
+  }
+
+  it("capabilities default advertises features: sse + transcript", async () => {
+    const { url, close } = await listen();
+    try {
+      const body = await jsonBody(await fetch(`${url}/v1/capabilities`));
+      expect(body.features).toContain("sse");
+      expect(body.features).toContain("transcript");
+    } finally {
+      await close();
+    }
+  });
+
+  it("POST /v1/sessions accepts { title, system }: system seeds the first transcript message", async () => {
+    const { url, close } = await listen();
+    try {
+      const res = await fetch(`${url}/v1/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "seeded", system: "you are terse" }),
+      });
+      expect(res.status).toBe(201);
+      const body = await jsonBody(res);
+      const tr = store.getTranscript(body.session.id);
+      expect(tr).toHaveLength(1);
+      expect(tr[0].role).toBe("system");
+      expect(tr[0].content).toBe("you are terse");
+    } finally {
+      await close();
+    }
+  });
+
+  it("GET /v1/sessions/{id}/transcript returns the rehydration dump with wire-shaped messages", async () => {
+    const { url, close } = await listen();
+    try {
+      const { session } = await jsonBody(
+        await fetch(`${url}/v1/sessions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ system: "be brief" }),
+        }),
+      );
+      store.appendMessages(session.id, [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "bash", arguments: "{}" },
+            },
+          ],
+        } as any,
+        { role: "tool", content: "ok", tool_call_id: "call_1", name: "bash" } as any,
+        { role: "assistant", content: "done" },
+      ]);
+
+      const res = await fetch(`${url}/v1/sessions/${session.id}/transcript`);
+      expect(res.status).toBe(200);
+      const body = await jsonBody(res);
+      expect(body.session.id).toBe(session.id);
+      expect(body.messages).toHaveLength(4);
+      expect(body.messages[0]).toMatchObject({ seq: 1, role: "system", content: "be brief" });
+      const toolCallMsg = body.messages[1];
+      expect(toolCallMsg.turnId).toBeNull();
+      expect(toolCallMsg.toolCalls[0].id).toBe("call_1");
+      expect(body.messages[2]).toMatchObject({ toolCallId: "call_1", name: "bash" });
+    } finally {
+      await close();
+    }
+  });
+
+  it("GET transcript paginates via ?after=<seq>&limit=<n>", async () => {
+    const { url, close } = await listen();
+    try {
+      const { session } = await jsonBody(await fetch(`${url}/v1/sessions`, { method: "POST" }));
+      store.appendMessages(session.id, [
+        { role: "user", content: "one" },
+        { role: "assistant", content: "two" },
+        { role: "user", content: "three" },
+        { role: "assistant", content: "four" },
+      ]);
+
+      const page = await jsonBody(
+        await fetch(`${url}/v1/sessions/${session.id}/transcript?after=1&limit=2`),
+      );
+      expect(page.messages.map((m: any) => m.content)).toEqual(["two", "three"]);
+
+      const tail = await jsonBody(
+        await fetch(`${url}/v1/sessions/${session.id}/transcript?after=4`),
+      );
+      expect(tail.messages).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("GET transcript stays readable on a dormant session within retention (404 only after purge/prune)", async () => {
+    const { url, close } = await listen();
+    try {
+      const { session } = await jsonBody(await fetch(`${url}/v1/sessions`, { method: "POST" }));
+      store.appendMessages(session.id, [{ role: "user", content: "still there?" }]);
+      await fetch(`${url}/v1/sessions/${session.id}`, { method: "DELETE" });
+
+      const dorm = await jsonBody(await fetch(`${url}/v1/sessions/${session.id}/transcript`));
+      expect(dorm.session.status).toBe("dormant");
+      expect(dorm.messages).toHaveLength(1);
+
+      store.purgeSession(session.id);
+      const gone = await fetch(`${url}/v1/sessions/${session.id}/transcript`);
+      expect(gone.status).toBe(404);
+      expect((await jsonBody(gone)).error.code).toBe("unknown_session");
+    } finally {
+      await close();
+    }
+  });
+
+  it("DELETE ?purge=true hard-deletes; a second DELETE is an idempotent detach; unknown id → 404", async () => {
+    const { url, close } = await listen();
+    try {
+      const { session } = await jsonBody(await fetch(`${url}/v1/sessions`, { method: "POST" }));
+      const purge = await fetch(`${url}/v1/sessions/${session.id}?purge=true`, {
+        method: "DELETE",
+      });
+      expect(purge.status).toBe(200);
+      const purged = await jsonBody(purge);
+      expect(purged.deleted).toBe(true);
+
+      const gone = await fetch(`${url}/v1/sessions/${session.id}`);
+      expect(gone.status).toBe(404);
+
+      // Detach after a purge target is gone → still 404 (unknown_session).
+      const missing = await fetch(`${url}/v1/sessions/no-such-session`, { method: "DELETE" });
+      expect(missing.status).toBe(404);
+
+      // Detach on a live session is idempotent: both calls return the
+      // dormant session, and a second call keeps the original detached_at.
+      const s2 = (await jsonBody(await fetch(`${url}/v1/sessions`, { method: "POST" }))).session;
+      const d1 = await jsonBody(await fetch(`${url}/v1/sessions/${s2.id}`, { method: "DELETE" }));
+      expect(d1.session.status).toBe("dormant");
+      expect(d1.session.detached_at).toBeTruthy();
+      const d2 = await jsonBody(await fetch(`${url}/v1/sessions/${s2.id}`, { method: "DELETE" }));
+      expect(d2.session.detached_at).toBe(d1.session.detached_at);
+    } finally {
+      await close();
+    }
+  });
+
+  it("POST turns on a dormant session revives it (open, detached_at cleared) and streams", async () => {
+    const { url, close } = await listen();
+    try {
+      const { session } = await jsonBody(await fetch(`${url}/v1/sessions`, { method: "POST" }));
+      store.appendMessages(session.id, [{ role: "user", content: "earlier" }]);
+      await fetch(`${url}/v1/sessions/${session.id}`, { method: "DELETE" });
+      expect((store.getSession(session.id) as any).status).toBe("dormant");
+
+      const res = await fetch(`${url}/v1/sessions/${session.id}/turns`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "back" }),
+      });
+      expect(res.status).toBe(200);
+      await res.text();
+
+      const after = store.getSession(session.id) as any;
+      expect(after.status).toBe("open");
+      expect(after.detached_at).toBeNull();
+    } finally {
+      await close();
+    }
+  });
+
+  it("POST turns on an unknown session → 404 unknown_session (no dormancy rejection, ever)", async () => {
+    const { url, close } = await listen();
+    try {
+      const res = await fetch(`${url}/v1/sessions/no-such-session/turns`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "hi" }),
+      });
+      expect(res.status).toBe(404);
+      expect((await jsonBody(res)).error.code).toBe("unknown_session");
+    } finally {
+      await close();
     }
   });
 });
