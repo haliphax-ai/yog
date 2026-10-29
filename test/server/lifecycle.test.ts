@@ -37,7 +37,7 @@ let store: SessionStore;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "yog-lifecycle-"));
-  store = new SessionStore(join(dir, "sessions.db"));
+  store = await SessionStore.open(join(dir, "sessions.db"));
 });
 
 afterEach(async () => {
@@ -46,169 +46,167 @@ afterEach(async () => {
 });
 
 describe("store: detach (§4.5)", () => {
-  it("detachSession stamps detached_at and sets status dormant, forfeiting nothing", () => {
-    const session = store.createSession({ title: "detach" }) as any;
-    store.appendMessages(session.id, [{ role: "user", content: "q" }]);
-    store.addTurn(session.id, { role: "user", content: "hello", status: "done" });
+  it("detachSession stamps detached_at and sets status dormant, forfeiting nothing", async () => {
+    const session = (await store.createSession({ title: "detach" })) as any;
+    await store.appendMessages(session.id, [{ role: "user", content: "q" }]);
+    await store.addTurn(session.id, { role: "user", content: "hello", status: "done" });
 
-    store.detachSession(session.id);
+    await store.detachSession(session.id);
 
-    const after = store.getSession(session.id) as any;
+    const after = (await store.getSession(session.id)) as any;
     expect(after.status).toBe("dormant");
     expect(after.detached_at).toBeTruthy();
     // nothing forfeited: transcript, turns, and events all stay
-    expect(store.getTranscript(session.id)).toHaveLength(1);
-    expect(store.listTurns(session.id)).toHaveLength(1);
+    expect(await store.getTranscript(session.id)).toHaveLength(1);
+    expect(await store.listTurns(session.id)).toHaveLength(1);
   });
 
-  it("detachSession is idempotent: a second call is a no-op, not an error", () => {
-    const session = store.createSession({ title: "twice" }) as any;
+  it("detachSession is idempotent: a second call is a no-op, not an error", async () => {
+    const session = (await store.createSession({ title: "twice" })) as any;
 
-    store.detachSession(session.id);
-    const first = store.getSession(session.id) as any;
-    store.detachSession(session.id);
-    const second = store.getSession(session.id) as any;
+    await store.detachSession(session.id);
+    const first = (await store.getSession(session.id)) as any;
+    await store.detachSession(session.id);
+    const second = (await store.getSession(session.id)) as any;
 
     expect(second.status).toBe("dormant");
     expect(second.detached_at).toBe(first.detached_at);
   });
 
-  it("detachSession accepts an explicit timestamp override (retention tests)", () => {
-    const session = store.createSession({ title: "old" }) as any;
+  it("detachSession accepts an explicit timestamp override (retention tests)", async () => {
+    const session = (await store.createSession({ title: "old" })) as any;
     const past = Date.now() - 40 * 24 * 60 * 60 * 1000;
 
-    store.detachSession(session.id, past);
+    await store.detachSession(session.id, past);
 
-    const after = store.getSession(session.id) as any;
+    const after = (await store.getSession(session.id)) as any;
     expect(after.status).toBe("dormant");
     expect(after.detached_at).toBe(past);
   });
 });
 
 describe("store: purge (§4.5)", () => {
-  it("purgeSession deletes the row immediately and cascades to turns, turn_events, session_messages", () => {
-    const session = store.createSession({ title: "purge-me" }) as any;
-    store.appendMessages(session.id, [{ role: "user", content: "q" }]);
-    store.addTurn(session.id, { role: "user", content: "hello", status: "done" });
-    store.addEvent(session.id, { type: "message.delta", payload: "hi" });
+  it("purgeSession deletes the row immediately and cascades to turns, turn_events, session_messages", async () => {
+    const session = (await store.createSession({ title: "purge-me" })) as any;
+    await store.appendMessages(session.id, [{ role: "user", content: "q" }]);
+    await store.addTurn(session.id, { role: "user", content: "hello", status: "done" });
+    await store.addEvent(session.id, { type: "message.delta", payload: "hi" });
 
-    const deleted = store.purgeSession(session.id);
+    const deleted = await store.purgeSession(session.id);
 
     expect(deleted).toBe(1);
-    expect(store.getSession(session.id)).toBeNull();
-    expect(store.listTurns(session.id)).toHaveLength(0);
-    expect(store.listEvents(session.id)).toHaveLength(0);
-    expect(store.getTranscript(session.id)).toHaveLength(0);
+    expect(await store.getSession(session.id)).toBeNull();
+    expect(await store.listTurns(session.id)).toHaveLength(0);
+    expect(await store.listEvents(session.id)).toHaveLength(0);
+    expect(await store.getTranscript(session.id)).toHaveLength(0);
   });
 
-  it("purgeSession on an unknown id returns 0 and touches nothing", () => {
-    const session = store.createSession({ title: "untouched" }) as any;
+  it("purgeSession on an unknown id returns 0 and touches nothing", async () => {
+    const session = (await store.createSession({ title: "untouched" })) as any;
 
-    expect(store.purgeSession("no-such-id")).toBe(0);
-    expect(store.getSession(session.id)).not.toBeNull();
+    expect(await store.purgeSession("no-such-id")).toBe(0);
+    expect(await store.getSession(session.id)).not.toBeNull();
   });
 
-  it("purgeSession is irreversible: the same id stays gone after a store reopen", () => {
+  it("purgeSession is irreversible: the same id stays gone after a store reopen", async () => {
     const dbPath = join(dir, "sessions.db");
-    const session = store.createSession({ title: "gone" }) as any;
-    store.purgeSession(session.id);
+    const session = (await store.createSession({ title: "gone" })) as any;
+    await store.purgeSession(session.id);
     store.close();
 
-    const reopened = new SessionStore(dbPath);
-    expect(reopened.getSession(session.id)).toBeNull();
+    const reopened = await SessionStore.open(dbPath);
+    expect(await reopened.getSession(session.id)).toBeNull();
     reopened.close();
   });
 });
 
 describe("store: revive (§4.5, implicit via the turn path)", () => {
-  it("reviveSession flips dormant → open and clears detached_at (idempotent on open)", () => {
-    const session = store.createSession({ title: "revive" }) as any;
-    store.detachSession(session.id);
-    expect((store.getSession(session.id) as any).status).toBe("dormant");
+  it("reviveSession flips dormant → open and clears detached_at (idempotent on open)", async () => {
+    const session = (await store.createSession({ title: "revive" })) as any;
+    await store.detachSession(session.id);
+    expect(((await store.getSession(session.id)) as any).status).toBe("dormant");
 
-    store.reviveSession(session.id);
-    const revived = store.getSession(session.id) as any;
+    await store.reviveSession(session.id);
+    const revived = (await store.getSession(session.id)) as any;
     expect(revived.status).toBe("open");
     expect(revived.detached_at).toBeNull();
 
     // idempotent on an already-open session: no error, stays open
-    store.reviveSession(session.id);
-    const again = store.getSession(session.id) as any;
+    await store.reviveSession(session.id);
+    const again = (await store.getSession(session.id)) as any;
     expect(again.status).toBe("open");
     expect(again.detached_at).toBeNull();
   });
 
-  it("addTurn({revive: true}) on a dormant session reopens it and clears detached_at", () => {
-    const session = store.createSession({ title: "implicit" }) as any;
-    store.detachSession(session.id);
+  it("addTurn({revive: true}) on a dormant session reopens it and clears detached_at", async () => {
+    const session = (await store.createSession({ title: "implicit" })) as any;
+    await store.detachSession(session.id);
 
-    store.addTurn(session.id, {
+    await store.addTurn(session.id, {
       role: "user",
       content: "back again",
       status: "running",
       revive: true,
     });
 
-    const after = store.getSession(session.id) as any;
+    const after = (await store.getSession(session.id)) as any;
     expect(after.status).toBe("open");
     expect(after.detached_at).toBeNull();
   });
 
-  it("revival resets the retention clock: a revived session survives a cutoff prune", () => {
-    const session = store.createSession({ title: "zombie" }) as any;
-    store.appendMessages(session.id, [{ role: "user", content: "still here" }]);
-    store.detachSession(session.id, Date.now() - 40 * 24 * 60 * 60 * 1000);
+  it("revival resets the retention clock: a revived session survives a cutoff prune", async () => {
+    const session = (await store.createSession({ title: "zombie" })) as any;
+    await store.appendMessages(session.id, [{ role: "user", content: "still here" }]);
+    await store.detachSession(session.id, Date.now() - 40 * 24 * 60 * 60 * 1000);
 
     // 40 days dormant → inside the prune window right now
-    store.pruneOldSessions();
-    expect(store.getSession(session.id)).toBeNull();
+    await store.pruneOldSessions();
+    expect(await store.getSession(session.id)).toBeNull();
 
     // revival path resets the clock: detach old, revive, then prune again —
     // the session must survive because detached_at was cleared.
-    const revived = store.createSession({ title: "revived-clock" }) as any;
-    store.detachSession(revived.id, Date.now() - 40 * 24 * 60 * 60 * 1000);
-    store.reviveSession(revived.id);
-    store.pruneOldSessions();
-    expect(store.getSession(revived.id)).not.toBeNull();
-    expect((store.getSession(revived.id) as any).detached_at).toBeNull();
+    const revived = (await store.createSession({ title: "revived-clock" })) as any;
+    await store.detachSession(revived.id, Date.now() - 40 * 24 * 60 * 60 * 1000);
+    await store.reviveSession(revived.id);
+    await store.pruneOldSessions();
+    expect(await store.getSession(revived.id)).not.toBeNull();
+    expect(((await store.getSession(revived.id)) as any).detached_at).toBeNull();
   });
 });
 
 describe("store: retention re-key (§4.5)", () => {
-  it("pruneOldSessions targets dormant sessions with detached_at < 30-day cutoff only", () => {
-    const doomed = store.createSession({ title: "doomed" }) as any;
-    const fresh = store.createSession({ title: "fresh" }) as any;
-    const freshDetached = store.createSession({ title: "fresh-detached" }) as any;
+  it("pruneOldSessions targets dormant sessions with detached_at < 30-day cutoff only", async () => {
+    const doomed = (await store.createSession({ title: "doomed" })) as any;
+    const fresh = (await store.createSession({ title: "fresh" })) as any;
+    const freshDetached = (await store.createSession({ title: "fresh-detached" })) as any;
 
-    store.appendMessages(doomed.id, [{ role: "user", content: "bye" }]);
-    store.appendMessages(fresh.id, [{ role: "user", content: "hi" }]);
-    store.appendMessages(freshDetached.id, [{ role: "user", content: "hi" }]);
+    await store.appendMessages(doomed.id, [{ role: "user", content: "bye" }]);
+    await store.appendMessages(fresh.id, [{ role: "user", content: "hi" }]);
+    await store.appendMessages(freshDetached.id, [{ role: "user", content: "hi" }]);
 
-    store.detachSession(doomed.id, Date.now() - 31 * 24 * 60 * 60 * 1000);
-    store.detachSession(freshDetached.id, Date.now() - 5 * 24 * 60 * 60 * 1000);
+    await store.detachSession(doomed.id, Date.now() - 31 * 24 * 60 * 60 * 1000);
+    await store.detachSession(freshDetached.id, Date.now() - 5 * 24 * 60 * 60 * 1000);
 
-    store.pruneOldSessions();
+    await store.pruneOldSessions();
 
-    expect(store.getSession(doomed.id)).toBeNull();
-    expect(store.getSession(fresh.id)).not.toBeNull();
-    expect(store.getSession(freshDetached.id)).not.toBeNull();
+    expect(await store.getSession(doomed.id)).toBeNull();
+    expect(await store.getSession(fresh.id)).not.toBeNull();
+    expect(await store.getSession(freshDetached.id)).not.toBeNull();
     // the cascade removed the doomed session's transcript too
-    expect(store.getTranscript(doomed.id)).toHaveLength(0);
-    expect(store.listTurns(doomed.id)).toHaveLength(0);
-    expect(store.listEvents(doomed.id)).toHaveLength(0);
+    expect(await store.getTranscript(doomed.id)).toHaveLength(0);
+    expect(await store.listTurns(doomed.id)).toHaveLength(0);
+    expect(await store.listEvents(doomed.id)).toHaveLength(0);
   });
 
-  it("pruneOldSessions ignores open sessions regardless of age", () => {
-    const open = store.createSession({ title: "old-but-open" }) as any;
+  it("pruneOldSessions ignores open sessions regardless of age", async () => {
+    const open = (await store.createSession({ title: "old-but-open" })) as any;
     // An open session must never be pruned, even if its only timestamps are ancient.
-    const raw = (store as unknown as { db: { prepare(sql: string): any } }).db;
-    raw
-      .prepare("UPDATE sessions SET created_at = ?, updated_at = ? WHERE id = ?")
-      .run(1000, 1000, open.id);
+    const raw = (store as unknown as { db: { table: (t: string) => any } }).db;
+    await raw.table("sessions").where("id", open.id).update({ created_at: 1000, updated_at: 1000 });
 
-    store.pruneOldSessions();
+    await store.pruneOldSessions();
 
-    expect(store.getSession(open.id)).not.toBeNull();
+    expect(await store.getSession(open.id)).not.toBeNull();
   });
 });
 
@@ -307,7 +305,7 @@ describe("routes: phase 5 part B (§4.6)", () => {
       });
       expect(res.status).toBe(201);
       const body = await jsonBody(res);
-      const tr = store.getTranscript(body.session.id);
+      const tr = await store.getTranscript(body.session.id);
       expect(tr).toHaveLength(1);
       expect(tr[0].role).toBe("system");
       expect(tr[0].content).toBe("you are terse");
@@ -326,7 +324,7 @@ describe("routes: phase 5 part B (§4.6)", () => {
           body: JSON.stringify({ system: "be brief" }),
         }),
       );
-      store.appendMessages(session.id, [
+      await store.appendMessages(session.id, [
         {
           role: "assistant",
           content: null,
@@ -361,7 +359,7 @@ describe("routes: phase 5 part B (§4.6)", () => {
     const { url, close } = await listen();
     try {
       const { session } = await jsonBody(await fetch(`${url}/v1/sessions`, { method: "POST" }));
-      store.appendMessages(session.id, [
+      await store.appendMessages(session.id, [
         { role: "user", content: "one" },
         { role: "assistant", content: "two" },
         { role: "user", content: "three" },
@@ -386,14 +384,14 @@ describe("routes: phase 5 part B (§4.6)", () => {
     const { url, close } = await listen();
     try {
       const { session } = await jsonBody(await fetch(`${url}/v1/sessions`, { method: "POST" }));
-      store.appendMessages(session.id, [{ role: "user", content: "still there?" }]);
+      await store.appendMessages(session.id, [{ role: "user", content: "still there?" }]);
       await fetch(`${url}/v1/sessions/${session.id}`, { method: "DELETE" });
 
       const dorm = await jsonBody(await fetch(`${url}/v1/sessions/${session.id}/transcript`));
       expect(dorm.session.status).toBe("dormant");
       expect(dorm.messages).toHaveLength(1);
 
-      store.purgeSession(session.id);
+      await store.purgeSession(session.id);
       const gone = await fetch(`${url}/v1/sessions/${session.id}/transcript`);
       expect(gone.status).toBe(404);
       expect((await jsonBody(gone)).error.code).toBe("unknown_session");
@@ -437,9 +435,9 @@ describe("routes: phase 5 part B (§4.6)", () => {
     const { url, close } = await listen();
     try {
       const { session } = await jsonBody(await fetch(`${url}/v1/sessions`, { method: "POST" }));
-      store.appendMessages(session.id, [{ role: "user", content: "earlier" }]);
+      await store.appendMessages(session.id, [{ role: "user", content: "earlier" }]);
       await fetch(`${url}/v1/sessions/${session.id}`, { method: "DELETE" });
-      expect((store.getSession(session.id) as any).status).toBe("dormant");
+      expect(((await store.getSession(session.id)) as any).status).toBe("dormant");
 
       const res = await fetch(`${url}/v1/sessions/${session.id}/turns`, {
         method: "POST",
@@ -449,7 +447,7 @@ describe("routes: phase 5 part B (§4.6)", () => {
       expect(res.status).toBe(200);
       await res.text();
 
-      const after = store.getSession(session.id) as any;
+      const after = (await store.getSession(session.id)) as any;
       expect(after.status).toBe("open");
       expect(after.detached_at).toBeNull();
     } finally {

@@ -1,4 +1,3 @@
-import Database from "better-sqlite3";
 import knex from "knex";
 import { randomUUID } from "node:crypto";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
@@ -16,106 +15,65 @@ function toMs(ts?: string | number | null): number | null {
 }
 
 export class SessionStore {
-  private db: Database.Database;
+  private db: knex.Knex;
 
-  constructor(dbPath: string) {
-    this.db = new Database(dbPath);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("busy_timeout = 5000");
-    this.db.pragma("synchronous = NORMAL");
-
-    // Adopt pre-plan volumes (§4.1: the schema path accepts both fresh and
-    // pre-existing sessions.db files). The legacy schema stamped the detach
-    // time in `closed_at`; mirror the knex migration chain's re-key (002 + 003)
-    // so a volume opened directly through this constructor (without the
-    // serve.ts migration run) still speaks the current vocabulary. Guarded:
-    // a no-op on fresh volumes (no sessions table yet) and current volumes
-    // (detached_at already present).
-    const legacyCols = this.db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
-    if (
-      legacyCols.length > 0 &&
-      legacyCols.some((c) => c.name === "closed_at") &&
-      !legacyCols.some((c) => c.name === "detached_at")
-    ) {
-      this.db.exec("ALTER TABLE sessions RENAME COLUMN closed_at TO detached_at");
-    }
-
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY,
-        title TEXT,
-        agent_id TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL DEFAULT 'open',
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        detached_at INTEGER
-      );
-      CREATE TABLE IF NOT EXISTS turns (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL REFERENCES sessions(id),
-        model TEXT NOT NULL,
-        status TEXT NOT NULL,
-        request_json TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        finished_at INTEGER,
-        duration_ms INTEGER
-      );
-      CREATE TABLE IF NOT EXISTS turn_events (
-        turn_id INTEGER NOT NULL,
-        seq INTEGER NOT NULL,
-        type TEXT NOT NULL,
-        version INTEGER NOT NULL,
-        ts INTEGER NOT NULL,
-        data_json TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
-      CREATE INDEX IF NOT EXISTS idx_turn_events_turn ON turn_events(turn_id, seq);
-      CREATE TABLE IF NOT EXISTS session_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        turn_id INTEGER,
-        seq INTEGER NOT NULL,
-        role TEXT NOT NULL,
-        content TEXT,
-        tool_call_id TEXT,
-        name TEXT,
-        tool_calls_json TEXT,
-        created_at INTEGER NOT NULL
-      );
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_session_seq ON session_messages(session_id, seq);
-      CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id);
-    `);
-
-    // Startup recovery: drop stale data, then unblock any turn left running.
-    this.pruneOldSessions();
-    this.interruptRunningTurns();
+  /**
+   * Compose a store over an already-open knex handle (as built by
+   * {@link openSessionsDb}, which runs the startup migration chain).
+   * Prefer {@link SessionStore.open} — it is the only supported way to
+   * turn a filename into a usable store (§4.1: knex migrations own schema
+   * truth; there is no second DDL path).
+   */
+  constructor(db: knex.Knex) {
+    this.db = db;
   }
 
-  createSession(opts: { title?: string; system?: string } = {}): any {
+  /**
+   * Open the sessions database at `filename` and return a usable store.
+   *
+   * The single open path (§4.1): knex handle → startup migrations
+   * (`migrate.latest()`, adopting fresh and pre-existing volumes alike) →
+   * startup recovery (prune past-retention dormant sessions, interrupt
+   * turns left running by a crash). Everything schema-related happens
+   * before the store becomes usable; the store itself carries no DDL.
+   */
+  static async open(filename: string): Promise<SessionStore> {
+    const db = await openSessionsDb(filename);
+    const store = new SessionStore(db);
+    // Startup recovery: drop stale data, then unblock any turn left running.
+    await store.pruneOldSessions();
+    await store.interruptRunningTurns();
+    return store;
+  }
+
+  async createSession(opts: { title?: string; system?: string } = {}): Promise<any> {
     const now = Date.now();
     const id = randomUUID();
-    this.db
-      .prepare(
-        `INSERT INTO sessions (id, title, agent_id, status, created_at, updated_at, detached_at)
-         VALUES (?, ?, ?, 'open', ?, ?, NULL)`,
-      )
-      .run(id, opts.title ?? null, "", now, now);
-    const session = this.getSession(id);
+    await this.db("sessions").insert({
+      id,
+      title: opts.title ?? null,
+      agent_id: "",
+      status: "open",
+      created_at: now,
+      updated_at: now,
+      detached_at: null,
+    });
     // `system` seeds the first transcript message (role `system`) so it is
     // part of every turn's hydrate (§4.6). Written here so the seed is
     // present before any turn runs and is itself a persisted transcript row.
     if (opts.system !== undefined && opts.system !== null) {
-      this.appendMessages(id, [{ role: "system", content: String(opts.system) }], null);
+      await this.appendMessages(id, [{ role: "system", content: String(opts.system) }], null);
     }
-    return session;
+    return this.getSession(id);
   }
 
-  getSession(id: string): any {
-    return this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) ?? null;
+  async getSession(id: string): Promise<any> {
+    const row = await this.db("sessions").where("id", id).first();
+    return row ?? null;
   }
 
-  listSessions(): any[] {
-    return this.db.prepare("SELECT * FROM sessions ORDER BY created_at, id").all();
+  async listSessions(): Promise<any[]> {
+    return this.db("sessions").orderBy("created_at", "id");
   }
 
   /**
@@ -129,15 +87,12 @@ export class SessionStore {
    * makes a *second* detach after a revive a fresh stamp (a new clock start,
    * not a stale one).
    */
-  detachSession(id: string, detachedAt?: string | number): void {
+  async detachSession(id: string, detachedAt?: string | number): Promise<void> {
     const ts = toMs(detachedAt) ?? Date.now();
-    this.db
-      .prepare(
-        `UPDATE sessions
-         SET status = 'dormant', detached_at = ?, updated_at = ?
-         WHERE id = ? AND status = 'open'`,
-      )
-      .run(ts, ts, id);
+    await this.db("sessions")
+      .where("id", id)
+      .where("status", "open")
+      .update({ status: "dormant", detached_at: ts, updated_at: ts });
   }
 
   /**
@@ -145,14 +100,11 @@ export class SessionStore {
    * `detached_at` cleared. Retention clock resets (a pruned session is the
    * only truly terminal state). Idempotent on an already-open session.
    */
-  reviveSession(id: string): void {
-    this.db
-      .prepare(
-        `UPDATE sessions
-         SET status = 'open', detached_at = NULL, updated_at = ?
-         WHERE id = ? AND status = 'dormant'`,
-      )
-      .run(Date.now(), id);
+  async reviveSession(id: string): Promise<void> {
+    await this.db("sessions")
+      .where("id", id)
+      .where("status", "dormant")
+      .update({ status: "open", detached_at: null, updated_at: Date.now() });
   }
 
   /**
@@ -162,48 +114,38 @@ export class SessionStore {
    * they are deleted explicitly. Returns the number of session rows deleted
    * (0 if the id did not exist).
    */
-  purgeSession(id: string): number {
-    const deleteEvents = this.db.prepare(
-      `DELETE FROM turn_events WHERE turn_id IN (SELECT id FROM turns WHERE session_id = ?)`,
-    );
-    const deleteTurns = this.db.prepare("DELETE FROM turns WHERE session_id = ?");
-    const deleteMessages = this.db.prepare("DELETE FROM session_messages WHERE session_id = ?");
-    const deleteSession = this.db.prepare("DELETE FROM sessions WHERE id = ?");
-    let changes = 0;
-    const txn = this.db.transaction(() => {
-      deleteEvents.run(id);
-      deleteTurns.run(id);
-      deleteMessages.run(id);
-      const info = deleteSession.run(id);
-      changes = info.changes;
+  async purgeSession(id: string): Promise<number> {
+    return this.db.transaction(async (trx: any) => {
+      await trx("turn_events")
+        .whereIn("turn_id", trx("turns").select("id").where("session_id", id))
+        .del();
+      await trx("turns").where("session_id", id).del();
+      await trx("session_messages").where("session_id", id).del();
+      // The row count of the sessions delete is the return contract: the
+      // number of sessions actually removed (0 if the id did not exist).
+      const deleted = await trx("sessions").where("id", id).del();
+      return deleted;
     });
-    txn();
-    return changes;
   }
 
-  addTurn(
+  async addTurn(
     sessionId: string,
     turn: { role: string; content: string; status: string; model?: string } & {
       revive?: boolean;
     },
-  ): any {
+  ): Promise<any> {
     const now = Date.now();
     const requestJson = JSON.stringify({ prompt: turn.content, model: turn.model ?? "unknown" });
     const finished = turn.status === "running" ? null : now;
-    const info = this.db
-      .prepare(
-        `INSERT INTO turns (session_id, model, status, request_json, created_at, finished_at, duration_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        sessionId,
-        turn.model ?? "unknown",
-        turn.status,
-        requestJson,
-        now,
-        finished,
-        finished === null ? null : finished - now,
-      );
+    const inserted = await this.db("turns").insert({
+      session_id: sessionId,
+      model: turn.model ?? "unknown",
+      status: turn.status,
+      request_json: requestJson,
+      created_at: now,
+      finished_at: finished,
+      duration_ms: finished === null ? null : finished - now,
+    });
     // Implicit revive (§4.5): a turn on a dormant session flips it back to
     // `open` and clears `detached_at` (retention clock reset). Store-owned,
     // best-effort (a missing/detached row must not fail the turn), and
@@ -211,59 +153,59 @@ export class SessionStore {
     // zero rows.
     if (turn.revive) {
       try {
-        this.reviveSession(sessionId);
+        await this.reviveSession(sessionId);
       } catch {
         // revival is best effort; the turn itself still runs
       }
     }
-    return this.getTurn(Number(info.lastInsertRowid));
+    return this.getTurn(Number(inserted[0]));
   }
 
-  getTurn(id: number): any {
-    const row: any = this.db.prepare("SELECT * FROM turns WHERE id = ?").get(id);
+  async getTurn(id: number): Promise<any> {
+    const row = await this.db("turns").where("id", id).first();
     return row ? hydrateTurn(row) : null;
   }
 
-  listTurns(sessionId: string): any[] {
-    const rows: any[] = this.db
-      .prepare("SELECT * FROM turns WHERE session_id = ? ORDER BY id")
-      .all(sessionId);
+  async listTurns(sessionId: string): Promise<any[]> {
+    const rows = await this.db("turns").where("session_id", sessionId).orderBy("id");
     return rows.map(hydrateTurn);
   }
 
-  addEvent(sessionId: string, event: { type: string; payload: string; version?: number }): any {
-    const turn = this.db
-      .prepare("SELECT id FROM turns WHERE session_id = ? ORDER BY id DESC LIMIT 1")
-      .get(sessionId) as { id: number } | undefined;
+  async addEvent(
+    sessionId: string,
+    event: { type: string; payload: string; version?: number },
+  ): Promise<any> {
+    const turn = await this.db("turns")
+      .where("session_id", sessionId)
+      .orderBy("id", "desc")
+      .first("id");
     if (!turn) {
       throw new Error(`cannot add event: session ${sessionId} has no turns`);
     }
-    const seq = (
-      this.db
-        .prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM turn_events WHERE turn_id = ?")
-        .get(turn.id) as { next: number }
-    ).next;
+    const seqRow = await this.db("turn_events")
+      .where("turn_id", turn.id)
+      .max({ next: "seq" })
+      .first();
+    const next = Number(seqRow?.next ?? 0) + 1;
     const ts = Date.now();
-    this.db
-      .prepare(
-        `INSERT INTO turn_events (turn_id, seq, type, version, ts, data_json)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(turn.id, seq, event.type, event.version ?? 1, ts, JSON.stringify(event.payload));
-    return { turn_id: turn.id, seq, type: event.type, version: event.version ?? 1, ts };
+    await this.db("turn_events").insert({
+      turn_id: turn.id,
+      seq: next,
+      type: event.type,
+      version: event.version ?? 1,
+      ts,
+      data_json: JSON.stringify(event.payload),
+    });
+    return { turn_id: turn.id, seq: next, type: event.type, version: event.version ?? 1, ts };
   }
 
-  listEvents(sessionId: string): any[] {
-    const rows: any[] = this.db
-      .prepare(
-        `SELECT e.turn_id, e.seq, e.type, e.version, e.ts, e.data_json
-         FROM turn_events e
-         JOIN turns t ON t.id = e.turn_id
-         WHERE t.session_id = ?
-         ORDER BY e.turn_id, e.seq`,
-      )
-      .all(sessionId);
-    return rows.map((row) => ({
+  async listEvents(sessionId: string): Promise<any[]> {
+    const rows = await this.db("turn_events as e")
+      .join("turns as t", "t.id", "e.turn_id")
+      .where("t.session_id", sessionId)
+      .orderBy("e.turn_id", "e.seq")
+      .select("e.turn_id", "e.seq", "e.type", "e.version", "e.ts", "e.data_json");
+    return rows.map((row: any) => ({
       turn_id: row.turn_id,
       seq: row.seq,
       type: row.type,
@@ -288,24 +230,18 @@ export class SessionStore {
    * rehydrates a dormant session still appends with the session's next seq
    * (continue `MAX(seq)+1` across dormancy — never reset per lifecycle).
    */
-  appendMessages(
+  async appendMessages(
     sessionId: string,
     msgs: ChatCompletionMessageParam[],
     turnId: number | null = null,
-  ): any[] {
+  ): Promise<any[]> {
     const now = Date.now();
-    const rows = this.db.transaction(() => {
-      const maxRow = this.db
-        .prepare(
-          "SELECT COALESCE(MAX(seq), 0) AS maxSeq FROM session_messages WHERE session_id = ?",
-        )
-        .get(sessionId) as { maxSeq: number } | undefined;
-      let seq = (maxRow?.maxSeq ?? 0) + 1;
-      const insert = this.db.prepare(
-        `INSERT INTO session_messages
-           (session_id, turn_id, seq, role, content, tool_call_id, name, tool_calls_json, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      );
+    return this.db.transaction(async (trx: any) => {
+      const maxRow = await trx("session_messages")
+        .where("session_id", sessionId)
+        .max({ maxSeq: "seq" })
+        .first();
+      let seq = Number(maxRow?.maxSeq ?? 0) + 1;
       const out: any[] = [];
       for (const m of msgs) {
         const role = (m as any).role;
@@ -317,19 +253,19 @@ export class SessionStore {
         if (Array.isArray(tool_calls) && tool_calls.length > 0) {
           tool_calls_json = JSON.stringify(tool_calls);
         }
-        const info = insert.run(
-          sessionId,
-          turnId ?? null,
+        const inserted = await trx("session_messages").insert({
+          session_id: sessionId,
+          turn_id: turnId ?? null,
           seq,
           role,
           content,
           tool_call_id,
           name,
           tool_calls_json,
-          now,
-        );
+          created_at: now,
+        });
         out.push({
-          id: Number(info.lastInsertRowid),
+          id: Number(inserted[0]),
           session_id: sessionId,
           turn_id: turnId ?? null,
           seq,
@@ -343,8 +279,7 @@ export class SessionStore {
         seq += 1;
       }
       return out;
-    })();
-    return rows;
+    });
   }
 
   /**
@@ -355,20 +290,18 @@ export class SessionStore {
    * rows explicitly. `afterSeq` pages forward from a known seq; `limit`
    * caps the batch. Pass neither for the full transcript from the start.
    */
-  getTranscript(sessionId: string, opts: { afterSeq?: number; limit?: number } = {}): any[] {
+  async getTranscript(
+    sessionId: string,
+    opts: { afterSeq?: number; limit?: number } = {},
+  ): Promise<any[]> {
     const afterSeq = opts.afterSeq ?? 0;
     const limit = opts.limit;
-    const sql = limit
-      ? `SELECT * FROM session_messages
-         WHERE session_id = ? AND seq > ?
-         ORDER BY seq ASC LIMIT ?`
-      : `SELECT * FROM session_messages
-         WHERE session_id = ? AND seq > ?
-         ORDER BY seq ASC`;
-    const rows: any[] = limit
-      ? this.db.prepare(sql).all(sessionId, afterSeq, limit)
-      : this.db.prepare(sql).all(sessionId, afterSeq);
-    return rows.map((row) => {
+    const query = this.db("session_messages")
+      .where("session_id", sessionId)
+      .where("seq", ">", afterSeq)
+      .orderBy("seq", "asc");
+    const rows: any[] = limit !== undefined ? await query.limit(limit) : await query;
+    return rows.map((row: any) => {
       const msg: any = { role: row.role };
       if (row.content !== null) msg.content = row.content;
       if (row.tool_call_id !== null) msg.tool_call_id = row.tool_call_id;
@@ -392,44 +325,39 @@ export class SessionStore {
    * truly terminal state (`unknown_session` 404 thereafter). Cascade
    * includes `session_messages` (§4.2).
    */
-  pruneOldSessions(): void {
+  async pruneOldSessions(): Promise<void> {
     const cutoff = Date.now() - RETENTION_DAYS * DAY_MS;
-    const doomed: any[] = this.db
-      .prepare(
-        `SELECT id FROM sessions
-         WHERE status = 'dormant' AND detached_at IS NOT NULL AND detached_at < ?`,
-      )
-      .all(cutoff);
+    const doomed = await this.db("sessions")
+      .where("status", "dormant")
+      .whereNotNull("detached_at")
+      .where("detached_at", "<", cutoff)
+      .select("id");
     if (doomed.length === 0) return;
 
-    const selectTurns = this.db.prepare("SELECT id FROM turns WHERE session_id = ?");
-    const deleteEvents = this.db.prepare("DELETE FROM turn_events WHERE turn_id = ?");
-    const deleteTurns = this.db.prepare("DELETE FROM turns WHERE session_id = ?");
-    const deleteMessages = this.db.prepare("DELETE FROM session_messages WHERE session_id = ?");
-    const deleteSession = this.db.prepare("DELETE FROM sessions WHERE id = ?");
-
-    const prune = this.db.transaction(() => {
+    await this.db.transaction(async (trx: any) => {
       for (const { id } of doomed) {
-        for (const turn of selectTurns.all(id) as { id: number }[]) {
-          deleteEvents.run(turn.id);
+        // Events hang off turns, so the turns must be enumerated to reach
+        // them (turn_events has no session_id of its own).
+        const turns = await trx("turns").where("session_id", id).select("id");
+        for (const turn of turns) {
+          await trx("turn_events").where("turn_id", turn.id).del();
         }
-        deleteTurns.run(id);
+        await trx("turns").where("session_id", id).del();
         // Cascade to the canonical transcript (§4.2): a pruned session
         // forfeits its messages along with its turns and events.
-        deleteMessages.run(id);
-        deleteSession.run(id);
+        await trx("session_messages").where("session_id", id).del();
+        await trx("sessions").where("id", id).del();
       }
     });
-    prune();
   }
 
   /** Crash recovery: any turn left 'running' becomes 'interrupted'. */
-  interruptRunningTurns(): void {
-    this.db.prepare(`UPDATE turns SET status = 'interrupted' WHERE status = 'running'`).run();
+  async interruptRunningTurns(): Promise<void> {
+    await this.db("turns").where("status", "running").update({ status: "interrupted" });
   }
 
   close(): void {
-    this.db.close();
+    void this.db.destroy();
   }
 }
 
@@ -451,11 +379,17 @@ function hydrateTurn(row: any): any {
  * Open the sessions database via knex (better-sqlite3 driver).
  *
  * Constructs the knex instance with the configured driver, pool, and
- * migrations directory, then wires the slow-query tripwire (§4.1).
+ * migrations directory, then wires the slow-query tripwire (§4.1) and runs
+ * the startup migration chain (§4.1: `knex.migrate.latest()` at daemon
+ * startup — schema truth lives in `src/server/store/migrations/` 001–003,
+ * which adopt fresh and pre-existing volumes alike). Resolves with the
+ * migrated handle, ready for {@link SessionStore}.
+ *
  * Pragma parity (WAL, busy_timeout 5000, synchronous NORMAL) is applied
- * by the migration at first open.
+ * per pooled connection via `afterCreate` — outside any transaction the
+ * migration runner would wrap statements in.
  */
-export function openSessionsDb(filename: string): knex.Knex {
+export async function openSessionsDb(filename: string): Promise<knex.Knex> {
   const db = knex({
     client: "better-sqlite3",
     connection: { filename },
@@ -482,6 +416,8 @@ export function openSessionsDb(filename: string): knex.Knex {
   });
 
   setupSlowQueryTripwire(db);
+
+  await db.migrate.latest();
 
   return db;
 }

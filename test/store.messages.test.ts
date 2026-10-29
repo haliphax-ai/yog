@@ -17,8 +17,8 @@ afterEach(async () => {
 
 describe("migration 002: session_messages schema", () => {
   it("creates session_messages with the plan's exact columns, FK, and unique index", async () => {
-    const db = openSessionsDb(join(dir, "schema.db"));
-    await db.migrate.latest();
+    // Open runs the migration chain itself (§4.1).
+    const db = await openSessionsDb(join(dir, "schema.db"));
 
     const cols: any = await db.raw("PRAGMA table_info(session_messages)");
     const rows = Array.isArray(cols) ? cols : [];
@@ -75,8 +75,7 @@ describe("migration 002: session_messages schema", () => {
     );
     raw.close();
 
-    const db = openSessionsDb(dbPath);
-    await db.migrate.latest();
+    const db = await openSessionsDb(dbPath);
 
     const rows: any = await db.raw("SELECT id, status FROM sessions ORDER BY id");
     const arr = Array.isArray(rows) ? rows : [];
@@ -89,10 +88,10 @@ describe("migration 002: session_messages schema", () => {
 
   it("appendMessages assigns seq from MAX(seq)+1, inserts in one transaction, returns persisted rows", async () => {
     const dbPath = join(dir, "append.db");
-    const store = new SessionStore(dbPath);
-    const session = store.createSession({ title: "t" }) as any;
+    const store = await SessionStore.open(dbPath);
+    const session = (await store.createSession({ title: "t" })) as any;
 
-    const rows = store.appendMessages(
+    const rows = await store.appendMessages(
       session.id,
       [
         { role: "user", content: "hello" },
@@ -110,7 +109,7 @@ describe("migration 002: session_messages schema", () => {
     expect(rows[1].content).toBe("hi");
 
     // A second batch continues from MAX(seq)+1, never reset.
-    const rows2 = store.appendMessages(session.id, [{ role: "user", content: "again" }]);
+    const rows2 = await store.appendMessages(session.id, [{ role: "user", content: "again" }]);
     expect(rows2).toHaveLength(1);
     expect(rows2[0].seq).toBe(3);
 
@@ -119,15 +118,15 @@ describe("migration 002: session_messages schema", () => {
 
   it("appendMessages continues seq across dormancy (never reset per lifecycle)", async () => {
     const dbPath = join(dir, "dormant.db");
-    const store = new SessionStore(dbPath);
-    const session = store.createSession({ title: "t" }) as any;
+    const store = await SessionStore.open(dbPath);
+    const session = (await store.createSession({ title: "t" })) as any;
 
-    store.appendMessages(session.id, [{ role: "user", content: "first" }]);
-    store.detachSession(session.id);
+    await store.appendMessages(session.id, [{ role: "user", content: "first" }]);
+    await store.detachSession(session.id);
 
     // Reopen the same store (simulating daemon restart): seq continues.
-    const store2 = new SessionStore(dbPath);
-    const rows = store2.appendMessages(session.id, [{ role: "user", content: "second" }]);
+    const store2 = await SessionStore.open(dbPath);
+    const rows = await store2.appendMessages(session.id, [{ role: "user", content: "second" }]);
     expect(rows).toHaveLength(1);
     expect(rows[0].seq).toBe(2);
 
@@ -136,10 +135,10 @@ describe("migration 002: session_messages schema", () => {
 
   it("getTranscript returns ordered rows mapped to ChatCompletionMessageParam plus metadata", async () => {
     const dbPath = join(dir, "trans.db");
-    const store = new SessionStore(dbPath);
-    const session = store.createSession({ title: "t" }) as any;
+    const store = await SessionStore.open(dbPath);
+    const session = (await store.createSession({ title: "t" })) as any;
 
-    store.appendMessages(
+    await store.appendMessages(
       session.id,
       [
         { role: "user", content: "q1" },
@@ -149,7 +148,7 @@ describe("migration 002: session_messages schema", () => {
       7,
     );
 
-    const all = store.getTranscript(session.id);
+    const all = await store.getTranscript(session.id);
     expect(all).toHaveLength(3);
     expect(all.map((r: any) => r.seq)).toEqual([1, 2, 3]);
     expect(all.map((r: any) => r.turnId)).toEqual([7, 7, 7]);
@@ -158,12 +157,12 @@ describe("migration 002: session_messages schema", () => {
     expect(all[0].ts).toBeGreaterThan(0);
 
     // afterSeq pages forward.
-    const after = store.getTranscript(session.id, { afterSeq: 1 });
+    const after = await store.getTranscript(session.id, { afterSeq: 1 });
     expect(after).toHaveLength(2);
     expect(after[0].seq).toBe(2);
 
     // limit caps the batch.
-    const limited = store.getTranscript(session.id, { limit: 1 });
+    const limited = await store.getTranscript(session.id, { limit: 1 });
     expect(limited).toHaveLength(1);
     expect(limited[0].seq).toBe(1);
 
@@ -172,10 +171,10 @@ describe("migration 002: session_messages schema", () => {
 
   it("getTranscript maps tool_calls and tool_call_id to the param shape", async () => {
     const dbPath = join(dir, "tools.db");
-    const store = new SessionStore(dbPath);
-    const session = store.createSession({ title: "t" }) as any;
+    const store = await SessionStore.open(dbPath);
+    const session = (await store.createSession({ title: "t" })) as any;
 
-    store.appendMessages(session.id, [
+    await store.appendMessages(session.id, [
       {
         role: "assistant",
         content: null,
@@ -184,7 +183,7 @@ describe("migration 002: session_messages schema", () => {
       { role: "tool", content: "{}", tool_call_id: "call_1", name: "f" } as any,
     ]);
 
-    const all = store.getTranscript(session.id);
+    const all = await store.getTranscript(session.id);
     expect(all).toHaveLength(2);
     expect(all[0].role).toBe("assistant");
     expect(all[0].content).toBeUndefined();
@@ -199,22 +198,22 @@ describe("migration 002: session_messages schema", () => {
 
   it("pruneOldSessions cascades: session_messages rows are removed with their sessions", async () => {
     const dbPath = join(dir, "prune.db");
-    const store = new SessionStore(dbPath);
-    const s1 = store.createSession({ title: "old" }) as any;
-    const s2 = store.createSession({ title: "keep" }) as any;
+    const store = await SessionStore.open(dbPath);
+    const s1 = (await store.createSession({ title: "old" })) as any;
+    const s2 = (await store.createSession({ title: "keep" })) as any;
 
-    store.appendMessages(s1.id, [{ role: "user", content: "bye" }]);
-    store.appendMessages(s2.id, [{ role: "user", content: "hi" }]);
+    await store.appendMessages(s1.id, [{ role: "user", content: "bye" }]);
+    await store.appendMessages(s2.id, [{ role: "user", content: "hi" }]);
 
     // Force s1 into the retention window: detached_at far in the past.
-    store.detachSession(s1.id, Date.now() - 31 * 24 * 60 * 60 * 1000);
+    await store.detachSession(s1.id, Date.now() - 31 * 24 * 60 * 60 * 1000);
 
-    store.pruneOldSessions();
+    await store.pruneOldSessions();
 
-    expect(store.getSession(s1.id)).toBeNull();
-    expect(store.getSession(s2.id)).not.toBeNull();
+    expect(await store.getSession(s1.id)).toBeNull();
+    expect(await store.getSession(s2.id)).not.toBeNull();
 
-    const remaining = store.getTranscript(s2.id);
+    const remaining = await store.getTranscript(s2.id);
     expect(remaining).toHaveLength(1);
 
     store.close();
@@ -222,8 +221,8 @@ describe("migration 002: session_messages schema", () => {
 
   it("interleaved rapid appendMessages calls never collide or duplicate a seq", async () => {
     const dbPath = join(dir, "race.db");
-    const store = new SessionStore(dbPath);
-    const session = store.createSession({ title: "t" }) as any;
+    const store = await SessionStore.open(dbPath);
+    const session = (await store.createSession({ title: "t" })) as any;
 
     const N = 50;
     const promises = [];
@@ -237,7 +236,7 @@ describe("migration 002: session_messages schema", () => {
     const results = await Promise.all(promises);
     expect(results).toHaveLength(N);
 
-    const all = store.getTranscript(session.id);
+    const all = await store.getTranscript(session.id);
     expect(all).toHaveLength(N);
     const seqs = all.map((r: any) => r.seq);
     expect(new Set(seqs).size).toBe(N);

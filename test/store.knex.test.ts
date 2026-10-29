@@ -19,10 +19,9 @@ afterEach(async () => {
 describe("openSessionsDb (knex-backed store)", () => {
   it("creates sessions/turns/turn_events tables and indexes on a fresh DB with WAL journal mode", async () => {
     const dbPath = join(dir, "fresh.db");
-    const db = openSessionsDb(dbPath);
-
-    // The knex-backed store runs migrations at open, creating tables + indexes.
-    await db.migrate.latest();
+    // Open runs the migration chain itself (§4.1): tables + indexes exist
+    // before the handle is handed back.
+    const db = await openSessionsDb(dbPath);
 
     const tables: any = await db.raw(
       "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
@@ -90,9 +89,9 @@ describe("openSessionsDb (knex-backed store)", () => {
     );
     raw.close();
 
-    // Open via the knex-backed store — must adopt without error or clobbering.
-    const db = openSessionsDb(dbPath);
-    await db.migrate.latest();
+    // Open via the knex-backed store — must adopt without error or clobbering
+    // (migrations run inside openSessionsDb now).
+    const db = await openSessionsDb(dbPath);
 
     const session: any = await db.raw("SELECT * FROM sessions WHERE id = ?", ["test-id"]);
     const sessionRows = Array.isArray(session) ? session : [session];
@@ -102,11 +101,19 @@ describe("openSessionsDb (knex-backed store)", () => {
     const turns: any = await db.raw("SELECT * FROM turns WHERE session_id = ?", ["test-id"]);
     const turnRows = Array.isArray(turns) ? turns : [turns];
     expect(turnRows).toHaveLength(1);
+
+    // The legacy `closed_at` column was re-keyed to `detached_at` by the
+    // real migration chain (003) — the adopted volume speaks the current
+    // schema, no data lost.
+    const cols: any = await db.raw("PRAGMA table_info(sessions)");
+    expect((Array.isArray(cols) ? cols : []).map((c: any) => c.name)).toContain("detached_at");
+    expect((Array.isArray(cols) ? cols : []).map((c: any) => c.name)).not.toContain("closed_at");
+    expect(sessionRows[0].detached_at).toBeNull();
   });
 
   it("configures openSessionsDb with better-sqlite3 client, useNullAsDefault, and pool min/max 1", async () => {
     const dbPath = join(dir, "config.db");
-    const db = openSessionsDb(dbPath);
+    const db = await openSessionsDb(dbPath);
 
     const config = db.client.config;
     expect(config.client).toBe("better-sqlite3");
@@ -118,7 +125,7 @@ describe("openSessionsDb (knex-backed store)", () => {
   it("logs slow queries with SQL and duration when YOG_DB_SLOW_MS is set low", async () => {
     process.env.YOG_DB_SLOW_MS = "0";
     const dbPath = join(dir, "slow.db");
-    const db = openSessionsDb(dbPath);
+    const db = await openSessionsDb(dbPath);
 
     const logs: string[] = [];
     const orig = process.stdout.write.bind(process.stdout);

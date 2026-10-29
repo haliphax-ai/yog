@@ -106,7 +106,7 @@ let model: ReturnType<typeof confModel>;
 
 beforeAll(async () => {
   storePath = join(tmpdir(), `yog-conf-tr-${Date.now()}.db`);
-  store = new SessionStore(storePath);
+  store = await SessionStore.open(storePath);
   model = confModel();
   daemon = await createDaemon(optsWith(model, store));
   base = daemon.url;
@@ -253,13 +253,13 @@ describe("conformance: transcript (server-owned conversation)", () => {
     expect((await json(del2)).session.detached_at).toBeTruthy();
 
     const retentionPath = join(tmpdir(), `yog-conf-retain-${Date.now()}.db`);
-    const doomed = new SessionStore(retentionPath);
-    const dormantId = String(doomed.createSession({}).id);
-    doomed.detachSession(dormantId, Date.now() - 31 * 24 * 60 * 60 * 1000);
+    const doomed = await SessionStore.open(retentionPath);
+    const dormantId = String((await doomed.createSession({})).id);
+    await doomed.detachSession(dormantId, Date.now() - 31 * 24 * 60 * 60 * 1000);
     doomed.close();
 
-    const reopened = new SessionStore(retentionPath);
-    expect(reopened.getSession(dormantId)).toBeNull();
+    const reopened = await SessionStore.open(retentionPath);
+    expect(await reopened.getSession(dormantId)).toBeNull();
     reopened.close();
   });
 

@@ -66,7 +66,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     let store: SessionStore | undefined;
     try {
       await mkdir(stateRoot(), { recursive: true });
-      store = new SessionStore(join(stateRoot(), "sessions.db"));
+      store = await SessionStore.open(join(stateRoot(), "sessions.db"));
     } catch (err) {
       logger.warn(
         `[yog] warning: session store unavailable (${(err as Error).message}); continuing`,
@@ -168,7 +168,9 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       // Hydrate prior context from the canonical transcript (§4.4). On the
       // first turn the transcript is empty; a retry replays from the last
       // turn boundary. Naive full replay for now (context policy is §3).
-      const prior = (store ? store.getTranscript(sessionId) : []) as Array<Record<string, unknown>>;
+      const prior = (await (store ? store.getTranscript(sessionId) : [])) as Array<
+        Record<string, unknown>
+      >;
       const messages: ChatCompletionMessageParam[] = [
         ...(prior as unknown as ChatCompletionMessageParam[]),
         { role: "user", content: prompt },
@@ -182,7 +184,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       let turnRowId: number | null = null;
       if (store) {
         try {
-          const turnRow = store.addTurn(sessionId, {
+          const turnRow = await store.addTurn(sessionId, {
             role: "user",
             content: prompt,
             status: "running",
@@ -213,7 +215,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
           // Persist first (best effort): never fail the stream for it.
           if (store) {
             try {
-              store.addEvent(sessionId, {
+              await store.addEvent(sessionId, {
                 type: ev.type,
                 payload: JSON.stringify(ev.data),
                 version: ev.version,
@@ -240,7 +242,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         // boundary.
         if (store && messages.length > startLen) {
           try {
-            store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
+            await store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
           } catch {
             // persistence is best effort
           }

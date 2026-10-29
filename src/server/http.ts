@@ -197,9 +197,9 @@ export function createHttpServer(deps: HttpDeps): Server {
   });
 
   /** Look a session up in the store (preferred) or the in-memory fallback. */
-  function lookupSession(id: string): SessionRecord | null {
+  async function lookupSession(id: string): Promise<SessionRecord | null> {
     if (hasStore) {
-      const row = store!.getSession(id);
+      const row = await store!.getSession(id);
       return row ? normalizeSession(row) : null;
     }
     return sessions.get(id) ?? null;
@@ -251,7 +251,7 @@ export function createHttpServer(deps: HttpDeps): Server {
       }
 
       if (hasStore) {
-        const row = store!.createSession({
+        const row = await store!.createSession({
           ...(typeof body.title === "string" ? { title: body.title } : {}),
           ...(typeof body.system === "string" ? { system: body.system } : {}),
         });
@@ -278,7 +278,7 @@ export function createHttpServer(deps: HttpDeps): Server {
     // /v1/sessions/{id}[/turns...|transcript...]
     if (segs[1] === "sessions" && segs.length >= 3) {
       const id = segs[2] as string;
-      let session = lookupSession(id);
+      let session = await lookupSession(id);
 
       if (segs.length === 3) {
         if (method === "GET") {
@@ -301,7 +301,7 @@ export function createHttpServer(deps: HttpDeps): Server {
             // row is gone: subsequent GET session/transcript/POST turn all
             // hit the 404 unknown_session path.
             if (hasStore && typeof store!.purgeSession === "function") {
-              const deleted = store!.purgeSession(id);
+              const deleted = await store!.purgeSession(id);
               if (deleted === 0) {
                 sendError(res, "unknown_session", `session ${id} not found`);
                 return;
@@ -319,8 +319,8 @@ export function createHttpServer(deps: HttpDeps): Server {
           // dormant session is a no-op and still returns 200.
           if (session.status === "open") {
             if (hasStore && typeof store!.detachSession === "function") {
-              store!.detachSession(id, Date.now());
-              const detached = lookupSession(id);
+              await store!.detachSession(id, Date.now());
+              const detached = await lookupSession(id);
               sendJson(res, 200, { session: detached ?? { ...session, status: "dormant" } });
               return;
             }
@@ -345,14 +345,14 @@ export function createHttpServer(deps: HttpDeps): Server {
           const params = new URL(req.url ?? "", "http://localhost").searchParams;
           const afterSeq = params.get("after") ? Number(params.get("after")) : undefined;
           const limit = params.get("limit") ? Number(params.get("limit")) : undefined;
-          const messages = store!
-            .getTranscript(id, {
+          const messages = (
+            await store!.getTranscript(id, {
               ...(afterSeq !== undefined && Number.isFinite(afterSeq)
                 ? { afterSeq: afterSeq }
                 : {}),
               ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
             })
-            .map(toWireMessage);
+          ).map(toWireMessage);
           sendJson(res, 200, { session, messages });
           return;
         }
@@ -373,7 +373,7 @@ export function createHttpServer(deps: HttpDeps): Server {
           // Recovery contract: rebuild the turn from sqlite. The wire turnId
           // (string, from turn.started) usually differs from the row id, so
           // match numerically and fall back to the session's latest turn.
-          const rows = (store!.listTurns(id) ?? []) as Array<Record<string, unknown>>;
+          const rows = ((await store!.listTurns(id)) ?? []) as Array<Record<string, unknown>>;
           const wanted = Number(turnId);
           const row =
             (Number.isFinite(wanted) ? rows.find((r) => Number(r.id) === wanted) : undefined) ??
@@ -387,7 +387,9 @@ export function createHttpServer(deps: HttpDeps): Server {
           }
           const events: unknown[] = [];
           if (typeof store!.listEvents === "function") {
-            for (const ev of (store!.listEvents(id) ?? []) as Array<Record<string, unknown>>) {
+            for (const ev of ((await store!.listEvents(id)) ?? []) as Array<
+              Record<string, unknown>
+            >) {
               const payload = ev.payload;
               let data: unknown;
               if (typeof payload === "string") {
@@ -439,8 +441,8 @@ export function createHttpServer(deps: HttpDeps): Server {
         if (session.status === "dormant") {
           if (hasStore && typeof store!.reviveSession === "function") {
             try {
-              store!.reviveSession(id);
-              const revived = lookupSession(id);
+              await store!.reviveSession(id);
+              const revived = await lookupSession(id);
               if (revived) session = revived;
             } catch {
               // revival is best effort; proceed with the turn
@@ -538,7 +540,7 @@ export function createHttpServer(deps: HttpDeps): Server {
     let turnRowId: number | null = null;
     if (store?.addTurn) {
       try {
-        const row = store.addTurn(session.id, {
+        const row = await store.addTurn(session.id, {
           role: "user",
           content: typeof body.prompt === "string" ? body.prompt : "",
           status: "running",
@@ -552,11 +554,11 @@ export function createHttpServer(deps: HttpDeps): Server {
         // persistence is best effort
       }
     }
-    const persistEvent = (ev: SseEnvelope): void => {
+    const persistEvent = async (ev: SseEnvelope): Promise<void> => {
       if (!store?.addEvent) return;
       try {
         const data = (ev as { data?: unknown }).data;
-        store.addEvent(session.id, {
+        await store.addEvent(session.id, {
           type: ev.type,
           payload: JSON.stringify(data),
           version: typeof ev.version === "number" ? ev.version : 1,
@@ -607,9 +609,9 @@ export function createHttpServer(deps: HttpDeps): Server {
         // model so context carries across turns. On success, append this
         // turn's messages to the canonical transcript; a failed turn
         // persists nothing (the catch is a no-op for the transcript).
-        const fallbackPrior = (
-          store?.getTranscript ? store.getTranscript(session.id) : []
-        ) as ChatCompletionMessageParam[];
+        const fallbackPrior = (await (store?.getTranscript
+          ? store.getTranscript(session.id)
+          : [])) as ChatCompletionMessageParam[];
         const fallbackMessages: ChatCompletionMessageParam[] = [
           ...fallbackPrior,
           { role: "user", content: typeof body.prompt === "string" ? body.prompt : "" },
@@ -619,14 +621,18 @@ export function createHttpServer(deps: HttpDeps): Server {
         try {
           await model!.runTurn(session.id, fallbackReq, {
             emit: async (ev) => {
-              persistEvent(ev);
+              await persistEvent(ev);
               await emit(ev);
             },
             signal: controller.signal,
           });
           if (store?.appendMessages && fallbackMessages.length > fallbackStartLen) {
             try {
-              store.appendMessages(session.id, fallbackMessages.slice(fallbackStartLen), turnRowId);
+              await store.appendMessages(
+                session.id,
+                fallbackMessages.slice(fallbackStartLen),
+                turnRowId,
+              );
             } catch {
               // persistence is best effort
             }

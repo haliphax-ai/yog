@@ -89,7 +89,7 @@ let model: ReturnType<typeof capturingModel>;
 
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), "yog-exec-"));
-  store = new SessionStore(join(dir, "sessions.db"));
+  store = await SessionStore.open(join(dir, "sessions.db"));
   model = capturingModel();
   const opts: DaemonOptions = {
     host: "127.0.0.1",
@@ -150,7 +150,7 @@ describe("executeTurn (http fallback hydrate/persist path — model dep, no orch
     expect(userMsgs.some((m) => m.content === "hello")).toBe(true);
     expect(userMsgs.some((m) => m.content === "world")).toBe(true);
 
-    const transcript = store.getTranscript(sid);
+    const transcript = await store.getTranscript(sid);
     const roles = transcript.map((m: any) => m.role);
     expect(roles.filter((r) => r === "user")).toHaveLength(2);
   });
@@ -182,8 +182,8 @@ describe("executeTurn (http fallback hydrate/persist path — model dep, no orch
       })
     ).text();
 
-    const ta = store.getTranscript(a);
-    const tb = store.getTranscript(b);
+    const ta = await store.getTranscript(a);
+    const tb = await store.getTranscript(b);
     expect(ta.some((m: any) => m.content === "beta")).toBe(false);
     expect(tb.some((m: any) => m.content === "alpha")).toBe(false);
   });
@@ -196,7 +196,7 @@ describe("executeTurn (http fallback hydrate/persist path — model dep, no orch
     });
     const sid = ((await sessionRes.json()) as { session: { id: string } }).session.id;
 
-    const before = store.getTranscript(sid);
+    const before = await store.getTranscript(sid);
     expect(before).toHaveLength(0);
 
     const failModel = {
@@ -231,7 +231,7 @@ describe("executeTurn (http fallback hydrate/persist path — model dep, no orch
       await failDaemon.close();
     }
 
-    const after = store.getTranscript(sid);
+    const after = await store.getTranscript(sid);
     expect(after).toHaveLength(0);
   });
 });

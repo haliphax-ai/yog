@@ -128,10 +128,7 @@ const CAPABILITIES = {
   features: ["sse"],
 };
 
-function optsWith(
-  model: ReturnType<typeof fakeModel>,
-  store: SessionStore = new SessionStore(join(tmpdir(), `yog-conf-${Date.now()}.db`)),
-): DaemonOptions {
+function optsWith(model: ReturnType<typeof fakeModel>, store: SessionStore): DaemonOptions {
   return {
     host: "127.0.0.1",
     port: 0,
@@ -146,7 +143,7 @@ let storePath: string;
 
 beforeAll(async () => {
   storePath = join(tmpdir(), `yog-conf-${Date.now()}.db`);
-  store = new SessionStore(storePath);
+  store = await SessionStore.open(storePath);
   daemon = await createDaemon(optsWith(fakeModel("happy"), store));
   base = daemon.url;
 });
@@ -330,7 +327,7 @@ describe("conformance: persistence across restart", () => {
 
     // Boot a second daemon over the same sqlite file: everything persisted
     // must still be reachable.
-    const store2 = new SessionStore(storePath);
+    const store2 = await SessionStore.open(storePath);
     daemon = await createDaemon(optsWith(fakeModel("happy"), store2));
     store = store2;
     base = daemon.url;
@@ -389,7 +386,10 @@ describe("conformance: error-code mapping", () => {
   });
 
   it("provider failure surfaces as a terminal SSE error event (provider_error → 502 semantics)", async () => {
-    const d = await createDaemon(optsWith(fakeModel("provider-error")));
+    const providerStore = await SessionStore.open(
+      join(tmpdir(), `yog-conf-provider-${Date.now()}.db`),
+    );
+    const d = await createDaemon(optsWith(fakeModel("provider-error"), providerStore));
     try {
       const created = await json(await fetch(`${d.url}/v1/sessions`, { method: "POST" }));
       const res = await fetch(`${d.url}/v1/sessions/${created.session.id}/turns`, {
