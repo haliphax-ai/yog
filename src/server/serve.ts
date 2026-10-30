@@ -270,13 +270,15 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         // Settle the row as finished — the bookkeeping record of a complete
         // turn, never a gate on the stream's success.
         await store?.finishTurn?.(sessionId, turnRowId, "finished").catch(() => {});
-      } catch {
-        // Failed turn persists nothing (except its event log, which is
-        // diagnostic). The transcript stays at the last turn boundary —
-        // unless the engine healed stub tool messages during the unwind
-        // (abort or error mid-tool-loop): that healed batch is persisted so
-        // the next turn hydrates a valid transcript.
-        if (healedIds.length > 0 && store && messages.length > startLen) {
+      } catch (err) {
+        // An operator abort persists that batch so the user prompt and
+        // completed tool calls survive for resume (the turn row still
+        // settles as aborted); other failures stay transient. The signal is
+        // the authoritative abort marker: mid-model-stream the engine
+        // rethrows the provider's raw abort error, not an `AbortError`.
+        const isOperatorAbort =
+          ctx.signal?.aborted === true || (err instanceof Error && err.name === "AbortError");
+        if ((isOperatorAbort || healedIds.length > 0) && store && messages.length > startLen) {
           try {
             await store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
           } catch {

@@ -108,6 +108,25 @@ const ERROR_STATUS: Record<string, number> = {
   internal: 500,
 };
 
+/**
+ * Grace window for an operator abort: `handle.abort()` rejects the turn
+ * promise immediately, while the engine's terminal `turn.aborted` envelope
+ * is still traveling behind awaited persistence in the sink — the stream
+ * would otherwise end before the wire ever sees a terminal event. The
+ * adapter pauses until the envelope is observed or the window closes, so
+ * the stream is guaranteed to end either way. `YOG_ABORT_GRACE_MS`
+ * overrides the default window.
+ */
+const ABORT_GRACE_MS = (() => {
+  const parsed = Number.parseInt(process.env.YOG_ABORT_GRACE_MS ?? "", 10);
+  return Number.isFinite(parsed) ? parsed : 2_000;
+})();
+
+/** Bounded pause used while waiting for the engine's terminal abort event. */
+function abortGrace(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ABORT_GRACE_MS));
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   if (res.writableEnded) return;
   res.statusCode = status;
@@ -564,17 +583,25 @@ export function createHttpServer(deps: HttpDeps): Server {
       closed = true;
       controller.abort(new Error("client disconnected"));
       // Fan the abort out to the orchestrator (queued turns are dropped,
-      // in-flight turns get their handle promise rejected).
-      try {
-        handle?.abort(new Error("client disconnected"));
-      } catch {
-        // abort is best effort
-      }
+      // in-flight turns get their handle promise rejected) — but only after
+      // the current turn stack unwinds: `handle.abort()` rejects the turn
+      // promise synchronously, and aborting mid-`await handle.promise` would
+      // re-enter this handler (double close), skip the terminal-abort grace
+      // window, and race the engine's `turn.aborted` publication.
+      setTimeout(() => {
+        try {
+          handle?.abort(new Error("client disconnected"));
+        } catch {
+          // abort is best effort
+        }
+      }, 0);
     };
     req.on("close", onClose);
     res.on("close", onClose);
 
     let sawError = false;
+    /** True once the engine announced `turn.started` on this stream's turn. */
+    let turnStarted = false;
     const turnLog = logger.child({ sessionId: session.id });
     const emit = async (ev: SseEnvelope): Promise<void> => {
       if (closed || res.writableEnded || res.destroyed) return;
@@ -626,6 +653,7 @@ export function createHttpServer(deps: HttpDeps): Server {
     // twice. On the fallback path (no orchestrator) there is no sink, so
     // `persistEvent` is the sole writer and stays.
     const onBusEvent = (ev: SseEnvelope): void => {
+      if (ev.type === "turn.started") turnStarted = true;
       void emit(ev);
     };
 
@@ -639,11 +667,32 @@ export function createHttpServer(deps: HttpDeps): Server {
         try {
           await handle.promise;
         } catch (err) {
-          // Operator aborts surface as `turn.aborted` from the engine — a
-          // synthetic `error` envelope on top would contradict it. The SSE
-          // controller's own abort is the disconnect path (already silenced
-          // by `closed`).
+          // An operator abort rejects the handle immediately; the engine
+          // unwinds asynchronously, and its terminal `turn.aborted` (not an
+          // extra `error` on top) is what the client must observe. The
+          // disconnect path (client closed) is silenced via `closed`.
           const isAbort = (err as Error | undefined)?.name === "AbortError";
+          if (isAbort && turnStarted && !closed && !res.writableEnded) {
+            // The engine's terminal `turn.aborted` is still in flight behind
+            // awaited persistence in the sink. Hold the stream open until it
+            // is observed (or the grace window closes) so the client sees a
+            // terminal event instead of a bare stream end.
+            await (async () => {
+              let resolveWait!: () => void;
+              const waited = new Promise<void>((resolve) => {
+                resolveWait = resolve;
+              });
+              const onAbortedEvent = (ev: SseEnvelope): void => {
+                if (ev.type === "turn.aborted") resolveWait();
+              };
+              bus?.on(channel, onAbortedEvent);
+              try {
+                await Promise.race([waited, abortGrace()]);
+              } finally {
+                bus?.off(channel, onAbortedEvent);
+              }
+            })();
+          }
           if (!isAbort && !sawError && !closed && !res.writableEnded) {
             const e = err as { code?: string; message?: string };
             await emit({

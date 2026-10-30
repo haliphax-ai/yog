@@ -12,6 +12,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type Server } from "node:http";
+import { EventEmitter } from "node:events";
 import type { AddressInfo } from "node:net";
 import type OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
@@ -70,14 +71,51 @@ function hangingToolCallClient(): OpenAI {
   } as unknown as OpenAI;
 }
 
+/**
+ * Fake OpenAI client that streams one text delta then hangs until the turn's
+ * abort signal fires — the mid-model-stream abort case: no tool call was
+ * ever announced, so the unwind has nothing to heal.
+ */
+function proseThenHangClient(): OpenAI {
+  return {
+    chat: {
+      completions: {
+        create: (args: { signal?: AbortSignal }) =>
+          (async function* () {
+            yield { choices: [{ delta: { content: "working... " } }] };
+            await new Promise<void>((_resolve, reject) => {
+              if (args.signal?.aborted) {
+                reject(new Error("The operation was aborted"));
+                return;
+              }
+              args.signal?.addEventListener(
+                "abort",
+                () => reject(new Error("The operation was aborted")),
+                { once: true },
+              );
+            });
+          })(),
+      },
+    },
+  } as unknown as OpenAI;
+}
+
 let dir: string;
 let store: SessionStore;
 let server: Server;
 let base: string;
+let bus: EventEmitter;
+/** Selectable fake client: the default streams a tool call; the mid-stream
+ *  scenario swaps in the prose-only client (nothing to heal). */
+let activeClientFactory = hangingToolCallClient;
 
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), "yog-abort-"));
   store = await SessionStore.open(join(dir, "sessions.db"));
+  // The adapter subscribes to this bus for SSE delivery; the executeTurn
+  // sink below publishes to it — the same composition as serve.ts.
+  bus = new EventEmitter();
+  bus.setMaxListeners(0);
 
   // The bash tool's executor models a tool call in flight that never
   // settles (the thing an abort must rescue): the registry's signal race
@@ -111,11 +149,12 @@ beforeAll(async () => {
           payload: JSON.stringify(ev.data),
           version: ev.version,
         });
+        bus.emit(`session:${sessionId}`, ev);
       },
     };
     const healed: string[] = [];
     try {
-      await new TurnEngine(sink).run(hangingToolCallClient(), "fake", messages, tools, {
+      await new TurnEngine(sink).run(activeClientFactory(), "fake", messages, tools, {
         sessionId,
         ...(ctx.signal ? { signal: ctx.signal } : {}),
         isAborted: () => ctx.signal?.aborted === true,
@@ -126,10 +165,13 @@ beforeAll(async () => {
         await store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
       }
       await store.finishTurn(sessionId, turnRowId, "finished").catch(() => {});
-    } catch {
-      // The engine healed stub tool messages during the unwind (abort path):
-      // persist them so the next turn hydrates a valid transcript.
-      if (healed.length > 0 && messages.length > startLen) {
+    } catch (err) {
+      // Mirror serve.ts's failure policy: an operator abort persists the
+      // turn's batch (prompt + any healed stubs) so resume sees it; other
+      // failures persist only when the unwind healed stubs.
+      const isOperatorAbort =
+        ctx.signal?.aborted === true || (err instanceof Error && err.name === "AbortError");
+      if ((isOperatorAbort || healed.length > 0) && messages.length > startLen) {
         await store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
       }
       await store.finishTurn(sessionId, turnRowId, "aborted").catch(() => {});
@@ -148,6 +190,7 @@ beforeAll(async () => {
     },
     store: store as any,
     orchestrator,
+    bus,
     // No worker pool in this composition: the kill hook is a no-op that
     // reports "nothing was running" (the fake stream hangs before any tool).
     onAbortKillTool: () => false,
@@ -273,5 +316,70 @@ describe("POST /v1/sessions/{id}/abort", () => {
     const resB = await fetch(`${base}/v1/sessions/${b}/abort`, { method: "POST" });
     expect((await json(resB)).status).toBe("aborted");
     await Promise.race([streamB.text(), new Promise((r) => setTimeout(r, 3000))]);
+  });
+
+  it("delivers turn.aborted on the wire before the stream ends", async () => {
+    const sid = await newSession();
+    const stream = await startTurn(sid);
+    expect(stream.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 150));
+
+    await fetch(`${base}/v1/sessions/${sid}/abort`, { method: "POST" });
+
+    // Drain the whole stream and collect envelope types off the wire: the
+    // stream must not end bare — the terminal frame is `turn.aborted`.
+    const text = await stream.text();
+    const types = text
+      .split("\n\n")
+      .map((block) => {
+        const line = block.split("\n").find((l) => l.startsWith("data:"));
+        try {
+          return line ? (JSON.parse(line.slice(5).trim()) as { type?: string }).type : undefined;
+        } catch {
+          return undefined;
+        }
+      })
+      .filter((t): t is string => typeof t === "string");
+    expect(types.at(-1)).toBe("turn.aborted");
+  });
+
+  it("persists the aborted turn's prompt so a resume sees it", async () => {
+    const sid = await newSession();
+    const stream = await startTurn(sid);
+    expect(stream.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 150));
+
+    await fetch(`${base}/v1/sessions/${sid}/abort`, { method: "POST" });
+    await Promise.race([stream.text(), new Promise((r) => setTimeout(r, 3000))]);
+
+    // The user prompt survived the abort: a resumed client rehydrates it
+    // alongside the healed assistant/tool rows.
+    const transcript = await waitForTranscript(sid, (msgs) => msgs.some((m) => m.role === "tool"));
+    const user = transcript.find((m) => m.role === "user");
+    expect(user?.content).toBe("hang forever");
+  });
+
+  it("persists the prompt for resume when the abort lands mid-model-stream", async () => {
+    activeClientFactory = proseThenHangClient;
+    try {
+      const sid = await newSession();
+      const stream = await startTurn(sid);
+      expect(stream.status).toBe(200);
+      await new Promise((r) => setTimeout(r, 150));
+
+      const res = await fetch(`${base}/v1/sessions/${sid}/abort`, { method: "POST" });
+      expect((await json(res)).status).toBe("aborted");
+      await Promise.race([stream.text(), new Promise((r) => setTimeout(r, 3000))]);
+
+      // No tool call was announced, so there is nothing to heal — the abort
+      // path must still persist the user prompt (the regression behind the
+      // "0 messages from server transcript" resume report).
+      const transcript = await waitForTranscript(sid, (msgs) => msgs.length > 0);
+      const user = transcript.find((m) => m.role === "user");
+      expect(user?.content).toBe("hang forever");
+      expect(transcript).toHaveLength(1);
+    } finally {
+      activeClientFactory = hangingToolCallClient;
+    }
   });
 });
