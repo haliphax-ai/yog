@@ -1,14 +1,13 @@
 *.log
 *.mmd
+.agentfs/
 .env
 .env.local
 .harness/
-.agentfs/
 /assets
 /model
+Dockerfile.local
 node_modules/
 sys-test/
 sys/
-
-.serena/
 tmp/
