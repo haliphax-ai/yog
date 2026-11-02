@@ -10,10 +10,11 @@ abi <abi/4.0>,
 #
 # This profile is intentionally broad: the harness runs a language-model agent
 # that executes arbitrary bash, so it needs a general-purpose Linux userspace
-# surface plus the FUSE bits. The /usr/bin/** glob below reflects that
-# decision — it is not airtight containment, and it is not meant to be. The
-# mount/umount rules and the FUSE device are the only kernel-level gates
-# between the agent and the host filesystem; everything else is trust.
+# surface plus the FUSE bits. The /usr/bin/**, /bin/**, and /usr/local/bin/**
+# globs below reflect that decision — it is not airtight containment, and it
+# is not meant to be. The mount/umount rules and the FUSE device are the
+# only kernel-level gates between the agent and the host filesystem;
+# everything else is trust.
 profile yog flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
   #include <abstractions/consoles>
@@ -35,17 +36,18 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   # confined under this profile (`ix` = inherit). The agent's bash escapes
   # unconfined (`Ux`) so the model can execute arbitrary commands; fusermount
   # likewise escapes so the setuid helper can perform the mount. Agent-facing
-  # utilities in /usr/bin/ are covered by the glob below rather than an
-  # enumeration — this is intentionally broad (see the profile header).
+  # utilities in /usr/bin/, /bin, and /usr/local/bin/ are covered by the globs
+  # below rather than an enumeration — this is intentionally broad (see the
+  # profile header).
   # /app contains native addons (turso/libsql .node bindings) loaded via
   # dlopen, which requires mmap (`m`) as well as read (`r`).
   /app/** rm,
   /usr/bin/bash Ux,
   /usr/bin/** ix,
-  # node (re)opens its own binary and ldd when spawning the worker — exec
-  # (`ix`) alone does not grant read, so give both.
-  /usr/local/bin/node mr,
-  /usr/local/bin/node ix,
+  /bin/** ix,
+  /usr/local/bin/** ix,
+  # node (re)opens its own binary and ldd when spawning the worker — covered
+  # by the /usr/local/bin/** glob above (mr + ix for mmap + exec).
   # fusermount is at /usr/bin on Debian (and /usr/sbin on some distros);
   # it must escape so its setuid mount helper works.
   /usr/bin/fusermount Ux,
