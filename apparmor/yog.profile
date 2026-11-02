@@ -99,3 +99,4 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   network inet6 tcp,
   network inet dgram,
   network inet6 dgram,
+}
