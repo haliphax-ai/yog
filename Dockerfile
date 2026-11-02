@@ -2,7 +2,7 @@
 #
 # The image's default command starts the HTTP/SSE daemon: the entrypoint runs
 # `yog serve` (bound to YOG_HOST=0.0.0.0 so the published port is reachable)
-# unless explicit args are passed (the launcher passes `run <model> "<prompt>"`.
+# unless explicit args are passed (the launcher passes `run <model> "<prompt>"`).
 FROM node:24
 LABEL AUTHOR="haliphax <haliphax@gmail.com>" NAME="yog"
 RUN --mount=type=cache,mode=0755,target=/var/cache/apt \
@@ -17,6 +17,7 @@ RUN --mount=type=cache,mode=0755,target=/var/cache/apt \
     jq \
     ripgrep \
     util-linux \
+    which \
     && \
   rm -rf /var/lib/apt/lists/*
 # UID scheme: the daemon (yog) is the stable id 900; agents are allocated

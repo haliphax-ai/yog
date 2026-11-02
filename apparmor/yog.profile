@@ -10,8 +10,10 @@ abi <abi/4.0>,
 #
 # This profile is intentionally broad: the harness runs a language-model agent
 # that executes arbitrary bash, so it needs a general-purpose Linux userspace
-# surface plus the FUSE bits. Tighten the path/network rules as the agent's
-# toolset narrows.
+# surface plus the FUSE bits. The /usr/bin/** glob below reflects that
+# decision — it is not airtight containment, and it is not meant to be. The
+# mount/umount rules and the FUSE device are the only kernel-level gates
+# between the agent and the host filesystem; everything else is trust.
 profile yog flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
   #include <abstractions/consoles>
@@ -31,19 +33,19 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
 
   # Runtime + tool binaries. The harness/worker (node, setpriv, shell) run
   # confined under this profile (`ix` = inherit). The agent's bash escapes
-  # unconfined (`Ux`) so the model can execute arbitrary commands without
-  # enumerating every utility here; fusermount likewise escapes so the setuid
-  # helper can perform the mount.
+  # unconfined (`Ux`) so the model can execute arbitrary commands; fusermount
+  # likewise escapes so the setuid helper can perform the mount. Agent-facing
+  # utilities in /usr/bin/ are covered by the glob below rather than an
+  # enumeration — this is intentionally broad (see the profile header).
   # /app contains native addons (turso/libsql .node bindings) loaded via
   # dlopen, which requires mmap (`m`) as well as read (`r`).
   /app/** rm,
   /usr/bin/bash Ux,
-  /usr/bin/{sh,dash,env,sed,grep,cat,echo,ls,ps,tar,gzip,bzip2,xz,find,head,tail,cut,tr,awk,sort,uniq,wc,date,hostname,id,whoami,dirname,basename,mkdir,rmdir,rm,cp,mv,ln,chmod,chown,touch,file,stat,du,df,mount,umount,curl,wget,git,jq,rg,gpg,openssl,tee,printf,seq,nohup,setsid,setpriv,capsh,ldd} ix,
+  /usr/bin/** ix,
   # node (re)opens its own binary and ldd when spawning the worker — exec
   # (`ix`) alone does not grant read, so give both.
   /usr/local/bin/node mr,
   /usr/local/bin/node ix,
-  /usr/bin/ldd r,
   # fusermount is at /usr/bin on Debian (and /usr/sbin on some distros);
   # it must escape so its setuid mount helper works.
   /usr/bin/fusermount Ux,
