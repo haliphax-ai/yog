@@ -1,0 +1,24 @@
+services:
+  yog:
+    build: .
+    image: yog:latest
+    devices:
+      - /dev/fuse:/dev/fuse
+    security_opt:
+      - apparmor=yog
+      - seccomp=./seccomp/yog.json
+    cap_add:
+      - SYS_ADMIN
+      - SETUID
+      - SETGID
+    volumes:
+      - ./projects:/home/agent/projects
+    env_file: .env
+    environment:
+      YOG_HOST: 0.0.0.0
+      YOG_PORT: 8111
+    ports:
+      - 127.0.0.1:8111:8111
+
+volumes:
+  state:

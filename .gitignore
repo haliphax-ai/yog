@@ -7,6 +7,7 @@
 /assets
 /model
 Dockerfile.local
+docker-compose.*.yml
 node_modules/
 sys-test/
 sys/
