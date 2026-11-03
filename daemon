@@ -11,6 +11,12 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 port="${YOG_PORT:-8111}"
 daemon_name="${YOG_DAEMON_NAME:-yog-daemon}"
 
+if [[ -n "${YOG_IMAGE:-}" ]]; then
+  daemon_image="${YOG_IMAGE}"
+else
+  daemon_image="yog:latest"
+fi
+
 # Seccomp: ship a custom profile (seccomp/yog.json) = Docker's default + an
 # unconditional allowance for mount/umount2 (FUSE). Set YOG_SECCOMP=unconfined
 # to fall back to the old behavior.
@@ -31,10 +37,6 @@ else
   state_mount="--mount type=volume,source=yog-state,target=/var/lib/yog"
 fi
 
-# One-shot UX: start the daemon detached (publishing YOG_PORT to the host),
-# wait for its capabilities endpoint, run a single client turn against it,
-# then tear the daemon down. The client shares the daemon's network namespace
-# (`--network container:...`), so YOG_SERVER_URL can stay on loopback.
 cleanup() {
   docker stop "$daemon_name" >/dev/null 2>&1 || true
 }
@@ -57,4 +59,4 @@ docker run --rm -it \
   -e YOG_PORT="$port" \
   -p "$port:$port" \
   --name "$daemon_name" \
-  yog
+  "$daemon_image"
