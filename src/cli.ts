@@ -1,15 +1,12 @@
 /**
- * CLI argument parsing. Pre-1.0 policy is replace-and-delete: the bare
- * `yog <model> <prompt>` form is gone; `yog run <model> <prompt>` is the
- * only entrypoint for one-shot turns, and `yog serve` starts the daemon.
+ * CLI argument parsing.
+ *
+ * The only subcommand is `serve`, which starts the long-lived HTTP/SSE
+ * daemon. One-shot client turns are handled by the external
+ * [yog-client-tui](https://github.com/haliphax-ai/yog-client-tui)
+ * application, which speaks the v1 HTTP/SSE contract directly.
  */
-import { runClient } from "./client/run.ts";
 import { logger } from "./log.ts";
-
-export interface CliArgs {
-  modelId: string;
-  prompt: string;
-}
 
 export interface CliError {
   error: string;
@@ -19,52 +16,6 @@ export interface CliError {
 export interface ServeArgs {
   host?: string;
   port?: number;
-}
-
-/** Parse `process.argv`-style args into a run invocation. */
-export function parseCliArgs(argv: readonly string[]): CliArgs | CliError {
-  const [subcommand, modelId, ...promptParts] = argv;
-  if (subcommand !== "run") {
-    return { error: `unknown subcommand "${subcommand ?? ""}" (expected "run")` };
-  }
-  if (!modelId) {
-    return { error: "missing model id" };
-  }
-  if (promptParts.length === 0) {
-    return { error: "missing prompt" };
-  }
-  return { modelId, prompt: promptParts.join(" ") };
-}
-
-/** Options for `runCommand` (mirrors the network client's sink options). */
-export interface RunCommandOptions {
-  /** Optional abort signal (SIGINT handling upstream). */
-  signal?: AbortSignal;
-}
-
-/**
- * Execute the `run` subcommand: delegate to the network run client
- * (src/client/run.ts). Resolves with the process exit code (0/1); prints a
- * friendly `yog serve` hint on transport failures instead of spawning a
- * server.
- */
-export async function runCommand(
-  argv: readonly string[],
-  extra?: RunCommandOptions,
-): Promise<number> {
-  const parsed = parseCliArgs(argv);
-  if ("error" in parsed) {
-    logger.error(parsed.error);
-    logger.error('usage: yog run <modelId> "<prompt>"');
-    return 1;
-  }
-  const result = await runClient({
-    model: parsed.modelId,
-    prompt: parsed.prompt,
-    ...(extra?.signal ? { signal: extra.signal } : {}),
-    throwOnError: false,
-  });
-  return result.exitCode;
 }
 
 /**

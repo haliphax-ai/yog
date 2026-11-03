@@ -4,23 +4,19 @@ An agent harness that mounts a virtual FUSE directory and runs a streaming
 OpenAI-compatible chat completion with a single tool: `bash`. System features
 are presented to agents as proxied virtual file descriptors.
 
-## Client/server split
+## Server
 
-The harness is split into two processes that speak a versioned HTTP/SSE
-contract:
-
-- **`yog serve`** — the long-lived daemon (`src/server/`). It owns every
-  boundary: the sqlite session store, the worker pool, the session
-  orchestrator, the OpenAI client/TurnEngine, the FUSE mount, and the
-  HTTP/SSE adapter. It binds `YOG_HOST:YOG_PORT` (loopback `127.0.0.1:8111`
-  locally; `0.0.0.0` inside the container).
-- **`yog run <modelId> "<prompt>"`** — a pure network client
-  (`src/client/`). It only speaks the contract over Node `fetch` and never
-  spawns a daemon: an unreachable server is a friendly *"start it first with
-  `yog serve`"* error (no auto-spawn in v0).
+The harness is a long-lived HTTP/SSE daemon (`src/server/`). It owns every
+boundary: the sqlite session store, the worker pool, the session
+orchestrator, the OpenAI client/TurnEngine, the FUSE mount, and the
+HTTP/SSE adapter. It binds `YOG_HOST:YOG_PORT` (loopback `127.0.0.1:8111`
+locally; `0.0.0.0` inside the container).
 
 The daemon is reached through `YOG_SERVER_URL` (default
-`http://127.0.0.1:8111`).
+`http://127.0.0.1:8111`). One-shot client turns are handled by the
+[yog-client-tui](https://github.com/haliphax-ai/yog-client-tui)
+application, which speaks the v1 HTTP/SSE contract directly.
+
 
 ### Contract endpoints (v1)
 
@@ -102,16 +98,6 @@ terminal state: `?purge=true` deletes immediately, and dormant sessions past
 the 30-day retention window are pruned at daemon startup, both followed by
 404 `unknown_session` everywhere.
 
-### Session flags on the client
-
-`yog run` gains optional flags (default one-shot behavior unchanged):
-
-- `--session <id>` — skip create; reuse the session for the turn; skip the
-  trailing `DELETE` (the session outlives the client process).
-- `--resume` — fetch the transcript first and render prior history before
-  streaming the new turn (the rendered history is never sent back; the
-  server rehydrates its own copy).
-
 Errors are `{ error: { code, message } }` JSON with a stable code→status
 mapping: `invalid_request`/`unknown_model` → 400, `unauthorized` → 401,
 `unknown_session` → 404, `rate_limited` → 429, `internal` → 500,
@@ -130,15 +116,15 @@ turn-status recovery, and the error-code mapping.
 
 ```sh
 yog serve [--host <addr>] [--port <n>]   # start the HTTP/SSE daemon
-yog run <modelId> "<prompt>"             # one-shot client turn against it
 ```
 
-(or via npm: `npm run start:serve`, `npm start -- run <modelId> "<prompt>"`.)
+(or via npm: `npm run start:serve`.)
 
 - `serve` logs the listening URL and runs until SIGINT/SIGTERM (graceful
   shutdown: HTTP → worker pool → store → unmount).
-- `run` walks `capabilities → sessions → turns (SSE) → delete`, streams
-  assistant text to stdout and tool activity to stderr, and exits 0/1.
+- One-shot client turns are handled by the
+  [yog-client-tui](https://github.com/haliphax-ai/yog-client-tui)
+  application, which speaks the v1 HTTP/SSE contract directly.
 - Uses `OPENAI_BASE_URL` / `OPENAI_API_KEY` when set (compatible-proxy
   support), otherwise the SDK defaults.
 - Runs the `bash` tool through a dedicated worker process; the persistent
@@ -149,8 +135,8 @@ yog run <modelId> "<prompt>"             # one-shot client turn against it
 | Variable | Default | Purpose |
 |---|---|---|
 | `YOG_HOST` | `127.0.0.1` (`0.0.0.0` in the container) | daemon bind address (`yog serve`) |
-| `YOG_PORT` | `8111` | daemon port; also the port the launcher publishes to the host |
-| `YOG_SERVER_URL` | `http://127.0.0.1:8111` | client: daemon origin for `yog run` |
+| `YOG_PORT` | `8111` | daemon port; also the port compose publishes to the host |
+| `YOG_SERVER_URL` | `http://127.0.0.1:8111` | client: daemon origin for the yog-client-tui app |
 | `YOG_WORKERS` | `max(1, cpus - 1)` | daemon: worker pool size for parallel tool execution |
 | `YOG_STATE_ROOT` | `/var/lib/yog` | daemon: state root (`sessions.db`, `agentfs/<agentId>.db`) |
 | `YOG_STATE_PATH` | *(derived from root)* | full-path override for the agent state db |
@@ -160,57 +146,40 @@ yog run <modelId> "<prompt>"             # one-shot client turn against it
 | `YOG_MODEL` / `OPENAI_MODEL` | `gpt-4o-mini` | model id advertised by capabilities and used for turns |
 | `OPENAI_BASE_URL` / `OPENAI_API_KEY` | *(SDK defaults)* | provider endpoint + key |
 | `YOG_MOUNT` | `/yog` | FUSE mountpoint |
-| `YOG_SECCOMP` | *(profile file)* | launcher: `unconfined` falls back to Docker's default seccomp |
-| `YOG_STATE_BIND` | *(named volume)* | launcher: bind-mount `/var/lib/yog` from a host path |
-| `YOG_DAEMON_NAME` | `yog-daemon` | launcher: name of the daemon container |
 
 ### Docker
 
-Build the image and run through the bundled launcher. The launcher keeps the
-one-shot UX — it starts the daemon container (entrypoint runs `yog serve`
-with `YOG_HOST=0.0.0.0`), publishes `YOG_PORT` to the host, waits for
-`/v1/capabilities` to answer, runs a single client turn against it (client
-container joins the daemon's network namespace), exits with the client's
-status code, and tears the daemon down:
+Build the image and run the daemon through Docker Compose. The compose
+manifest starts the daemon container (entrypoint runs `yog serve` with
+`YOG_HOST=0.0.0.0`), publishes `YOG_PORT` to the host, and waits for
+`/v1/capabilities` to answer before accepting turns:
 
 ```sh
-docker build -t yog .
-./yog "<prompt>"
-YOG_PORT=9000 ./yog "<prompt>"            # publish a different port
-YOG_STATE_BIND=$HOME/yog-state ./yog "…"  # state on a host directory
-```
-
-`./yog` defaults the model to `nvidia/nemotron-3-ultra-550b-a55b:free`;
-place a model id in a `model` file (host cwd) to override it. Environment
-overrides come from a `.env` file in the cwd (sourced by the launcher) or
-the usual `OPENAI_BASE_URL` / `OPENAI_API_KEY` variables.
-
-To keep the daemon running, start it yourself — with no args the image
-entrypoint runs `yog serve` (the launcher passes `run <model> "<prompt>"`
-explicitly for the one-shot flow):
-
-```sh
-docker run -d --name yog-daemon -p 8111:8111 \
-  --device /dev/fuse --cap-add SYS_ADMIN,SETUID,SETGID \
-  --security-opt seccomp=$PWD/seccomp/yog.json --security-opt apparmor=yog \
-  -e OPENAI_BASE_URL -e OPENAI_API_KEY yog
+docker compose up -d --build
 # then point any client at it:
-docker run --rm --network container:yog-daemon \
-  -e YOG_SERVER_URL=http://127.0.0.1:8111 yog run <modelId> "<prompt>"
+docker compose exec yog yog serve --help
 ```
+
+Customize the base image and runtime with override files:
+
+- `docker-compose.override.yml` — layer additional services, volume mounts,
+  environment variables, or port mappings on top of the base manifest.
+- `Dockerfile.local` — build a custom image variant (e.g. different base
+  node version, extra packages) and reference it from the override via
+  `build: { context: ., dockerfile: Dockerfile.local }`.
+
+The daemon's state databases live under `/var/lib/yog` (`YOG_STATE_ROOT`):
+`sessions.db` (sessions/turns/events) and `agentfs/<agentId>.db` (audit +
+shell state). Mount that path from the host so state persists across runs
+and turso/libsql's file locking works (it misbehaves on Docker's overlay
+filesystem).
 
 ## Layout
 
 <details><summary>Files</summary><br />
 
-- `src/`
-  - `cli.ts` - CLI arg parsing: `run` and `serve` subcommands.
-  - `index.ts` - CLI entry: dispatches `serve` (daemon) vs. `run` (client).
-  - `client/`
-    - `run.ts` - pure network run client: capabilities probe → session →
-      SSE turn → close, with turn-status recovery when the stream dies.
-    - `sse.ts` - fetch-based SSE reader (client counterpart of the server
-      framing).
+- `cli.ts` - CLI arg parsing: `serve` subcommand with `--host`/`--port` flags.
+- `index.ts` - CLI entry: dispatches `serve` (daemon).
   - `server/`
     - `serve.ts` - composition root for the daemon (`createDaemon`).
     - `http.ts` - v1 HTTP/SSE adapter (routes, validation, error mapping).
@@ -253,14 +222,16 @@ docker run --rm --network container:yog-daemon \
 - `test/`
   - `conformance.test.ts` — external-client conformance suite against an
     ephemeral daemon (contract endpoints, SSE transcript, recovery, errors).
-  - `server/`, `client/`, … — unit suites per layer.
+  - `server/`, `state/`, `vfs/`, `worker/`, `toolkit/`, `turn/` — unit suites per layer.
 - `apparmor/`
   - `yog.profile` - the `yog` AppArmor profile to load on the host (network
     rules cover the daemon listening on the configured bind address).
 - `Dockerfile` - container image: node:24, daemon + agent users, and the
   `fuse`/CLI packages; entrypoint runs `yog serve` by default.
-- `yog` - Docker launcher: one-shot daemon + client with `YOG_PORT`
-  published to the host.
+- `docker-compose.yml` - Docker Compose manifest: builds the image, runs the
+  daemon with FUSE, seccomp, and AppArmor; publishes `YOG_PORT` to the host.
+- `Dockerfile` - container image: node:24, daemon + agent users, and the
+  `fuse`/CLI packages; entrypoint runs `yog serve` by default.
 
 </details>
 
@@ -379,55 +350,54 @@ The state layer (`src/state/`) is the only code allowed to import the agentfs
 SDK (enforced by dependency-cruiser). The daemon keeps its own sqlite state
 (`sessions.db`) under the same `YOG_STATE_ROOT`.
 
+
 ## Environment requirements
 
 The `fuse-native` addon needs a FUSE device and mount privileges:
 
-- `/dev/fuse` must be present in the container: `--device /dev/fuse`.
+- `/dev/fuse` must be present in the container: the compose manifest mounts
+  it (`devices: - /dev/fuse:/dev/fuse`).
 - The container runs the harness as the non-root `yog` daemon user (stable
   uid 900); its bash worker drops to the non-root `agent` user (the
   daemon/agent split), so model-executed code never runs as the harness
   user. Agents are allocated from a pool starting at uid 1100 (above the
   1000 host-user region); the bootstrap agent is 1100.
-- Mounting requires `--cap-add SYS_ADMIN`, and the `fuse` (libfuse2)
-  package so the setuid `fusermount` helper exists; both are set up by the
-  image. Mounts go through `fusermount` as the `yog` user into `/yog`.
+- Mounting requires `SYS_ADMIN`, and the `fuse` (libfuse2) package so the
+  setuid `fusermount` helper exists; both are set up by the image. Mounts go
+  through `fusermount` as the `yog` user into `/yog`.
 - Seccomp is enabled with a custom profile (`seccomp/yog.json`): Docker's
   default profile plus an unconditional allowance for `mount`/`umount2`
   (the default only allows them with CAP_SYS_ADMIN, so this is belt-and-
-  suspenders for the FUSE mount). The launcher references the file on the
-  host; set `YOG_SECCOMP=unconfined` to fall back to the old behavior.
+  suspenders for the FUSE mount). The compose manifest references the file on
+  the host; set `YOG_SECCOMP=unconfined` in a
+  `docker-compose.override.yml` to fall back to Docker's default seccomp.
 - The worker's drop to the `agent` user requires the harness process to hold
   effective `CAP_SETUID`/`CAP_SETGID`. The image's entrypoint starts as root
   and uses `setpriv` to drop to the `yog` daemon user while granting ambient
   `CAP_SETUID`/`CAP_SETGID` (a plain `--cap-add` is cleared on exec for a
   non-root process, so the ambient caps are what make the split work). The
-  launcher still adds `--cap-add SETUID` and `--cap-add SETGID` to put those
-  caps in the container's bounding set.
+  compose manifest adds `SETUID` and `SETGID` to put those caps in the
+  container's bounding set.
 - The entrypoint defaults to `yog serve` with `YOG_HOST=0.0.0.0` (so the
-  published `YOG_PORT` is reachable from the host) unless arguments are
-  given; the launcher passes `run <model> "<prompt>"` for the one-shot flow.
+  published `YOG_PORT` is reachable from the host).
 - The daemon's state databases are daemon-owned runtime data — they live
   under a dedicated root, `/var/lib/yog` (`YOG_STATE_ROOT`): `sessions.db`
   (sessions/turns/events) and `agentfs/<agentId>.db` (audit + shell state).
   Agent identity is a runtime value (currently the default `agent`), never
   an env var — multi-agent orchestration opens one database per agent id.
-  Set `YOG_STATE_PATH` for a full path override (the launcher passes it
-  through). The `/yog` mountpoint must exist and be readable/searchable by
+  Set `YOG_STATE_PATH` for a full path override (the compose manifest passes
+  it through). The `/yog` mountpoint must exist and be readable/searchable by
   the harness user (the image creates and owns it).
 - The entrypoint re-owns `/var/lib/yog` (the state volume) to the `yog`
   user on start, so a freshly-created root-owned named volume is usable
   immediately.
-- `/var/lib/yog` (which holds the state dbs) is mounted as the named volume
-  `yog-state` by the launcher; set `YOG_STATE_BIND=/host/path` to bind-mount
-  a host directory there instead. A volume/bind mount is required in
-  practice: the turso/libsql native binding's file locking fails with
-  `Failed to unlock file: Permission denied` when the database sits on
-  Docker's overlay filesystem. If you see that panic, ensure the volume mount
-  is present (or set `YOG_STATE_DB` to a path on a real volume); to confirm
-  the cause, rerun with `--security-opt apparmor=unconfined` — AppArmor
-  denies would disappear there, whereas an overlay-filesystem problem would
-  not.
+- `/var/lib/yog` (which holds the state dbs) is mounted from the host so state
+  persists across runs and turso/libsql's file locking works (it misbehaves on
+  Docker's overlay filesystem). If you see `Failed to unlock file:
+  Permission denied`, ensure the volume mount is present (or set
+  `YOG_STATE_DB` to a path on a real volume); to confirm the cause, rerun with
+  `--security-opt apparmor=unconfined` — AppArmor denies would disappear
+  there, whereas an overlay-filesystem problem would not.
 - On hosts enforcing AppArmor/seccomp, the default profiles block mount
   syscalls. The image is therefore run with:
 
@@ -455,11 +425,10 @@ The `fuse-native` addon needs a FUSE device and mount privileges:
   # sudo aa-status | grep yog    # confirms it is loaded
   ```
 
-All of the above is wired into the bundled `yog` launcher:
+All of the above is wired into the `docker-compose.yml` manifest:
 
 ```sh
-docker build -t yog .
-./yog "<prompt>"
+docker compose up -d --build
 ```
 
 For a bare local run (no container), `fuse-native` bundles its own
@@ -470,7 +439,6 @@ system libfuse2 is installed, provide it:
 LD_LIBRARY_PATH=$PWD/node_modules/fuse-native/prebuilds/linux-x64 npm start -- ...
 ```
 
-If mounting fails, the daemon logs a warning and continues without `/yog`.
 
 ## Scripts
 
@@ -486,5 +454,4 @@ If mounting fails, the daemon logs a warning and continues without `/yog`.
   flowchart to stdout
 - `npm run typecheck` - `tsc --noEmit` (TypeScript 7.x)
 - `npm run start:serve` - start the HTTP/SSE daemon
-- `npm start -- run <modelId> "<prompt>"` - one-shot client turn
   (Node ≥ 22.18 for native TypeScript type stripping)
