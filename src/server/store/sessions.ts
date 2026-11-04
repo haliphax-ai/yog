@@ -1,6 +1,7 @@
 import knex from "knex";
 import { randomUUID } from "node:crypto";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
+import type { TurnUsage } from "../../turn/sink.ts";
 import { logger } from "../../log.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -248,6 +249,8 @@ export class SessionStore {
         const content = (m as any).content ?? null;
         const tool_call_id = (m as any).tool_call_id ?? null;
         const name = (m as any).name ?? null;
+        const tokens = (m as any).tokens;
+        const tokensValue = typeof tokens === "number" && Number.isFinite(tokens) ? tokens : null;
         let tool_calls_json: string | null = null;
         const tool_calls = (m as any).tool_calls;
         if (Array.isArray(tool_calls) && tool_calls.length > 0) {
@@ -262,6 +265,7 @@ export class SessionStore {
           tool_call_id,
           name,
           tool_calls_json,
+          tokens: tokensValue,
           created_at: now,
         });
         out.push({
@@ -273,6 +277,7 @@ export class SessionStore {
           content,
           tool_call_id,
           name,
+          tokens: tokensValue,
           tool_calls_json,
           created_at: now,
         });
@@ -292,7 +297,7 @@ export class SessionStore {
    */
   async getTranscript(
     sessionId: string,
-    opts: { afterSeq?: number; limit?: number } = {},
+    opts: { afterSeq?: number; limit?: number; withTokens?: boolean } = {},
   ): Promise<any[]> {
     const afterSeq = opts.afterSeq ?? 0;
     const limit = opts.limit;
@@ -307,6 +312,7 @@ export class SessionStore {
       if (row.tool_call_id !== null) msg.tool_call_id = row.tool_call_id;
       if (row.name !== null) msg.name = row.name;
       if (row.tool_calls_json !== null) msg.tool_calls = JSON.parse(row.tool_calls_json);
+      if (opts.withTokens && row.tokens !== null) msg.tokens = row.tokens;
       return {
         ...msg,
         seq: row.seq,
@@ -361,7 +367,12 @@ export class SessionStore {
    * stamped, duration computed. Best effort by contract — callers never let
    * a bookkeeping failure fail the turn itself.
    */
-  async finishTurn(sessionId: string, turnId: number | null, status = "finished"): Promise<void> {
+  async finishTurn(
+    sessionId: string,
+    turnId: number | null,
+    status = "finished",
+    usage?: TurnUsage,
+  ): Promise<void> {
     if (turnId === null) return;
     const now = Date.now();
     const row = await this.getTurn(turnId);
@@ -373,7 +384,78 @@ export class SessionStore {
         status,
         finished_at: now,
         duration_ms: Math.max(0, now - startedAt),
+        ...(usage?.prompt_tokens !== undefined ? { prompt_tokens: usage.prompt_tokens } : {}),
+        ...(usage?.completion_tokens !== undefined
+          ? { completion_tokens: usage.completion_tokens }
+          : {}),
+        ...(usage?.total_tokens !== undefined ? { total_tokens: usage.total_tokens } : {}),
       });
+  }
+
+  /**
+   * Per-turn metrics for the transcript dump (§R1.3): ordered by turn id,
+   * each entry carries the persisted usage when known — falling back to the
+   * stored `turn.finished` event usage for turns completed before usage
+   * columns existed (recovery replay) — plus the settled duration when the
+   * turn finished. Best-effort: turns with neither usage nor duration are
+   * omitted, so old volumes simply show no per-turn metrics.
+   */
+  async listTurnUsages(
+    sessionId: string,
+  ): Promise<Array<{ turnId: number; usage?: TurnUsage; durationMs?: number }>> {
+    const rows = await this.db("turns").where("session_id", sessionId).orderBy("id");
+    // Fallback source: usage embedded in the stored `turn.finished` event
+    // payloads (pre-column sessions and the model-provider fallback path,
+    // which never settles turn rows).
+    const events = await this.listEvents(sessionId);
+    const eventUsage = new Map<number, TurnUsage>();
+    for (const ev of events) {
+      if (ev.type !== "turn.finished") continue;
+      // Event payloads are stored double-encoded (addEvent receives the
+      // JSON string of the event data and stringifies it again), so the
+      // parsed row payload may itself be a JSON string — unwrap it.
+      let payloadObj: unknown = ev.payload;
+      if (typeof payloadObj === "string") {
+        try {
+          payloadObj = JSON.parse(payloadObj);
+        } catch {
+          continue;
+        }
+      }
+      const u = (payloadObj as { usage?: unknown }).usage;
+      if (u === null || typeof u !== "object" || Array.isArray(u)) continue;
+      const rec = u as Record<string, unknown>;
+      const normalized: TurnUsage = {};
+      let has = false;
+      for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"] as const) {
+        const n = rec[key];
+        if (typeof n === "number" && Number.isFinite(n)) {
+          normalized[key] = n;
+          has = true;
+        }
+      }
+      if (has) eventUsage.set(ev.turn_id, normalized);
+    }
+    const out: Array<{ turnId: number; usage?: TurnUsage; durationMs?: number }> = [];
+    for (const row of rows) {
+      const colUsage: TurnUsage = {};
+      let hasCol = false;
+      for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"] as const) {
+        const n = row[key];
+        if (typeof n === "number" && Number.isFinite(n)) {
+          colUsage[key] = n;
+          hasCol = true;
+        }
+      }
+      const usage = hasCol ? colUsage : eventUsage.get(row.id);
+      const entry: { turnId: number; usage?: TurnUsage; durationMs?: number } = {
+        turnId: row.id,
+      };
+      if (usage !== undefined) entry.usage = usage;
+      if (typeof row.duration_ms === "number") entry.durationMs = row.duration_ms;
+      if (entry.usage !== undefined || entry.durationMs !== undefined) out.push(entry);
+    }
+    return out;
   }
 
   close(): void {
