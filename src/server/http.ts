@@ -40,7 +40,7 @@ export interface StoreBoundary {
   listEvents?(sessionId: string): unknown[];
   getTranscript?(
     sessionId: string,
-    opts?: { afterSeq?: number; limit?: number },
+    opts?: { afterSeq?: number; limit?: number; withTokens?: boolean },
   ): Array<ChatCompletionMessageParam & { seq: number; turnId: number | null; ts: number }>;
   appendMessages?(
     sessionId: string,
@@ -48,7 +48,11 @@ export interface StoreBoundary {
     turnId?: number | null,
   ): unknown[];
   /** Settle a turn row (status + finished_at + duration). */
-  finishTurn?(sessionId: string, turnId: number | null, status?: string): unknown;
+  finishTurn?(sessionId: string, turnId: number | null, status?: string, usage?: unknown): unknown;
+  /** Per-turn metrics for the transcript dump (§R1.3). */
+  listTurnUsages?(
+    sessionId: string,
+  ): Promise<Array<{ turnId: number; usage?: unknown; durationMs?: number }>>;
 }
 
 /** Handle returned by `orchestrator.runTurn` (see SessionOrchestrator). */
@@ -167,7 +171,45 @@ function toWireMessage(m: unknown): Record<string, unknown> {
   }
   if (row.tool_call_id !== undefined) out.toolCallId = row.tool_call_id;
   if (row.tool_calls !== undefined) out.toolCalls = row.tool_calls;
+  if (row.tokens !== undefined) out.tokens = row.tokens;
   return out;
+}
+
+/** Stored usage columns on a turn row (numeric and finite), or undefined. */
+function turnUsageFromRow(row: Record<string, unknown>): Record<string, number> | undefined {
+  const usage: Record<string, number> = {};
+  let has = false;
+  for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"] as const) {
+    const n = row[key];
+    if (typeof n === "number" && Number.isFinite(n)) {
+      usage[key] = n;
+      has = true;
+    }
+  }
+  return has ? usage : undefined;
+}
+
+/** Usage embedded in a stored `turn.finished` event payload (recovery fallback). */
+function turnUsageFromEvents(events: unknown[]): Record<string, number> | undefined {
+  for (const raw of events) {
+    const ev = raw as { type?: string; data?: unknown };
+    if (ev.type !== "turn.finished") continue;
+    const data = ev.data as { usage?: unknown } | undefined;
+    const u = data?.usage;
+    if (u === null || typeof u !== "object" || Array.isArray(u)) continue;
+    const rec = u as Record<string, unknown>;
+    const usage: Record<string, number> = {};
+    let has = false;
+    for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"] as const) {
+      const n = rec[key];
+      if (typeof n === "number" && Number.isFinite(n)) {
+        usage[key] = n;
+        has = true;
+      }
+    }
+    if (has) return usage;
+  }
+  return undefined;
 }
 
 /**
@@ -365,9 +407,29 @@ export function createHttpServer(deps: HttpDeps): Server {
                 ? { afterSeq: afterSeq }
                 : {}),
               ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
+              withTokens: true,
             })
           ).map(toWireMessage);
-          sendJson(res, 200, { session, messages });
+          // Per-turn metrics (usage/duration) ride alongside the dump so a
+          // client can rebuild per-turn summaries without replaying events.
+          let turns: unknown[] = [];
+          if (typeof store!.listTurnUsages === "function") {
+            const metrics = ((await store!.listTurnUsages(id)) ?? []) as Array<{
+              turnId: number;
+              usage?: unknown;
+              durationMs?: number;
+            }>;
+            turns = metrics.map((m) => ({
+              turnId: m.turnId,
+              ...(m.usage !== undefined ? { usage: m.usage } : {}),
+              ...(m.durationMs !== undefined ? { durationMs: m.durationMs } : {}),
+            }));
+          }
+          sendJson(res, 200, {
+            session,
+            messages,
+            ...(turns.length > 0 ? { turns } : {}),
+          });
           return;
         }
         // Store-less fallback (test mode): documented minimal response — an
@@ -420,6 +482,7 @@ export function createHttpServer(deps: HttpDeps): Server {
               events.push({ id: ev.seq, type: ev.type, version: ev.version, ts: ev.ts, data });
             }
           }
+          const usage = turnUsageFromRow(row) ?? turnUsageFromEvents(events);
           sendJson(res, 200, {
             turn: {
               id: turnId,
@@ -430,6 +493,7 @@ export function createHttpServer(deps: HttpDeps): Server {
               created_at: row.created_at,
               finished_at: row.finished_at ?? null,
               duration_ms: row.duration_ms ?? null,
+              ...(usage !== undefined ? { usage } : {}),
               events,
             },
           });
