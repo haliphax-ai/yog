@@ -6,6 +6,7 @@
 .harness/
 /assets
 /model
+/workspace
 Dockerfile.local
 docker-compose.override.yml
 node_modules/
