@@ -5,6 +5,9 @@
  *
  *   src/index.ts      CLI entry — composition root; may import anything under src/
  *   src/register.ts   wiring manifest — composes tools + fs domains only
+ *   src/config.ts     runtime configuration — zod schema + file loader;
+ *                     loaded only at composition (index.ts, server/serve.ts);
+ *                     every other layer receives plain values via injection
  *   src/turn.ts       orchestration — knows the ToolRegistry, never the VFS/entry
  *   src/turn/sink.ts  transport-agnostic TurnEvent envelope + sink impls
  *   src/mount.ts      pure FUSE bridge — no internal dependencies
@@ -151,6 +154,27 @@ module.exports = {
       severity: "error",
       from: { path: "^src/worker/" },
       to: { path: "^src/(vfs/|toolkit/|state/|turn/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)" },
+    },
+
+    // The config module is a leaf: pure schema + file loader, no domain
+    // imports (it reaches the filesystem only through the host proxy, like
+    // every other leaf).
+    {
+      name: "config-leaf",
+      severity: "error",
+      from: { path: "^src/config\\.ts$" },
+      to: { path: "^src/(vfs/|toolkit/|worker/|state/|server/|turn/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)" },
+    },
+
+    // Configuration is loaded once at the composition root (the CLI entry and
+    // the server domain) and handed down as plain values. No other layer may
+    // import the config module — consumers receive injected config, so layers
+    // stay testable without the loader or its file path in play.
+    {
+      name: "config-only-at-composition",
+      severity: "error",
+      from: { path: "^src/(?!index\\.ts$|server/)" },
+      to: { path: "^src/config\\.ts$" },
     },
 
     // Domain encapsulation: no module reaches into another domain's internals.

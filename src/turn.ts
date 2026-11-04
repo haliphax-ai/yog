@@ -107,6 +107,13 @@ export interface TurnOptions {
    * were stubbed so it can persist the healed batch.
    */
   onHeal?: (stubbedToolCallIds: string[]) => void;
+  /**
+   * Tool-call rounds allowed in one turn before the engine stops it with
+   * `turn.finished { stopReason: "max_rounds" }` (default: 200). The cap
+   * bounds a misbehaving model's tool loop; the transcript is healed exactly
+   * like an unwind so the next turn hydrates a valid conversation.
+   */
+  maxRounds?: number;
 }
 
 /**
@@ -155,7 +162,8 @@ export class TurnEngine {
       checkAbort();
 
       // Bound the tool-call loop so a misbehaving model cannot spin forever.
-      for (let round = 0; round < 16; round++) {
+      const maxRounds = opts.maxRounds ?? 200;
+      for (let round = 0; round < maxRounds; round++) {
         const stream = await client.chat.completions.create({
           model: modelId,
           messages,
@@ -312,6 +320,17 @@ export class TurnEngine {
           });
         }
       }
+      // Round cap reached (clean exhaustion): every executed round's
+      // assistant rows and tool results are already in `messages`, so the
+      // transcript stays hydratable. Emit the terminal event explicitly —
+      // falling off the loop silently would end the stream without any
+      // terminal state, leaving clients with a bare stream close and no
+      // definite stop reason.
+      await emit("turn.finished", {
+        turnId,
+        durationMs: Date.now() - turnStartedAt,
+        stopReason: "max_rounds",
+      });
     } catch (err) {
       // Heal first, unconditionally (any unwind mid-tool-loop): every
       // announced tool call without a result gets a stub `tool` message, so

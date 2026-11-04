@@ -289,6 +289,72 @@ describe("TurnEngine failure handling", () => {
   });
 });
 
+describe("TurnEngine maxRounds cap", () => {
+  /** Endless tool-calling model: every round calls `echo`, never finishes. */
+  function toolLoopClient(): OpenAI {
+    return {
+      chat: {
+        completions: {
+          create: async () =>
+            (async function* () {
+              yield {
+                choices: [
+                  {
+                    delta: {
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: "call_loop",
+                          function: { name: "echo", arguments: '{"text":"hi"}' },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              };
+            })(),
+        },
+      },
+    } as unknown as OpenAI;
+  }
+
+  it("emits turn.finished with stopReason max_rounds when the cap is exhausted", async () => {
+    const sink = new RecordingSink();
+    const messages = userMessages();
+
+    await new TurnEngine(sink).run(toolLoopClient(), "test-model", messages, registry, {
+      maxRounds: 3,
+    });
+
+    const events = sink.events;
+    expect(events[0]!.type).toBe("turn.started");
+    // Three tool rounds execute (call+result each), then the terminal event.
+    expect(events.filter((e) => e.type === "tool.call")).toHaveLength(3);
+    expect(events.filter((e) => e.type === "tool.result")).toHaveLength(3);
+    const last = events.at(-1)!;
+    expect(last.type).toBe("turn.finished");
+    if (last.type !== "turn.finished") throw new Error("expected turn.finished");
+    expect(last.data.stopReason).toBe("max_rounds");
+    // The transcript keeps every executed round (hydratable for the next turn).
+    const toolRows = messages.filter((m) => (m as { role?: string }).role === "tool");
+    expect(toolRows).toHaveLength(3);
+  });
+
+  it("emits turn.finished without a stopReason on natural completion", async () => {
+    const sink = new RecordingSink();
+    await new TurnEngine(sink).run(
+      fakeClient(scriptRounds),
+      "test-model",
+      userMessages(),
+      registry,
+    );
+    const finished = sink.events.find((e) => e.type === "turn.finished");
+    expect(finished).toBeDefined();
+    if (finished?.type !== "turn.finished") throw new Error("expected turn.finished");
+    expect(finished.data.stopReason).toBeUndefined();
+  });
+});
+
 describe("StdoutSink output parity", () => {
   it("writes byte-identical stdout text: deltas concatenated, one trailing newline", async () => {
     const out: string[] = [];

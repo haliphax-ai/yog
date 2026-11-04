@@ -370,18 +370,28 @@ describe("conformance: error-code mapping", () => {
     expect((await json(res)).error.code).toBe("invalid_request");
   });
 
-  it("missing bearer token → 401 unauthorized when YOG_API_TOKEN is set", async () => {
-    process.env.YOG_API_TOKEN = "conformance-secret";
+  it("missing bearer token → 401 unauthorized when apiToken is configured", async () => {
+    // The token is injected per daemon (config `apiToken`), so this boots its
+    // own daemon with the gate on instead of touching process env.
+    const authedStore = await SessionStore.open(join(tmpdir(), `yog-conf-auth-${Date.now()}.db`));
+    const d = await createDaemon({
+      ...optsWith(fakeModel("happy"), authedStore),
+      deps: {
+        ...optsWith(fakeModel("happy"), authedStore).deps,
+        apiToken: "conformance-secret",
+      },
+    });
     try {
-      const res = await fetch(`${base}/v1/capabilities`);
+      const res = await fetch(`${d.url}/v1/capabilities`);
       expect(res.status).toBe(401);
       expect((await json(res)).error.code).toBe("unauthorized");
-      const ok = await fetch(`${base}/v1/capabilities`, {
+      const ok = await fetch(`${d.url}/v1/capabilities`, {
         headers: { authorization: "Bearer conformance-secret" },
       });
       expect(ok.status).toBe(200);
     } finally {
-      delete process.env.YOG_API_TOKEN;
+      await d.close();
+      authedStore.close();
     }
   });
 

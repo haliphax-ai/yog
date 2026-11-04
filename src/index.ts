@@ -1,7 +1,7 @@
 /**
  * fuse-overlay-harness — agent harness with a virtual FUSE filesystem.
  *
- * Usage: yog serve [--host <addr>] [--port <n>]
+ * Usage: yog serve [--host <addr>] [--port <n>] [--config <path>]
  *
  * `serve` starts the long-lived HTTP/SSE daemon (see server/serve.ts),
  * which owns the in-process run orchestration (OpenAI client, state db,
@@ -13,7 +13,7 @@ import { parseServeArgs } from "./cli.ts";
 import { createDaemon } from "./server/index.ts";
 import { logger } from "./log.ts";
 
-const USAGE = "usage: yog serve [--host <addr>] [--port <n>]";
+const USAGE = "usage: yog serve [--host <addr>] [--port <n>] [--config <path>]";
 
 /**
  * Start the long-lived HTTP/SSE daemon; resolves only on shutdown.
@@ -31,6 +31,7 @@ async function serve(argv: readonly string[]): Promise<void> {
   const daemon = await createDaemon({
     ...(parsed.host !== undefined ? { host: parsed.host } : {}),
     ...(parsed.port !== undefined ? { port: parsed.port } : {}),
+    ...(parsed.config !== undefined ? { configPath: parsed.config } : {}),
   });
   logger.info(`[yog] serve listening at ${daemon.url}`);
 }

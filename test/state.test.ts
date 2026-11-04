@@ -129,38 +129,32 @@ describe("AgentFSState", () => {
     expect(stateDbPath("alpha", "/srv/yog")).not.toBe(stateDbPath("omega", "/srv/yog"));
   });
 
-  it("opens distinct databases per agent id", async () => {
-    const prevRoot = process.env["YOG_STATE_ROOT"];
-    process.env["YOG_STATE_ROOT"] = await tempDir();
-    try {
-      const a = await AgentFSState.open({ agentId: "alpha" });
-      const b = await AgentFSState.open({ agentId: "omega" });
-      expect(b.path).not.toBe(a.path);
-      await a.recordToolCall({
-        name: "bash",
-        parameters: { script: "echo a" },
-        result: { stdout: "a\n" },
-        startedAt: 1_700_000_000_000,
-        completedAt: 1_700_000_000_100,
-        durationMs: 100,
-        sessionId: newSessionId(),
-      });
-      const aRows = (await a
-        .getDatabase()
-        .prepare("SELECT id FROM tool_calls ORDER BY id")
-        .all()) as unknown[];
-      const bRows = (await b
-        .getDatabase()
-        .prepare("SELECT id FROM tool_calls ORDER BY id")
-        .all()) as unknown[];
-      expect(aRows).toHaveLength(1);
-      expect(bRows).toHaveLength(0);
-      await a.close();
-      await b.close();
-    } finally {
-      if (prevRoot === undefined) delete process.env["YOG_STATE_ROOT"];
-      else process.env["YOG_STATE_ROOT"] = prevRoot;
-    }
+  it("opens distinct databases per agent id under an injected root", async () => {
+    const root = await tempDir();
+    const a = await AgentFSState.open({ agentId: "alpha", root });
+    const b = await AgentFSState.open({ agentId: "omega", root });
+    expect(b.path).not.toBe(a.path);
+    await a.recordToolCall({
+      name: "bash",
+      parameters: { script: "echo a" },
+      result: { stdout: "a\n" },
+      startedAt: 1_700_000_000_000,
+      completedAt: 1_700_000_000_100,
+      durationMs: 100,
+      sessionId: newSessionId(),
+    });
+    const aRows = (await a
+      .getDatabase()
+      .prepare("SELECT id FROM tool_calls ORDER BY id")
+      .all()) as unknown[];
+    const bRows = (await b
+      .getDatabase()
+      .prepare("SELECT id FROM tool_calls ORDER BY id")
+      .all()) as unknown[];
+    expect(aRows).toHaveLength(1);
+    expect(bRows).toHaveLength(0);
+    await a.close();
+    await b.close();
   });
 
   it("persists and reloads the shell snapshot across opens", async () => {

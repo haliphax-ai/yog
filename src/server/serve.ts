@@ -10,7 +10,7 @@ import { type SseEnvelope } from "./sse.ts";
 import { SessionStore } from "./store/sessions.ts";
 import { WorkerPool } from "./workpool.ts";
 import { SessionOrchestrator } from "./orchestrator.ts";
-import { AgentFSState, DEFAULT_AGENT_ID, stateRoot } from "../state/index.ts";
+import { AgentFSState, DEFAULT_AGENT_ID } from "../state/index.ts";
 import { mountSys, unmountSys } from "../mount.ts";
 import { TurnEngine, type TurnOptions } from "../turn.ts";
 import type { TurnSink, TurnEvent } from "../turn/sink.ts";
@@ -21,13 +21,24 @@ import {
   setBashExecutor,
   setShellStateProvider,
 } from "../toolkit/index.ts";
+import { onAgentSpawn } from "../worker/index.ts";
 import { mkdir } from "../host.ts";
 import { logger } from "../log.ts";
+import { resolveConfig, type YogConfig, type PartialYogConfig } from "../config.ts";
+import { setDescriptorOwnership } from "../vfs/index.ts";
 
 /** Options accepted by {@link createDaemon}. */
 export interface DaemonOptions {
   port?: number;
   host?: string;
+  /**
+   * Configuration injection: a partial config that wins over the config file
+   * (tests, programmatic callers). Values here are merged over the resolved
+   * file/defaults before any boundary is built.
+   */
+  config?: PartialYogConfig;
+  /** Config file path override (default: /var/lib/yog/config.json). */
+  configPath?: string;
   /** Injected boundaries (store, orchestrator, model provider, ...). */
   deps?: HttpDeps;
 }
@@ -39,16 +50,12 @@ export interface Daemon {
   close(): Promise<void>;
 }
 
-/** Model id advertised by capabilities and used for turns (env → fallback). */
-function resolveModelId(): string {
-  return process.env.YOG_MODEL ?? process.env.OPENAI_MODEL ?? "gpt-4o-mini";
-}
-
-/** OpenAI client from env (proxy/key overrides; SDK defaults otherwise). */
-function openaiClient(): OpenAI {
+/** OpenAI client built from the injected configuration (proxy/key overrides;
+ * SDK defaults when unset). */
+function openaiClient(config: YogConfig): OpenAI {
   return new OpenAI({
-    ...(process.env["OPENAI_BASE_URL"] ? { baseURL: process.env["OPENAI_BASE_URL"] } : {}),
-    ...(process.env["OPENAI_API_KEY"] ? { apiKey: process.env["OPENAI_API_KEY"] } : {}),
+    ...(config.providerBaseUrl ? { baseURL: config.providerBaseUrl } : {}),
+    ...(config.providerApiKey ? { apiKey: config.providerApiKey } : {}),
   });
 }
 
@@ -59,19 +66,22 @@ function openaiClient(): OpenAI {
  *
  * When `opts.deps` is supplied (tests), those boundaries are used verbatim —
  * no store, pool, or mount is created. Otherwise `createDaemon` composes the
- * daemon itself from options → env → defaults.
+ * daemon itself from options → config file → zod defaults.
  */
 export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
-  const host = opts.host ?? process.env.YOG_HOST ?? "127.0.0.1";
-  const envPort = process.env.YOG_PORT ? Number.parseInt(process.env.YOG_PORT, 10) : Number.NaN;
-  const port = opts.port ?? (Number.isFinite(envPort) && envPort > 0 ? envPort : 8111);
+  const config: YogConfig = await resolveConfig({
+    ...(opts.config !== undefined ? { config: opts.config } : {}),
+    ...(opts.configPath !== undefined ? { configPath: opts.configPath } : {}),
+  });
+  const host = opts.host ?? config.host;
+  const port = opts.port ?? config.port;
 
   if (!opts.deps) {
     // --- persistence (best effort: continue without an audit trail) ---
     let store: SessionStore | undefined;
     try {
-      await mkdir(stateRoot(), { recursive: true });
-      store = await SessionStore.open(join(stateRoot(), "sessions.db"));
+      await mkdir(config.stateRoot, { recursive: true });
+      store = await SessionStore.open(join(config.stateRoot, "sessions.db"));
     } catch (err) {
       logger.warn(
         `[yog] warning: session store unavailable (${(err as Error).message}); continuing`,
@@ -79,9 +89,18 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     }
 
     // --- agent state (best effort, mirrors the `run` path) ---
+    // Descriptor ownership follows the agent split (config agentUid/Gid);
+    // unset (local dev) keeps the current process ids.
+    setDescriptorOwnership(
+      config.agentUid ?? process.getuid?.() ?? 0,
+      config.agentGid ?? process.getgid?.() ?? 0,
+    );
     let state: AgentFSState | undefined;
     try {
-      state = await AgentFSState.open({ agentId: DEFAULT_AGENT_ID });
+      state = await AgentFSState.open({
+        agentId: DEFAULT_AGENT_ID,
+        ...(config.statePath !== undefined ? { path: config.statePath } : {}),
+      });
     } catch (err) {
       logger.warn(`[yog] warning: agent state unavailable (${(err as Error).message}); continuing`);
     }
@@ -89,7 +108,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     // --- worker pool (production caller for the bash tool) ---
     let pool: WorkerPool | undefined;
     try {
-      pool = new WorkerPool();
+      pool = new WorkerPool(config.workers !== undefined ? { size: config.workers } : undefined);
     } catch (err) {
       logger.warn(`[yog] warning: worker pool unavailable (${(err as Error).message}); continuing`);
     }
@@ -103,7 +122,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       setBashExecutor(async (script, opts) => {
         try {
           const resp = await p.run(opts?.scriptId ?? "daemon", script, {
-            ...(opts?.stateDir !== undefined ? { stateDir: opts.stateDir } : {}),
+            stateDir: opts?.stateDir ?? config.agentStateDir,
             ...(opts?.restore !== undefined ? { restore: opts.restore } : {}),
           });
           if (resp.ok) {
@@ -145,7 +164,11 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     // --- best-effort FUSE mount (skip gracefully when unavailable) ---
     let fuse: Fuse | undefined;
     try {
-      fuse = await mountSys(descriptors.buildOps(), process.env.YOG_MOUNT ?? "/yog");
+      fuse = await mountSys(
+        descriptors.buildOps(),
+        config.mountPoint,
+        config.allowOther ? { allowOther: true } : {},
+      );
     } catch (err) {
       logger.warn(`[yog] warning: FUSE mount failed (${(err as Error).message}); continuing`);
     }
@@ -154,13 +177,20 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     // subscribes per session and frames them as SSE ---
     const bus = new EventEmitter();
     bus.setMaxListeners(0);
-    const modelId = resolveModelId();
+    const modelId = config.model;
 
     // --- turn abort plumbing: the abort endpoint kills the session's
     // in-flight bash script (script key = session id), which snapshots the
     // persistent shell state before the child dies ---
     setBashAbort(async (sessionId) => (pool ? pool.abortScript(sessionId) : false));
 
+    // --- agent-user split (container): workers spawn with the configured
+    // agent uid/gid/home; unset uid/gid (local dev) spawns unchanged ---
+    onAgentSpawn({
+      ...(config.agentUid !== undefined ? { uid: config.agentUid } : {}),
+      ...(config.agentGid !== undefined ? { gid: config.agentGid } : {}),
+      ...(config.agentHome !== undefined ? { home: config.agentHome } : {}),
+    });
     /**
      * Turn entry point injected into the orchestrator. Builds the OpenAI
      * client + TurnEngine and routes its sink so every event is BOTH
@@ -172,7 +202,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       req: Record<string, unknown>,
       ctx: { signal?: AbortSignal } = {},
     ): Promise<{ turnId: string | null }> => {
-      const client = openaiClient();
+      const client = openaiClient(config);
       const prompt = typeof req.prompt === "string" ? req.prompt : "";
       const model = typeof req.model === "string" ? req.model : modelId;
 
@@ -251,6 +281,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         isAborted: () => ctx.signal?.aborted === true,
         abortReason: "turn aborted by operator",
         onHeal: (ids) => void healedIds.push(...ids),
+        maxRounds: config.maxRoundsPerTurn,
       };
       try {
         await new TurnEngine(sink).run(client, model, messages, tools, turnOpts);
@@ -301,6 +332,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         tools: ["bash"],
         features: ["sse", "transcript", "abort"],
       },
+      abortGraceMs: config.abortGraceMs,
       ...(store ? { store } : {}),
       ...(orchestrator ? { orchestrator } : {}),
       bus,

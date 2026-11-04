@@ -9,11 +9,28 @@ set -e
 # inherited by the worker spawns.
 export HOME=/home/yog
 
-# Server bind: inside the container the daemon must be reachable from the
-# host via the published port, so it listens on all interfaces. YOG_HOST is
-# exported only as a default — an explicit `-e YOG_HOST=...` on `docker run`
-# overrides it (docker -e wins over ENV in the image).
-export YOG_HOST="${YOG_HOST:-0.0.0.0}"
+# Runtime configuration lives at /var/lib/yog/config.json (mounted by the
+# compose manifest). When no config file was mounted, Docker leaves an empty
+# directory there — write container defaults so a config-less container still
+# binds 0.0.0.0, runs the agent split, and allows other users on the mount.
+# A real config file always wins; adjust it instead of these defaults.
+if [ -d /var/lib/yog/config.json ]; then
+  rmdir /var/lib/yog/config.json 2>/dev/null || true
+  cat > /var/lib/yog/config.json <<'EOF'
+{
+  "host": "0.0.0.0",
+  "port": 8111,
+  "mountPoint": "/yog",
+  "allowOther": true,
+  "stateRoot": "/var/lib/yog",
+  "agentUid": 1100,
+  "agentGid": 1100,
+  "agentHome": "/home/agent",
+  "agentStateDir": "/home/agent/.harness"
+}
+EOF
+  chown yog:yog /var/lib/yog/config.json
+fi
 
 # The state volume (/var/lib/yog) may have been created root-owned by Docker
 # (fresh named volume) — ensure the daemon can write it no matter its origin.

@@ -29,9 +29,9 @@ export async function mountSys(
     ...extraOpts,
   };
   // In the container (daemon mounts on behalf of the agent) other users must
-  // reach the mount; enabled via the YOG_ALLOW_OTHER env (the image writes
-  // user_allow_other into /etc/fuse.conf).
-  if (process.env["YOG_ALLOW_OTHER"] === "1") {
+  // reach the mount; enabled via the `allowOther` mount option (the image
+  // writes user_allow_other into /etc/fuse.conf).
+  if (extraOpts["allowOther"] === true) {
     mountOpts["allowOther"] = true;
   }
 

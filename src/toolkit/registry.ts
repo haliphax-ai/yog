@@ -40,6 +40,8 @@ export interface ToolExecuteContext {
   signal?: AbortSignal;
   /** Owning session id — forwarded to the tool as the abort key. */
   sessionId?: string;
+  /** Persistent-state directory handed to the tool (bash shell snapshots). */
+  stateDir?: string;
   /** Fired just before the tool runs. */
   onStart?: (call: ToolCall) => void;
   /** Fired when the tool settles (result or throw). */
@@ -126,6 +128,7 @@ export class ToolRegistry {
     const call: ToolCall = { name, args: parsed as Record<string, unknown> };
     const runP = tool.run(result.data as Record<string, unknown>, {
       ...(ctx.sessionId !== undefined ? { sessionId: ctx.sessionId } : {}),
+      ...(ctx.stateDir !== undefined ? { stateDir: ctx.stateDir } : {}),
     });
     if (ctx.signal) {
       // Turn abort mid-call: reject so the turn engine's unwind/heal path

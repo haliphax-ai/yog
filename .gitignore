@@ -1,6 +1,7 @@
 *.log
 *.mmd
 .agentfs/
+config.json
 .env
 .env.local
 .harness/

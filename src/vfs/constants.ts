@@ -30,8 +30,25 @@ export const FILE_MODE = 0o100644;
  * this falls back to the current process ids. Descriptors may declare their
  * own uid/gid; the registry defaults to these.
  */
-export const AGENT_UID = Number(process.env["YOG_AGENT_UID"] ?? process.getuid?.() ?? 0);
-export const AGENT_GID = Number(process.env["YOG_AGENT_GID"] ?? process.getgid?.() ?? 0);
+/**
+ * Ownership defaults for served descriptors. The composition root injects
+ * the agent's uid/gid from the runtime configuration (see `config.ts`);
+ * when unset the current process ids apply (unprivileged local runs).
+ * Descriptors may declare their own uid/gid; the registry defaults to these.
+ */
+let agentUid = process.getuid?.() ?? 0;
+let agentGid = process.getgid?.() ?? 0;
+
+/** Inject descriptor-ownership defaults (owned by the composition root). */
+export function setDescriptorOwnership(uid: number, gid: number): void {
+  agentUid = uid;
+  agentGid = gid;
+}
+
+/** Current descriptor-ownership defaults. */
+export function getAgentOwnership(): { uid: number; gid: number } {
+  return { uid: agentUid, gid: agentGid };
+}
 
 /** Open access mode classification. */
 export type WriteMode = "read" | "append" | "replace";

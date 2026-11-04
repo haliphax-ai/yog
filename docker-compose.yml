@@ -13,10 +13,12 @@ services:
       - SETGID
     volumes:
       - ./projects:/home/agent/projects
-    env_file: .env
-    environment:
-      YOG_HOST: 0.0.0.0
-      YOG_PORT: 8111
+      # Runtime configuration (optional). When the host file does not exist,
+      # Compose creates an empty directory at the mountpoint, which the daemon
+      # treats as "no config provided" (zod defaults apply). Create
+      # ./config.json on the host to configure the daemon (it is untracked —
+      # see the README's Configuration section).
+      - ./config.json:/var/lib/yog/config.json
     ports:
       - 127.0.0.1:8111:8111
 
