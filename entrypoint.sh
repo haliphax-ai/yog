@@ -11,26 +11,12 @@ export HOME=/home/yog
 
 # Runtime configuration lives at /var/lib/yog/config.json (mounted read-only
 # by the compose manifest) — it is the host operator's file: never chowned,
-# never written. When no config file was mounted, Docker leaves an empty
-# directory there; replace that stub with container defaults (bind 0.0.0.0,
-# agent split, allowOther) so a config-less container still works. A real
-# mounted config is used as-is; the daemon errors if it cannot read it.
-if [ -d /var/lib/yog/config.json ]; then
-  rmdir /var/lib/yog/config.json 2>/dev/null || true
-  cat > /var/lib/yog/config.json <<'EOF'
-{
-  "host": "0.0.0.0",
-  "port": 8111,
-  "mountPoint": "/yog",
-  "allowOther": true,
-  "stateRoot": "/var/lib/yog",
-  "agentUid": 1100,
-  "agentGid": 1100,
-  "agentHome": "/home/agent",
-  "agentStateDir": "/home/agent/.harness"
-}
-EOF
-fi
+# never written. A missing, empty, or directory-stub file means "no config":
+# the daemon loads pure defaults, which already carry the documented
+# agent/daemon split (agent uid/gid 1100, agent HOME /home/agent) —
+# model-executed code never runs as the daemon. The bind address is passed
+# on the command line below so the published port is reachable from the host
+# regardless of what (if anything) is in the config.
 
 # The state volume (/var/lib/yog) may have been created root-owned by Docker
 # (fresh named volume) — ensure the daemon can write it no matter its origin,
@@ -38,11 +24,12 @@ fi
 mkdir -p /var/lib/yog/agentfs
 chown -R yog:yog /var/lib/yog/agentfs
 
-# Default command: start the HTTP/SSE daemon (`yog serve`). Explicit args
-# are passed through, so the launcher can run the one-shot client in the
-# same image (`entrypoint.sh run <model> "<prompt>"`).
+# Default command: start the HTTP/SSE daemon (`yog serve`), bound to all
+# interfaces so the published port is reachable from the host. Explicit args
+# are passed through, so the launcher can run other commands in the same
+# image.
 if [ "$#" -eq 0 ]; then
-  set -- serve
+  set -- serve --host 0.0.0.0
 fi
 
 exec /usr/bin/setpriv \

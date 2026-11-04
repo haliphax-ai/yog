@@ -160,9 +160,9 @@ injection (`createDaemon({ config })`, used by tests).
 | `mountPoint` | string | `/yog` | FUSE mountpoint |
 | `allowOther` | bool | `false` | allow other users to reach the mount (container: agent ≠ daemon user) |
 | `maxRoundsPerTurn` | int | `200` | tool-call rounds allowed per turn before the engine stops it with `turn.finished { stopReason: "max_rounds" }` |
-| `agentUid` / `agentGid` | int? | *(unset)* | daemon/agent split: spawn bash workers as this uid/gid (unset = no drop, local dev) |
-| `agentHome` | string | `/home/agent` | HOME for agent-spawned workers |
-| `agentStateDir` | string? | *(unset)* | persistent shell snapshot directory for the bash tool |
+| `agentUid` / `agentGid` | int | `1100` | daemon/agent split: spawn bash workers as this uid/gid (the documented scheme: the `yog` daemon is uid 900, agents start at 1100 — model-executed code never runs as the daemon). Equal to the current process = no drop. |
+| `agentHome` | string | `/home/agent` | HOME **and cwd** for agent-spawned workers |
+| `agentStateDir` | string? | *(unset → `<agentHome>/.harness`)* | persistent shell snapshot directory for the bash tool; relative values resolve against the agent's HOME (never the script's cwd, which changes with the script's own `cd`) |
 
 Example `config.json`:
 
@@ -189,12 +189,13 @@ testable without a config file on disk.
 
 Build the image and run the daemon through Docker Compose. The compose
 manifest starts the daemon container (tini init; entrypoint runs `yog
-serve`), mounts `./config.json` at `/var/lib/yog/config.json` (create the
-host file to configure the daemon; it is untracked), publishes port 8111
-to the host, and waits for `/v1/capabilities` to answer before accepting
-turns. When no config file exists on the host, the entrypoint writes
-container defaults (bind `0.0.0.0`, agent split, `allowOther`) at the
-mountpoint:
+serve --host 0.0.0.0`), mounts `./config.json` read-only at
+`/var/lib/yog/config.json` (create the host file to configure the daemon;
+it is untracked), publishes port 8111 to the host, and waits for
+`/v1/capabilities` to answer before accepting turns. When no config file
+exists on the host, Compose creates an empty directory at the mountpoint —
+the daemon treats it as "no config" and loads pure defaults (which include
+the documented agent split).
 
 ```sh
 docker compose up -d --build
@@ -345,10 +346,13 @@ a persistent shell **and the harness's descriptors**:
   script runs via `eval` inside a wrapper shell, giving it full bash syntax -
   pipelines, redirection, builtins, functions - and **persistent shell state**:
   cwd, exported variables, and shell functions carry over between calls.
-  The agent rc (`BASH_ENV`, falling back to `~/.bashrc`) is sourced before
-  each script as the home baseline, and the resulting state is snapshotted
-  (`export -p` + `declare -f` + `pwd -P`) into the configured state dir
-  (`agentStateDir`) after every call.
+  Each call starts in the agent's HOME (`agentHome`), re-applies the prior
+  snapshot (the prior cwd is `cd`ed into before the script runs), and the
+  resulting state is snapshotted (`export -p` + `declare -f` + `pwd -P`)
+  into the configured state dir (`agentStateDir`, resolved against the
+  agent's HOME — never the script's own cwd) after every call. The agent rc
+  (`BASH_ENV`, falling back to `~/.bashrc`) is sourced before each script
+  as the home baseline.
 
   **Host env is hidden from the tool**: children are spawned with a minimal
   env - `HOME`, a fixed `PATH`, `TERM`, `TZ`, plus `BASH_ENV` and

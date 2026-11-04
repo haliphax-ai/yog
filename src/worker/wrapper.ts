@@ -69,6 +69,19 @@ eval "$1"
 `;
 
 /**
+ * Resolve the shell-state directory to a fixed absolute path under the
+ * agent's HOME. Relative values (e.g. the bare `.harness` default) must not
+ * ride on the wrapper's cwd: the capture trap runs at the shell's *final*
+ * cwd — after the script's own `cd` — so a relative dir would scatter the
+ * snapshot across every directory the script visited. Absolute values pass
+ * through untouched.
+ */
+export function resolveStateDir(stateDir: string | undefined, agentHome: string): string {
+  const raw = stateDir ?? ".harness";
+  return raw.startsWith("/") ? raw : `${agentHome}/${raw}`;
+}
+
+/**
  * Build the minimal environment for a bash child: just the plumbing the shell
  * needs to boot (HOME, a fixed PATH, TERM, TZ) and our own HARNESS_* /
  * BASH_ENV pointers. Everything else the model sees comes from the agent's
@@ -88,7 +101,6 @@ export function buildToolEnv(stateDir?: string): Record<string, string> {
     const value = process.env[key];
     if (value) out[key] = value;
   }
-  const state = stateDir ?? process.env["HARNESS_STATE_DIR"];
-  if (state) out["HARNESS_STATE_DIR"] = state;
+  out["HARNESS_STATE_DIR"] = resolveStateDir(stateDir, process.env["HOME"] ?? "/root");
   return out;
 }
