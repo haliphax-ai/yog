@@ -170,6 +170,7 @@ export class TurnEngine {
       // some of them keeps the rest of the running total.
       let usage: TurnUsage | undefined;
       for (let round = 0; round < maxRounds; round++) {
+        let roundUsage: TurnUsage | undefined;
         const stream = await client.chat.completions.create({
           model: modelId,
           messages,
@@ -196,12 +197,18 @@ export class TurnEngine {
           }
           // Aggregate usage for this round onto the turn-wide running total.
           // Providers that don't support `include_usage` simply never send a
-          // `usage` field, so this stays undefined for them.
+          // `usage` field, so this stays undefined for them. The round-level
+          // copy drives per-tool-call attribution; it resets each round.
           if (chunk.usage) {
             usage = {
               prompt_tokens: chunk.usage.prompt_tokens ?? usage?.prompt_tokens,
               completion_tokens: chunk.usage.completion_tokens ?? usage?.completion_tokens,
               total_tokens: chunk.usage.total_tokens ?? usage?.total_tokens,
+            };
+            roundUsage = {
+              prompt_tokens: chunk.usage.prompt_tokens ?? roundUsage?.prompt_tokens,
+              completion_tokens: chunk.usage.completion_tokens ?? roundUsage?.completion_tokens,
+              total_tokens: chunk.usage.total_tokens ?? roundUsage?.total_tokens,
             };
           }
           const delta = chunk.choices[0]?.delta;
@@ -245,6 +252,18 @@ export class TurnEngine {
         }
 
         const ordered = [...toolCalls.entries()].sort(([a], [b]) => a - b);
+
+        // Attribute this round's completion tokens across its tool calls —
+        // only when the provider reported usage. Equal split, remainder to
+        // the first call, so the sum equals the round's reported completion.
+        // Prompt tokens stay turn-level and are not attributed per call.
+        let perCallTokens: number[] | undefined;
+        if (roundUsage?.completion_tokens !== undefined && ordered.length > 0) {
+          const total = roundUsage.completion_tokens;
+          const base = Math.floor(total / ordered.length);
+          const rem = total % ordered.length;
+          perCallTokens = ordered.map((_, idx) => base + (idx < rem ? 1 : 0));
+        }
 
         // Replay the assistant turn, then append one tool message per call.
         const assistantCallRow: AssistantToolCall[] = ordered.map(([i, tc]) => ({
@@ -309,12 +328,17 @@ export class TurnEngine {
 
           const toolError = result?.["error"] as string | undefined;
 
+          // Per-call completion-token attribution for this call (undefined
+          // when the provider sent no round usage).
+          const tokens = perCallTokens?.[i];
+
           await emit("tool.result", {
             id: tcId,
             name: tc.name,
             ok: result !== undefined && toolError === undefined,
             result,
             error: toolError ?? (result === undefined ? `unknown tool "${tc.name}"` : undefined),
+            ...(tokens !== undefined ? { tokens } : {}),
           });
           if (opts.recorder && opts.sessionId) {
             try {
@@ -342,6 +366,7 @@ export class TurnEngine {
             role: "tool",
             tool_call_id: tcId,
             content: payload,
+            ...(tokens !== undefined ? { tokens } : {}),
           });
         }
       }

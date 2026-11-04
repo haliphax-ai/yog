@@ -39,6 +39,8 @@ export type TurnEventDataMap = {
     ok: boolean;
     result?: unknown;
     error?: string;
+    /** Per-call completion-token attribution for this round (optional). */
+    tokens?: number;
   };
   /** Normal end of the turn. */
   "turn.finished": { turnId: string; durationMs: number; stopReason?: string; usage?: TurnUsage };
