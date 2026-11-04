@@ -12,6 +12,7 @@ import {
   type TurnEvent,
   type TurnEventType,
   type TurnSink,
+  type TurnUsage,
 } from "./turn/sink.ts";
 
 /** Tool calls currently executing per session (for the abort endpoint). */
@@ -163,11 +164,17 @@ export class TurnEngine {
 
       // Bound the tool-call loop so a misbehaving model cannot spin forever.
       const maxRounds = opts.maxRounds ?? 200;
+      // Accumulate token usage across all rounds: the final chunk of each
+      // round's stream carries the request's usage (when the provider supports
+      // `include_usage`); merge partial fields so a round that reports only
+      // some of them keeps the rest of the running total.
+      let usage: TurnUsage | undefined;
       for (let round = 0; round < maxRounds; round++) {
         const stream = await client.chat.completions.create({
           model: modelId,
           messages,
           tools: tools.definitions,
+          stream_options: { include_usage: true },
           stream: true,
           ...(opts.signal ? { signal: opts.signal } : {}),
         });
@@ -186,6 +193,16 @@ export class TurnEngine {
           if (opts.signal?.aborted === true || opts.isAborted?.() === true) {
             stream.controller.abort(new Error(opts.abortReason ?? "turn aborted"));
             throw abortErr();
+          }
+          // Aggregate usage for this round onto the turn-wide running total.
+          // Providers that don't support `include_usage` simply never send a
+          // `usage` field, so this stays undefined for them.
+          if (chunk.usage) {
+            usage = {
+              prompt_tokens: chunk.usage.prompt_tokens ?? usage?.prompt_tokens,
+              completion_tokens: chunk.usage.completion_tokens ?? usage?.completion_tokens,
+              total_tokens: chunk.usage.total_tokens ?? usage?.total_tokens,
+            };
           }
           const delta = chunk.choices[0]?.delta;
           if (!delta) continue;
@@ -222,6 +239,7 @@ export class TurnEngine {
           await emit("turn.finished", {
             turnId,
             durationMs: Date.now() - turnStartedAt,
+            ...(usage !== undefined ? { usage } : {}),
           });
           return;
         }
@@ -336,6 +354,7 @@ export class TurnEngine {
       await emit("turn.finished", {
         turnId,
         durationMs: Date.now() - turnStartedAt,
+        ...(usage !== undefined ? { usage } : {}),
         stopReason: "max_rounds",
       });
     } catch (err) {
