@@ -35,8 +35,6 @@ export const YogConfigSchema = z
     port,
     /** Bearer token for the contract; unset = auth disabled. */
     apiToken: z.string().min(1).optional(),
-    /** Grace window (ms) holding the SSE stream open for the terminal abort event. */
-    abortGraceMs: z.number().int().min(0).default(2000),
     /** Store queries slower than this (ms) are logged (log-only tripwire). */
     dbSlowMs: z.number().int().min(0).default(50),
     /** State root: `sessions.db` + `agentfs/<agentId>.db`. */
@@ -83,18 +81,33 @@ export type PartialYogConfig = z.input<typeof YogConfigSchema>;
  * Read a config file. Returns `undefined` when the path does not exist or is
  * a directory (Docker Compose creates an empty directory at the mountpoint
  * when the host file is absent — treat that as "no config provided").
- * Throws on unreadable regular files; parse/validation errors surface to the
- * caller (fail loudly).
+ * A present-but-unreadable file is an error (ENOACCESS/EACCES) — a mounted
+ * config the daemon cannot read must fail the startup loudly, not silently
+ * fall back to defaults. Parse/validation errors also surface to the caller.
  */
 export async function readConfigFile(path: string): Promise<PartialYogConfig | undefined> {
   let info;
   try {
     info = await stat(path);
-  } catch {
-    return undefined; // no file → defaults
+  } catch (err) {
+    // ENOENT (no file mounted → defaults); anything else (e.g. EACCES on a
+    // parent directory) is a real problem and must surface.
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code === "ENOENT") return undefined;
+    throw new Error(
+      `config file at ${path} is not accessible (${code ?? err}): ${(err as Error).message}`,
+    );
   }
   if (info.isDirectory()) return undefined;
-  const raw = await readFile(path, "utf8");
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    throw new Error(
+      `config file at ${path} cannot be read (${code ?? err}): ${(err as Error).message}`,
+    );
+  }
   return JSON.parse(raw) as PartialYogConfig;
 }
 

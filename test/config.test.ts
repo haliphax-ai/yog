@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
+import { chmod, mkdtemp, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -18,7 +18,6 @@ describe("YogConfigSchema", () => {
     expect(config.stateRoot).toBe("/var/lib/yog");
     expect(config.mountPoint).toBe("/yog");
     expect(config.maxRoundsPerTurn).toBe(200);
-    expect(config.abortGraceMs).toBe(2000);
     expect(config.dbSlowMs).toBe(50);
     expect(config.allowOther).toBe(false);
     expect(config.apiToken).toBeUndefined();
@@ -67,6 +66,20 @@ describe("readConfigFile", () => {
     const file = join(dir, "config.json");
     await writeFile(file, "{not json");
     await expect(readConfigFile(file)).rejects.toThrow();
+  });
+
+  it("throws when a present file is unreadable (mounted-but-inaccessible)", async () => {
+    // Tests may run as root, which bypasses DAC checks — skip when so.
+    if (process.getuid?.() === 0) return;
+    const dir = await mkdtemp(join(tmpdir(), "yog-config-"));
+    const file = join(dir, "config.json");
+    await writeFile(file, JSON.stringify({ port: 9001 }));
+    await chmod(file, 0o000);
+    try {
+      await expect(readConfigFile(file)).rejects.toThrow(/cannot be read/);
+    } finally {
+      await chmod(file, 0o644);
+    }
   });
 });
 

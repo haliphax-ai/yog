@@ -14,12 +14,17 @@ services:
       - SETGID
     volumes:
       - ./workspace:/home/agent/workspace
+      # Runtime configuration (optional, read-only — the daemon never writes
+      # or chowns it). When the host file does not exist, Compose creates an
+      # empty directory at the mountpoint; the entrypoint replaces that stub
+      # with container defaults. Create ./config.json on the host to
+      # configure the daemon (it is untracked — see the README's
+      # Configuration section).
       # Runtime configuration (optional). When the host file does not exist,
       # Compose creates an empty directory at the mountpoint, which the daemon
       # treats as "no config provided" (zod defaults apply). Create
       # ./config.json on the host to configure the daemon (it is untracked —
       # see the README's Configuration section).
-      - ./config.json:/var/lib/yog/config.json
     ports:
       - 127.0.0.1:8111:8111
 

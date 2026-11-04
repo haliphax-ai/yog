@@ -9,11 +9,12 @@ set -e
 # inherited by the worker spawns.
 export HOME=/home/yog
 
-# Runtime configuration lives at /var/lib/yog/config.json (mounted by the
-# compose manifest). When no config file was mounted, Docker leaves an empty
-# directory there — write container defaults so a config-less container still
-# binds 0.0.0.0, runs the agent split, and allows other users on the mount.
-# A real config file always wins; adjust it instead of these defaults.
+# Runtime configuration lives at /var/lib/yog/config.json (mounted read-only
+# by the compose manifest) — it is the host operator's file: never chowned,
+# never written. When no config file was mounted, Docker leaves an empty
+# directory there; replace that stub with container defaults (bind 0.0.0.0,
+# agent split, allowOther) so a config-less container still works. A real
+# mounted config is used as-is; the daemon errors if it cannot read it.
 if [ -d /var/lib/yog/config.json ]; then
   rmdir /var/lib/yog/config.json 2>/dev/null || true
   cat > /var/lib/yog/config.json <<'EOF'
@@ -29,13 +30,13 @@ if [ -d /var/lib/yog/config.json ]; then
   "agentStateDir": "/home/agent/.harness"
 }
 EOF
-  chown yog:yog /var/lib/yog/config.json
 fi
 
 # The state volume (/var/lib/yog) may have been created root-owned by Docker
-# (fresh named volume) — ensure the daemon can write it no matter its origin.
+# (fresh named volume) — ensure the daemon can write it no matter its origin,
+# without touching the host-owned config file.
 mkdir -p /var/lib/yog/agentfs
-chown -R yog:yog /var/lib/yog
+chown -R yog:yog /var/lib/yog/agentfs
 
 # Default command: start the HTTP/SSE daemon (`yog serve`). Explicit args
 # are passed through, so the launcher can run the one-shot client in the

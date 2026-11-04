@@ -92,16 +92,22 @@ export class WorkerClient {
 
     let child: ChildProcess;
     if (dropToAgent) {
+      // The agent's home is both its HOME and the worker's cwd: relative
+      // paths in model-executed scripts resolve somewhere the agent can
+      // write (the daemon's cwd is yog-owned and must never see agent
+      // writes — that was the source of pervasive EACCES in the container).
+      const agentHome = agentSpawnOpts.home ?? "/home/agent";
       const dropOpts: SpawnOptions = {
         ...baseOpts,
         uid: agentUid,
         gid: agentGid,
-        // The worker (and its bash children) should see the agent's home so
-        // rc sourcing and shell-state files land in the same place regardless
+        cwd: agentHome,
+        // The worker (and its bash children) see the agent's home so rc
+        // sourcing and shell-state files land in the same place regardless
         // of which daemon user spawned it.
         env: {
           ...process.env,
-          HOME: agentSpawnOpts.home ?? "/home/agent",
+          HOME: agentHome,
         },
       };
       try {

@@ -96,8 +96,6 @@ export interface HttpDeps {
   createTurnEngine?: unknown;
   /** Bearer token gate (config `apiToken`); unset = auth disabled. */
   apiToken?: string;
-  /** Abort grace window in ms (config `abortGraceMs`; default 2000). */
-  abortGraceMs?: number;
   [key: string]: unknown;
 }
 
@@ -111,17 +109,6 @@ const ERROR_STATUS: Record<string, number> = {
   rate_limited: 429,
   internal: 500,
 };
-
-/**
- * Grace window for an operator abort: `handle.abort()` rejects the turn
- * promise immediately, while the engine's terminal `turn.aborted` envelope
- * is still traveling behind awaited persistence in the sink — the stream
- * would otherwise end before the wire ever sees a terminal event. The
- * adapter pauses until the envelope is observed or the window closes. The
- * window is injected per daemon (`abortGraceMs`, see `config.ts`); the
- * default applies when the composition root does not set one.
- */
-const DEFAULT_ABORT_GRACE_MS = 2_000;
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   if (res.writableEnded) return;
@@ -190,15 +177,9 @@ function toWireMessage(m: unknown): Record<string, unknown> {
  */
 export function createHttpServer(deps: HttpDeps): Server {
   // Per-daemon configuration injection (see `config.ts`): the bearer token
-  // gate and the abort grace window. Both live in this factory's closure —
-  // concurrent daemons (tests) never share them.
+  // gate. It lives in this factory's closure — concurrent daemons (tests)
+  // never share it.
   const apiToken = typeof deps.apiToken === "string" ? deps.apiToken : undefined;
-  const abortGraceMs =
-    typeof deps.abortGraceMs === "number" ? deps.abortGraceMs : DEFAULT_ABORT_GRACE_MS;
-
-  /** Bounded pause used while waiting for the engine's terminal abort event. */
-  const abortGrace = (): Promise<void> =>
-    new Promise((resolve) => setTimeout(resolve, abortGraceMs));
 
   /** Bearer-token gate for the contract; unset = auth disabled. */
   const checkAuth = (req: IncomingMessage): boolean => {
@@ -673,31 +654,24 @@ export function createHttpServer(deps: HttpDeps): Server {
         try {
           await handle.promise;
         } catch (err) {
-          // An operator abort rejects the handle immediately; the engine
-          // unwinds asynchronously, and its terminal `turn.aborted` (not an
-          // extra `error` on top) is what the client must observe. The
-          // disconnect path (client closed) is silenced via `closed`.
+          // An operator abort rejects the handle immediately — the abort is
+          // hard: the adapter frames the terminal `turn.aborted` itself and
+          // ends the stream NOW. The engine keeps unwinding in the
+          // background (kill tool, heal transcript, persist); it does not
+          // emit a terminal event, so the adapter both frames it on the
+          // wire and persists it — this is the row turn-status recovery
+          // replays for an aborted turn.
           const isAbort = (err as Error | undefined)?.name === "AbortError";
           if (isAbort && turnStarted && !closed && !res.writableEnded) {
-            // The engine's terminal `turn.aborted` is still in flight behind
-            // awaited persistence in the sink. Hold the stream open until it
-            // is observed (or the grace window closes) so the client sees a
-            // terminal event instead of a bare stream end.
-            await (async () => {
-              let resolveWait!: () => void;
-              const waited = new Promise<void>((resolve) => {
-                resolveWait = resolve;
-              });
-              const onAbortedEvent = (ev: SseEnvelope): void => {
-                if (ev.type === "turn.aborted") resolveWait();
-              };
-              bus?.on(channel, onAbortedEvent);
-              try {
-                await Promise.race([waited, abortGrace()]);
-              } finally {
-                bus?.off(channel, onAbortedEvent);
-              }
-            })();
+            const envelope = {
+              id: 0,
+              type: "turn.aborted",
+              version: 1,
+              ts: Date.now(),
+              data: { reason: (err as Error).message || "turn aborted" },
+            } as SseEnvelope;
+            await persistEvent(envelope);
+            await emit(envelope);
           }
           if (!isAbort && !sawError && !closed && !res.writableEnded) {
             const e = err as { code?: string; message?: string };

@@ -52,18 +52,21 @@ The SSE stream frames each self-describing envelope
 | `turn.aborted` | `{ reason }` | operator aborted the turn; transcript was healed |
 | `error` | `{ code, message }` | terminal failure (e.g. `provider_error`) |
 
-**Abort.** `POST /v1/sessions/{id}/abort` ends the session's current turn:
+**Abort.** `POST /v1/sessions/{id}/abort` ends the session's current turn —
+the abort is hard: the SSE stream frames the terminal `turn.aborted`
+immediately and closes; nothing waits for the engine to unwind.
 
-1. The tool call in flight is killed (a running bash script gets SIGTERM; the
+1. The model stream is dropped at once (remaining output is ignored, not
+   consumed).
+2. The tool call in flight is killed (a running bash script gets SIGTERM; the
    shell-state snapshot still lands via the wrapper's EXIT trap, so cwd/env
-   persist).
-2. The model stream is closed and the turn unwinds.
+   persist). The engine finishes its bookkeeping in the background: heal,
+   persist, settle the turn row — the wire never waits for it.
 3. Any tool call the model announced but that never produced a result is
    healed in the transcript with a stub `tool` message
    (`{"error": "tool call aborted before a result was produced"}`) — the
    next turn hydrates a complete conversation and can be resumed.
-4. The turn row is settled with status `aborted`, and the SSE stream frames
-   the terminal `turn.aborted` event.
+4. The turn row is settled with status `aborted`.
 
 Response: `{ ok, status, session: { id }, aborted: { requested, status,
 activeToolCall } }` — `status` is `aborted` when a live turn was unwound and
@@ -147,7 +150,6 @@ injection (`createDaemon({ config })`, used by tests).
 | `host` | string | `127.0.0.1` | HTTP/SSE bind address |
 | `port` | int | `8111` | HTTP/SSE port |
 | `apiToken` | string? | *(unset)* | require `Authorization: Bearer …` on the contract |
-| `abortGraceMs` | int | `2000` | grace window holding the SSE stream open for the terminal abort event |
 | `dbSlowMs` | int | `50` | log a warning when a store query exceeds this (log-only tripwire) |
 | `stateRoot` | string | `/var/lib/yog` | state root (`sessions.db`, `agentfs/<agentId>.db`) |
 | `statePath` | string? | *(derived)* | full-path override for the agent state db |

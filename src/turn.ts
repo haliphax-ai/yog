@@ -180,7 +180,13 @@ export class TurnEngine {
         let assistantText = "";
 
         for await (const chunk of stream) {
-          checkAbort();
+          // Hard abort: drop the model stream the moment the signal fires —
+          // no waiting for a round seam, no consuming remaining output. The
+          // abort error propagates to the unwind/heal path below.
+          if (opts.signal?.aborted === true || opts.isAborted?.() === true) {
+            stream.controller.abort(new Error(opts.abortReason ?? "turn aborted"));
+            throw abortErr();
+          }
           const delta = chunk.choices[0]?.delta;
           if (!delta) continue;
 
@@ -232,6 +238,11 @@ export class TurnEngine {
 
         for (const [i, tc] of ordered) {
           const tcId = tc.id || `call_${i}`;
+          // An abort that fired while the round's model stream was draining
+          // (or between rounds) throws here — before the tool starts and
+          // before its `tool.call` is announced — so the just-reconstructed
+          // assistant row lands in the heal path's stub set.
+          checkAbort();
           await emit("tool.call", {
             id: tcId,
             name: tc.name,
@@ -243,10 +254,6 @@ export class TurnEngine {
           if (opts.sessionId !== undefined) {
             activeToolCalls.set(opts.sessionId, { id: tcId, name: tc.name, args: tc.args });
           }
-          // An abort that fired between rounds (or while the model stream
-          // was draining) unwinds here — before the tool starts — so the
-          // just-announced call lands in the heal path's stub set.
-          checkAbort();
 
           const startedAt = Date.now();
           const result = await tools.execute(tc.name, tc.args, {
@@ -369,10 +376,11 @@ export class TurnEngine {
 
       const aborted = opts.signal?.aborted === true || opts.isAborted?.() === true;
       if (aborted) {
-        // Abort: terminal `turn.aborted` (not `error`) — the operator ended
-        // the turn on purpose; transports surface it and the transcript was
-        // healed above. Propagate untouched so the caller maps its exit path.
-        await emit("turn.aborted", { reason: opts.abortReason ?? "turn aborted" });
+        // Hard abort: the adapter framed the terminal `turn.aborted` itself
+        // and closed the wire — do NOT emit again here (a late engine event
+        // would otherwise land on the next turn's stream via the per-session
+        // bus). The transcript was healed above; propagate so the caller
+        // settles the turn row.
         throw err;
       }
       // Terminal error: emit first (so transports see it), then rethrow so the
