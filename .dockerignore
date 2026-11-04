@@ -9,4 +9,5 @@
 /seccomp
 /sys
 /test
+/workspace
 node_modules
