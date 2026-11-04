@@ -150,7 +150,7 @@ yog serve [--host <addr>] [--port <n>]   # start the HTTP/SSE daemon
 ### Docker
 
 Build the image and run the daemon through Docker Compose. The compose
-manifest starts the daemon container (entrypoint runs `yog serve` with
+manifest starts the daemon container (tini init; entrypoint runs `yog serve` with
 `YOG_HOST=0.0.0.0`), publishes `YOG_PORT` to the host, and waits for
 `/v1/capabilities` to answer before accepting turns:
 
@@ -227,11 +227,11 @@ filesystem).
   - `yog.profile` - the `yog` AppArmor profile to load on the host (network
     rules cover the daemon listening on the configured bind address).
 - `Dockerfile` - container image: node:24, daemon + agent users, and the
-  `fuse`/CLI packages; entrypoint runs `yog serve` by default.
+  `fuse`/CLI packages; tini init, entrypoint runs `yog serve` by default.
 - `docker-compose.yml` - Docker Compose manifest: builds the image, runs the
   daemon with FUSE, seccomp, and AppArmor; publishes `YOG_PORT` to the host.
 - `Dockerfile` - container image: node:24, daemon + agent users, and the
-  `fuse`/CLI packages; entrypoint runs `yog serve` by default.
+  `fuse`/CLI packages; tini init, entrypoint runs `yog serve` by default.
 
 </details>
 
@@ -380,6 +380,8 @@ The `fuse-native` addon needs a FUSE device and mount privileges:
   container's bounding set.
 - The entrypoint defaults to `yog serve` with `YOG_HOST=0.0.0.0` (so the
   published `YOG_PORT` is reachable from the host).
+- `tini` is the container init (PID 1): it reaps zombies and forwards signals
+  to the daemon; the entrypoint script runs as its child.
 - The daemon's state databases are daemon-owned runtime data — they live
   under a dedicated root, `/var/lib/yog` (`YOG_STATE_ROOT`): `sessions.db`
   (sessions/turns/events) and `agentfs/<agentId>.db` (audit + shell state).

@@ -46,6 +46,11 @@ profile yog flags=(attach_disconnected,mediate_deleted) {
   /usr/bin/** ix,
   /bin/** ix,
   /usr/local/bin/** ix,
+  # tini is the container init (PID 1). It stays confined like the rest of
+  # the runtime surface (`ix` = inherit this profile); it is also covered by
+  # the /usr/bin/** glob above, but called out explicitly so the init surface
+  # is visible in the profile.
+  /usr/bin/tini ix,
   # node (re)opens its own binary and ldd when spawning the worker — covered
   # by the /usr/local/bin/** glob above (mr + ix for mmap + exec).
   # fusermount is at /usr/bin on Debian (and /usr/sbin on some distros);
