@@ -9,8 +9,20 @@
  * about ordering, reliability, connection state, or latency.
  */
 
-/** Envelope version for the ratified event payloads. */
+/** Envelope version for the ratified event payloads. Additive, optional fields
+ * (e.g. `turn.finished.usage`) keep the version at 1 — older consumers ignore
+ * them, and clients tolerate absent/malformed values. */
 export const TURN_EVENT_VERSION = 1;
+/**
+ * Token usage reported by the model for a finished turn (OpenAI-compatible
+ * `usage` shape). Absent when the provider sends none (or doesn't support
+ * `include_usage`).
+ */
+export interface TurnUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+}
 
 /** Per-event payload shapes, discriminated by the envelope's `type`. */
 export type TurnEventDataMap = {
@@ -29,7 +41,7 @@ export type TurnEventDataMap = {
     error?: string;
   };
   /** Normal end of the turn. */
-  "turn.finished": { turnId: string; durationMs: number; stopReason?: string };
+  "turn.finished": { turnId: string; durationMs: number; stopReason?: string; usage?: TurnUsage };
   /** Terminal error; the turn stops. */
   error: { code: string; message: string; details?: unknown };
   /** Terminal abort: the operator ended the turn (transcript was healed). */
