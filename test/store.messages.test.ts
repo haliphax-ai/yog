@@ -34,6 +34,7 @@ describe("migration 002: session_messages schema", () => {
       "name",
       "tool_calls_json",
       "created_at",
+      "tokens",
     ]);
 
     const m: any = Object.fromEntries(rows.map((c: any) => [c.name, c]));

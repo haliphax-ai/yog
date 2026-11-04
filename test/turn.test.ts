@@ -535,3 +535,136 @@ describe("RecordingSink", () => {
     expect(sink.events).toEqual(events);
   });
 });
+
+describe("TurnEngine per-tool-call token attribution", () => {
+  it("stamps equal splits of the round's completion tokens on tool.result events", async () => {
+    const sink = new RecordingSink();
+    const rounds: FakeChunk[][] = [
+      [
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  { index: 0, id: "call_1", function: { name: "echo", arguments: '{"text":"a"}' } },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  { index: 1, id: "call_2", function: { name: "echo", arguments: '{"text":"b"}' } },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          choices: [{ delta: { content: "" } }],
+          usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+        },
+      ],
+      [{ choices: [{ delta: { content: "Done" } }] }],
+    ];
+    const messages = userMessages();
+    await new TurnEngine(sink).run(fakeClient(rounds), "test-model", messages, registry);
+    const results = sink.events.filter((e) => e.type === "tool.result");
+    expect(results).toHaveLength(2);
+    if (results[0]?.type !== "tool.result") throw new Error("expected tool.result");
+    expect(results[0].data.tokens).toBe(5);
+    if (results[1]?.type !== "tool.result") throw new Error("expected tool.result");
+    expect(results[1].data.tokens).toBe(5);
+    const finished = sink.events.find((e) => e.type === "turn.finished");
+    if (finished?.type !== "turn.finished") throw new Error("expected turn.finished");
+    expect(finished.data.usage).toEqual({
+      prompt_tokens: 5,
+      completion_tokens: 10,
+      total_tokens: 15,
+    });
+  });
+
+  it("gives the remainder to the first call so totals add up", async () => {
+    const rounds: FakeChunk[][] = [
+      [
+        ...Array.from({ length: 3 }, (_, i) => ({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: i,
+                    id: `call_${i}`,
+                    function: { name: "echo", arguments: '{"text":"x"}' },
+                  },
+                ],
+              },
+            },
+          ],
+        })),
+        {
+          choices: [{ delta: { content: "" } }],
+          usage: { prompt_tokens: 1, completion_tokens: 7, total_tokens: 8 },
+        },
+      ],
+      [{ choices: [{ delta: { content: "Done" } }] }],
+    ];
+    const sink = new RecordingSink();
+    await new TurnEngine(sink).run(fakeClient(rounds), "test-model", userMessages(), registry);
+    const results = sink.events.filter((e) => e.type === "tool.result");
+    expect(results).toHaveLength(3);
+    if (results[0]?.type !== "tool.result") throw new Error("expected tool.result");
+    if (results[1]?.type !== "tool.result") throw new Error("expected tool.result");
+    if (results[2]?.type !== "tool.result") throw new Error("expected tool.result");
+    expect(results[0].data.tokens).toBe(3);
+    expect(results[1].data.tokens).toBe(2);
+    expect(results[2].data.tokens).toBe(2);
+  });
+
+  it("omits tokens when the provider sends no usage", async () => {
+    const sink = new RecordingSink();
+    await new TurnEngine(sink).run(
+      fakeClient(scriptRounds),
+      "test-model",
+      userMessages(),
+      registry,
+    );
+    const results = sink.events.filter((e) => e.type === "tool.result");
+    expect(results.length).toBeGreaterThan(0);
+    for (const r of results) {
+      if (r.type !== "tool.result") continue;
+      expect(r.data.tokens).toBeUndefined();
+    }
+  });
+
+  it("rides tokens onto the persisted tool message batch", async () => {
+    const sink = new RecordingSink();
+    const rounds: FakeChunk[][] = [
+      [
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  { index: 0, id: "call_1", function: { name: "echo", arguments: '{"text":"a"}' } },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          choices: [{ delta: { content: "" } }],
+          usage: { prompt_tokens: 2, completion_tokens: 4, total_tokens: 6 },
+        },
+      ],
+      [{ choices: [{ delta: { content: "Done" } }] }],
+    ];
+    const messages = userMessages();
+    await new TurnEngine(sink).run(fakeClient(rounds), "test-model", messages, registry);
+    const toolMsg = messages.find((m) => m.role === "tool") as unknown as { tokens?: number };
+    expect(toolMsg?.tokens).toBe(4);
+  });
+});
