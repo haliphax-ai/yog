@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ListDescriptor } from "../src/vfs/descriptors/list.ts";
 import {
-  AGENT_GID,
-  AGENT_UID,
+  getAgentOwnership,
   type DescriptorFile,
   DescriptorFlags,
   DescriptorFolder,
@@ -951,8 +950,9 @@ describe("per-descriptor ownership", () => {
     const st = await new Promise<{ uid?: number; gid?: number }>((resolve) => {
       ops.getattr!("/", (err, s) => resolve(err ? {} : (s ?? {})));
     });
-    expect(st.uid).toBe(AGENT_UID);
-    expect(st.gid).toBe(AGENT_GID);
+    const own = getAgentOwnership();
+    expect(st.uid).toBe(own.uid);
+    expect(st.gid).toBe(own.gid);
   });
 
   it("defaults file ownership to the agent user", async () => {
@@ -961,8 +961,9 @@ describe("per-descriptor ownership", () => {
     const st = await new Promise<{ uid?: number; gid?: number }>((resolve) => {
       ops.getattr!("/f", (err, s) => resolve(err ? {} : (s ?? {})));
     });
-    expect(st.uid).toBe(AGENT_UID);
-    expect(st.gid).toBe(AGENT_GID);
+    const own = getAgentOwnership();
+    expect(st.uid).toBe(own.uid);
+    expect(st.gid).toBe(own.gid);
   });
 
   it("honors a descriptor-declared owner", async () => {

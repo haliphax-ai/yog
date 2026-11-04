@@ -122,10 +122,9 @@ describe("openSessionsDb (knex-backed store)", () => {
     expect(config.pool.max).toBe(1);
   });
 
-  it("logs slow queries with SQL and duration when YOG_DB_SLOW_MS is set low", async () => {
-    process.env.YOG_DB_SLOW_MS = "0";
+  it("logs slow queries with SQL and duration when slowQueryMs is set low", async () => {
     const dbPath = join(dir, "slow.db");
-    const db = await openSessionsDb(dbPath);
+    const db = await openSessionsDb(dbPath, { slowQueryMs: 0 });
 
     const logs: string[] = [];
     const orig = process.stdout.write.bind(process.stdout);

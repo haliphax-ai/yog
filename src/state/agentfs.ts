@@ -64,17 +64,16 @@ export class AgentFSState {
   /**
    * Open (creating if needed) an agent filesystem for an agent.
    *
-   * The database path is derived from the agent id (`stateDbPath`), never
-   * from an env var — the environment only supplies the storage root. A
-   * full `path` may still be supplied to override entirely.
+   * The database path is derived from the agent id (`stateDbPath`) with the
+   * storage root injected by the caller (config `stateRoot`), never from an
+   * env var. A full `path` may still be supplied to override entirely.
    */
-  static async open(opts: { agentId?: AgentId; path?: string } = {}): Promise<AgentFSState> {
-    // A full path wins (tests, explicit overrides); otherwise an env PATH
-    // override; otherwise derive from the agent id.
-    const dbPath =
-      opts.path ??
-      process.env["YOG_STATE_PATH"] ??
-      (opts.agentId ? stateDbPath(opts.agentId) : undefined);
+  static async open(
+    opts: { agentId?: AgentId; path?: string; root?: string } = {},
+  ): Promise<AgentFSState> {
+    // A full path wins (tests, explicit overrides); otherwise derive from
+    // the agent id under the injected root.
+    const dbPath = opts.path ?? (opts.agentId ? stateDbPath(opts.agentId, opts.root) : undefined);
     if (dbPath === undefined) {
       throw new Error("AgentFSState.open requires an agentId or an explicit path");
     }

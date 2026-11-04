@@ -41,14 +41,13 @@ RUN groupadd --system --gid 900 yog && \
 # lives in the daemon's home.
 # Server bind: the container must be reachable from outside its netns, so the
 # daemon listens on all interfaces (loopback remains the local default).
-ENV YOG_ALLOW_OTHER=1 \
-  YOG_AGENT_UID=1100 \
-  YOG_AGENT_GID=1100 \
-  YOG_AGENT_HOME=/home/agent \
-  HARNESS_STATE_DIR=/home/agent/.harness \
-  YOG_STATE_ROOT=/var/lib/yog \
-  YOG_HOST=0.0.0.0 \
-  YOG_PORT=8111
+# All daemon runtime configuration comes from /var/lib/yog/config.json,
+# mounted by the compose manifest (see README → Configuration). When no
+# config file is mounted, entrypoint.sh writes container defaults (bind
+# 0.0.0.0, agent split, allow_other). The only env kept here is bash-worker
+# child plumbing: the agent shell state dir consumed by the worker's env
+# builder (the config `agentStateDir` is the daemon-side source).
+ENV HARNESS_STATE_DIR=/home/agent/.harness
 COPY . /app
 # better-sqlite3 v13 ships its native binding as a prebuild:
 #   node_modules/better-sqlite3/prebuilds/linux-x64.node

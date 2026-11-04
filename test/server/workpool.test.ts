@@ -32,21 +32,10 @@ describe("WorkerPool sizing", () => {
     expect(p.size).toBe(Math.max(1, cpus().length - 1));
   });
 
-  it("honours the YOG_WORKERS override and never drops below 1", () => {
-    const prev = process.env["YOG_WORKERS"];
-    try {
-      process.env["YOG_WORKERS"] = "3";
-      expect(pool().size).toBe(3);
-
-      process.env["YOG_WORKERS"] = "0";
-      expect(pool().size).toBe(1);
-
-      process.env["YOG_WORKERS"] = "-7";
-      expect(pool().size).toBe(1);
-    } finally {
-      if (prev === undefined) delete process.env["YOG_WORKERS"];
-      else process.env["YOG_WORKERS"] = prev;
-    }
+  it("honours an injected size and never drops below 1", () => {
+    expect(pool({ size: 3 }).size).toBe(3);
+    expect(pool({ size: 0 }).size).toBe(1);
+    expect(pool({ size: -7 }).size).toBe(1);
   });
 });
 

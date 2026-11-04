@@ -133,7 +133,7 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
 
       const resp = await bashExecutor(args.script, {
         ...(ctx?.sessionId !== undefined ? { scriptId: ctx.sessionId } : {}),
-        stateDir: process.env["HARNESS_STATE_DIR"],
+        stateDir: ctx?.stateDir,
         ...(restore ? { restore } : {}),
       });
       const runtimeMs = Math.round(performance.now() - start);

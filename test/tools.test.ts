@@ -128,14 +128,13 @@ describe("host environment hiding", () => {
 describe("bash shell state persistence", () => {
   it("persists cwd, exported variables, and functions across calls", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "harness-state-"));
-    const prev = process.env["HARNESS_STATE_DIR"];
-    process.env["HARNESS_STATE_DIR"] = stateDir;
     try {
       const r1 = await registry.execute(
         "bash",
         JSON.stringify({
           script: "cd /tmp && export FOO=bar && myfn() { echo fn-ok; }",
         }),
+        { stateDir },
       );
       expect(r1?.error).toBeUndefined();
       expect(r1?.["exitCode"]).toBe(0);
@@ -143,12 +142,11 @@ describe("bash shell state persistence", () => {
       const r2 = await registry.execute(
         "bash",
         JSON.stringify({ script: 'printf "%s|%s|" "$PWD" "$FOO"; myfn' }),
+        { stateDir },
       );
       expect(r2?.error).toBeUndefined();
       expect(r2?.["stdout"]).toBe("/tmp|bar|fn-ok\n");
     } finally {
-      if (prev === undefined) delete process.env["HARNESS_STATE_DIR"];
-      else process.env["HARNESS_STATE_DIR"] = prev;
       rmSync(stateDir, { recursive: true, force: true });
     }
   });

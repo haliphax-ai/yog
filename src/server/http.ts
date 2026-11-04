@@ -94,6 +94,10 @@ export interface HttpDeps {
   /** Per-daemon event bus: executeTurn publishes, this adapter subscribes. */
   bus?: EventBusBoundary | unknown;
   createTurnEngine?: unknown;
+  /** Bearer token gate (config `apiToken`); unset = auth disabled. */
+  apiToken?: string;
+  /** Abort grace window in ms (config `abortGraceMs`; default 2000). */
+  abortGraceMs?: number;
   [key: string]: unknown;
 }
 
@@ -113,19 +117,11 @@ const ERROR_STATUS: Record<string, number> = {
  * promise immediately, while the engine's terminal `turn.aborted` envelope
  * is still traveling behind awaited persistence in the sink — the stream
  * would otherwise end before the wire ever sees a terminal event. The
- * adapter pauses until the envelope is observed or the window closes, so
- * the stream is guaranteed to end either way. `YOG_ABORT_GRACE_MS`
- * overrides the default window.
+ * adapter pauses until the envelope is observed or the window closes. The
+ * window is injected per daemon (`abortGraceMs`, see `config.ts`); the
+ * default applies when the composition root does not set one.
  */
-const ABORT_GRACE_MS = (() => {
-  const parsed = Number.parseInt(process.env.YOG_ABORT_GRACE_MS ?? "", 10);
-  return Number.isFinite(parsed) ? parsed : 2_000;
-})();
-
-/** Bounded pause used while waiting for the engine's terminal abort event. */
-function abortGrace(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ABORT_GRACE_MS));
-}
+const DEFAULT_ABORT_GRACE_MS = 2_000;
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   if (res.writableEnded) return;
@@ -153,13 +149,6 @@ async function readBody(req: IncomingMessage, limit = 1_000_000): Promise<string
 function segments(url: string): string[] {
   const path = url.split("?")[0] ?? "";
   return path.split("/").filter(Boolean);
-}
-
-function checkAuth(req: IncomingMessage): boolean {
-  const token = process.env.YOG_API_TOKEN;
-  if (!token) return true;
-  const header = req.headers.authorization ?? "";
-  return header === `Bearer ${token}`;
 }
 
 /** Coerce a store row (sqlite) into the adapter's session shape. */
@@ -200,6 +189,23 @@ function toWireMessage(m: unknown): Record<string, unknown> {
  * provider and turn-engine factory.
  */
 export function createHttpServer(deps: HttpDeps): Server {
+  // Per-daemon configuration injection (see `config.ts`): the bearer token
+  // gate and the abort grace window. Both live in this factory's closure —
+  // concurrent daemons (tests) never share them.
+  const apiToken = typeof deps.apiToken === "string" ? deps.apiToken : undefined;
+  const abortGraceMs =
+    typeof deps.abortGraceMs === "number" ? deps.abortGraceMs : DEFAULT_ABORT_GRACE_MS;
+
+  /** Bounded pause used while waiting for the engine's terminal abort event. */
+  const abortGrace = (): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, abortGraceMs));
+
+  /** Bearer-token gate for the contract; unset = auth disabled. */
+  const checkAuth = (req: IncomingMessage): boolean => {
+    if (!apiToken) return true;
+    const header = req.headers.authorization ?? "";
+    return header === `Bearer ${apiToken}`;
+  };
   // Last-resort advertisement (injected capabilities win). The adapter
   // implements SSE streaming and the transcript rehydration dump, so the
   // default advertises both (§4.6); the composition root (serve.ts) passes

@@ -409,7 +409,10 @@ function hydrateTurn(row: any): any {
  * per pooled connection via `afterCreate` — outside any transaction the
  * migration runner would wrap statements in.
  */
-export async function openSessionsDb(filename: string): Promise<knex.Knex> {
+export async function openSessionsDb(
+  filename: string,
+  opts: { slowQueryMs?: number } = {},
+): Promise<knex.Knex> {
   const db = knex({
     client: "better-sqlite3",
     connection: { filename },
@@ -435,7 +438,7 @@ export async function openSessionsDb(filename: string): Promise<knex.Knex> {
     },
   });
 
-  setupSlowQueryTripwire(db);
+  setupSlowQueryTripwire(db, opts.slowQueryMs);
 
   await db.migrate.latest();
 
@@ -449,11 +452,11 @@ export async function openSessionsDb(filename: string): Promise<knex.Knex> {
  * per-query UUID stamped on the query info at `query` time, computes the
  * wall-clock duration on `query-response`, and logs `{ sql, durationMs }`
  * through the shared logger when the duration meets or exceeds
- * `YOG_DB_SLOW_MS` (default 50, env-parsed at open). Log-only: no behavior
+ * `slowQueryMs` (default 50, injected at open). Log-only: no behavior
  * change to query results or error handling.
  */
-function setupSlowQueryTripwire(db: knex.Knex): void {
-  const threshold = Number.parseInt(process.env.YOG_DB_SLOW_MS ?? "50", 10);
+function setupSlowQueryTripwire(db: knex.Knex, slowQueryMs?: number): void {
+  const threshold = slowQueryMs ?? 50;
   // The `query-response` event delivers the response rows (an array-like),
   // not the query info object — so the two events cannot be correlated by
   // a UID stamped on the query. For a log-only tripwire, a simple

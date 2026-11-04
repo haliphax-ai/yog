@@ -22,6 +22,12 @@ export interface ToolResult {
 export interface ToolContext {
   /** Abort key: the session id owning this tool call. */
   sessionId?: string;
+  /**
+   * Directory for the tool's persistent state (bash shell snapshots).
+   * Injected from the runtime configuration by the caller; the tool itself
+   * never reads configuration.
+   */
+  stateDir?: string;
 }
 
 export interface ToolSpec<

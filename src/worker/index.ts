@@ -5,7 +5,12 @@
  * Nothing outside `src/worker/` may import these internals directly
  * (depcruise `worker-entry-only`).
  */
-export { shutdownAllWorkers, WorkerClient } from "./client.ts";
+export {
+  onAgentSpawn,
+  shutdownAllWorkers,
+  WorkerClient,
+  type AgentSpawnOptions,
+} from "./client.ts";
 export { decodeFrame, encodeFrame } from "./protocol.ts";
 export type {
   BashRunErr,

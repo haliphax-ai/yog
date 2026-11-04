@@ -17,6 +17,29 @@ import { logger } from "../log.ts";
 
 const liveClients = new Set<WorkerClient>();
 
+/**
+ * Options for spawning a worker as the agent user (daemon/agent split):
+ * injected per daemon from the runtime configuration (see `config.ts`);
+ * uid/gid unset (or equal to the harness process's own ids) spawns the
+ * worker unchanged (local/unprivileged runs).
+ */
+export interface AgentSpawnOptions {
+  readonly uid?: number;
+  readonly gid?: number;
+  readonly home?: string;
+}
+
+/** Current agent-spawn options (set by the composition root). */
+let agentSpawnOpts: AgentSpawnOptions = {};
+
+/**
+ * Inject the agent-spawn options (owned by the composition root). Safe to
+ * call repeatedly; the latest call wins.
+ */
+export function onAgentSpawn(opts: AgentSpawnOptions): void {
+  agentSpawnOpts = opts;
+}
+
 /** Kill every worker spawned by this process (used at teardown). */
 export function shutdownAllWorkers(): Promise<void> {
   const all = [...liveClients];
@@ -52,16 +75,20 @@ export class WorkerClient {
 
     // The daemon/agent split: the harness (e.g. root or the `yog` daemon
     // user) spawns the worker as the *agent* user, so model-executed bash
-    // never runs as the harness user. Drop when the target differs from the
-    // current uid/gid; if the drop is not possible (no privilege), fall back
-    // to running the worker as the harness user so local/unprivileged runs
-    // keep working.
-    const agentUid = Number(process.env["YOG_AGENT_UID"] ?? "");
-    const agentGid = Number(process.env["YOG_AGENT_GID"] ?? "");
+    // never runs as the harness user. Drop when the injected uid/gid differ
+    // from the current ids; if the drop is not possible (no privilege), fall
+    // back to running the worker as the harness user so local/unprivileged
+    // runs keep working.
+    const agentUid = agentSpawnOpts.uid;
+    const agentGid = agentSpawnOpts.gid;
     const curUid = process.getuid?.() ?? -1;
     const curGid = process.getgid?.() ?? -1;
     const dropToAgent =
-      agentUid > 0 && agentGid > 0 && (agentUid !== curUid || agentGid !== curGid);
+      agentUid !== undefined &&
+      agentGid !== undefined &&
+      agentUid > 0 &&
+      agentGid > 0 &&
+      (agentUid !== curUid || agentGid !== curGid);
 
     let child: ChildProcess;
     if (dropToAgent) {
@@ -72,7 +99,10 @@ export class WorkerClient {
         // The worker (and its bash children) should see the agent's home so
         // rc sourcing and shell-state files land in the same place regardless
         // of which daemon user spawned it.
-        env: { ...process.env, HOME: process.env["YOG_AGENT_HOME"] ?? "/home/agent" },
+        env: {
+          ...process.env,
+          HOME: agentSpawnOpts.home ?? "/home/agent",
+        },
       };
       try {
         child = spawn(process.execPath, [entry, "--worker"], dropOpts);

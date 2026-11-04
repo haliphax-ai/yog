@@ -2,17 +2,17 @@
  * WorkerPool: a fixed-size set of {@link WorkerClient} workers that executes
  * bash scripts for sessions in parallel.
  *
- * Sizing: an explicit `size` option wins; otherwise `YOG_WORKERS` (a positive
- * integer) overrides the default of `max(1, os.cpus().length - 1)` (values
- * below 1 are clamped up to 1).
+ * Sizing: an explicit `size` option wins; otherwise the configured pool size
+ * (config `workers`, injected) or the CPU default `max(1, cpus.length - 1)`
+ * applies (values below 1 are clamped up to 1).
  *
  * Assignment is *soft pinning*: the first member that serves a session becomes
  * its preferred member. Later runs reuse that member while it is free; if it
  * is busy, any free member serves the run instead — shell state travels with
  * the caller via the snapshot `restore` option, so reassignment stays correct.
  */
-import { cpus } from "node:os";
 import { WorkerClient, type ShellSnapshot, type WorkerResponse } from "../worker/index.ts";
+import { defaultWorkers } from "../config.ts";
 
 export interface WorkerPoolOptions {
   /** Explicit pool size (clamped to at least 1). */
@@ -26,15 +26,10 @@ export interface WorkerPoolRunOptions {
   readonly restore?: Partial<ShellSnapshot>;
 }
 
-/** Resolve the pool size from option, env override, or CPU count. */
+/** Resolve the pool size from an explicit option; undefined = CPU default. */
 function resolveSize(explicit?: number): number {
   if (explicit !== undefined) return Math.max(1, Math.floor(explicit));
-  const raw = process.env["YOG_WORKERS"];
-  if (raw !== undefined && raw.trim() !== "") {
-    const parsed = Number.parseInt(raw, 10);
-    if (Number.isFinite(parsed)) return Math.max(1, parsed);
-  }
-  return Math.max(1, cpus().length - 1);
+  return defaultWorkers();
 }
 
 export class WorkerPool {
