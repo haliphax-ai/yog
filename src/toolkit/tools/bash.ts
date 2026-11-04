@@ -9,7 +9,7 @@ export interface BashResult extends ToolResult {
 }
 
 export interface BashArgs extends Record<string, unknown> {
-  script: string;
+  command: string;
 }
 
 /** Structural view of the persistent-shell snapshot (mirrors the worker's). */
@@ -101,7 +101,7 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
 
   schema: z
     .object({
-      script: z.string().describe("A bash script to execute."),
+      command: z.string().describe("The bash command/script to execute."),
     })
     .strict(),
 
@@ -131,7 +131,7 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
         restore = undefined;
       }
 
-      const resp = await bashExecutor(args.script, {
+      const resp = await bashExecutor(args.command, {
         ...(ctx?.sessionId !== undefined ? { scriptId: ctx.sessionId } : {}),
         stateDir: ctx?.stateDir,
         ...(restore ? { restore } : {}),

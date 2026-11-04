@@ -48,7 +48,7 @@ function hangingToolCallClient(): OpenAI {
                       {
                         index: 0,
                         id: "call_hang",
-                        function: { name: "bash", arguments: '{"script":"sleep 30"}' },
+                        function: { name: "bash", arguments: '{"command":"sleep 30"}' },
                       },
                     ],
                   },
@@ -117,7 +117,7 @@ function hangingToolCallWithUsageClient(): OpenAI {
                       {
                         index: 0,
                         id: "call_hang",
-                        function: { name: "bash", arguments: '{"script":"sleep 30"}' },
+                        function: { name: "bash", arguments: '{"command":"sleep 30"}' },
                       },
                     ],
                   },

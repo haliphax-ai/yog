@@ -27,41 +27,41 @@ describe("tool definitions", () => {
     expect((registry.definitions[0] as { function: { name: string } }).function.name).toBe("bash");
   });
 
-  it("requires a single script string", () => {
+  it("requires a single command string", () => {
     const params = bashDefinition.function.parameters as {
       required: string[];
       properties: Record<string, { type?: unknown }>;
     };
-    expect(params.required).toEqual(["script"]);
-    expect(params.properties["script"]?.type).toBe("string");
+    expect(params.required).toEqual(["command"]);
+    expect(params.properties["command"]?.type).toBe("string");
   });
 });
 
 describe("schema validation", () => {
   it("accepts a valid call", () => {
-    expect(bashTool.schema.safeParse({ script: "echo hi" }).success).toBe(true);
+    expect(bashTool.schema.safeParse({ command: "echo hi" }).success).toBe(true);
   });
 
   it("rejects a missing required field", () => {
     const r = bashTool.schema.safeParse({});
     expect(r.success).toBe(false);
-    if (!r.success) expect(JSON.stringify(r.error.issues)).toMatch(/script/);
+    if (!r.success) expect(JSON.stringify(r.error.issues)).toMatch(/command/);
   });
 
   it("rejects extra fields", () => {
-    const r = bashTool.schema.safeParse({ script: "echo", cwd: "/tmp" });
+    const r = bashTool.schema.safeParse({ command: "echo", cwd: "/tmp" });
     expect(r.success).toBe(false);
   });
 
   it("rejects an invalid field type", () => {
-    const r = bashTool.schema.safeParse({ script: 42 });
+    const r = bashTool.schema.safeParse({ command: 42 });
     expect(r.success).toBe(false);
   });
 });
 
 describe("registry.execute", () => {
   it("runs bash and returns stdout/exitCode", async () => {
-    const result = await registry.execute("bash", JSON.stringify({ script: "echo hello" }));
+    const result = await registry.execute("bash", JSON.stringify({ command: "echo hello" }));
     expect(result?.error).toBeUndefined();
     expect(result?.["stdout"]).toBe("hello\n");
     expect(result?.["exitCode"]).toBe(0);
@@ -69,21 +69,21 @@ describe("registry.execute", () => {
   });
 
   it("reports the exit code of a failing script", async () => {
-    const result = await registry.execute("bash", JSON.stringify({ script: "exit 7" }));
+    const result = await registry.execute("bash", JSON.stringify({ command: "exit 7" }));
     expect(result?.["exitCode"]).toBe(7);
     expect(result?.error).toBeUndefined();
   });
 
   it("aborts on schema violation with error and null output fields", async () => {
     const result = await registry.execute("bash", JSON.stringify({}));
-    expect(result?.["error"]).toMatch(/missing required field "script"/);
+    expect(result?.["error"]).toMatch(/missing required field "command"/);
     expect(result?.["stdout"]).toBeNull();
     expect(result?.["stderr"]).toBeNull();
     expect(result?.["exitCode"]).toBeNull();
   });
 
   it("aborts on extra fields", async () => {
-    const result = await registry.execute("bash", JSON.stringify({ script: "echo", shell: true }));
+    const result = await registry.execute("bash", JSON.stringify({ command: "echo", shell: true }));
     expect(result?.["error"]).toMatch(/unexpected field "shell"/);
     expect(result?.["stdout"]).toBeNull();
   });
@@ -104,7 +104,7 @@ describe("host environment hiding", () => {
     process.env["OPENAI_API_KEY"] = "sk-super-secret";
     process.env["GH_TOKEN"] = "ghp_super-secret";
     try {
-      const result = await registry.execute("bash", JSON.stringify({ script: "env | sort" }));
+      const result = await registry.execute("bash", JSON.stringify({ command: "env | sort" }));
       expect(result?.error).toBeUndefined();
       const envOut = String(result?.["stdout"]);
       // secrets gone
@@ -132,7 +132,7 @@ describe("bash shell state persistence", () => {
       const r1 = await registry.execute(
         "bash",
         JSON.stringify({
-          script: "cd /tmp && export FOO=bar && myfn() { echo fn-ok; }",
+          command: "cd /tmp && export FOO=bar && myfn() { echo fn-ok; }",
         }),
         { stateDir },
       );
@@ -141,7 +141,7 @@ describe("bash shell state persistence", () => {
 
       const r2 = await registry.execute(
         "bash",
-        JSON.stringify({ script: 'printf "%s|%s|" "$PWD" "$FOO"; myfn' }),
+        JSON.stringify({ command: 'printf "%s|%s|" "$PWD" "$FOO"; myfn' }),
         { stateDir },
       );
       expect(r2?.error).toBeUndefined();
