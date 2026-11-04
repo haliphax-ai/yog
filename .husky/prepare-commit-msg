@@ -1,1 +1,1 @@
-cat .git/COMMIT_EDITMSG | npx commitlint -q
+npx commitlint -q < "$(git rev-parse --git-path COMMIT_EDITMSG)"
