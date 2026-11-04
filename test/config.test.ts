@@ -22,7 +22,12 @@ describe("YogConfigSchema", () => {
     expect(config.allowOther).toBe(false);
     expect(config.apiToken).toBeUndefined();
     expect(config.providerApiKey).toBeUndefined();
-    expect(config.agentUid).toBeUndefined();
+    // The agent split is ON by default (documented UID scheme): agent 1100,
+    // daemon 900 runs the process itself. Model-executed code never runs as
+    // the daemon.
+    expect(config.agentUid).toBe(1100);
+    expect(config.agentGid).toBe(1100);
+    expect(config.agentHome).toBe("/home/agent");
   });
 
   it("rejects unknown fields and out-of-range values", () => {
@@ -61,6 +66,20 @@ describe("readConfigFile", () => {
     expect(await readConfigFile(file)).toEqual({ port: 9001 });
   });
 
+  it("returns undefined for an empty file (touched/zero bytes)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yog-config-"));
+    const file = join(dir, "config.json");
+    await writeFile(file, "");
+    expect(await readConfigFile(file)).toBeUndefined();
+  });
+
+  it("returns undefined for a whitespace-only file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yog-config-"));
+    const file = join(dir, "config.json");
+    await writeFile(file, "   ");
+    expect(await readConfigFile(file)).toBeUndefined();
+  });
+
   it("throws on malformed JSON (fail loudly)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "yog-config-"));
     const file = join(dir, "config.json");
@@ -91,14 +110,30 @@ describe("resolveConfig", () => {
     expect(config.maxRoundsPerTurn).toBe(200);
   });
 
-  it("merges the file over defaults", async () => {
+  it("merges the file over defaults (partial file keeps the split)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "yog-config-"));
     const file = join(dir, "config.json");
-    await writeFile(file, JSON.stringify({ host: "0.0.0.0", maxRoundsPerTurn: 32 }));
+    // A config like this (host + model only) must NOT disable the agent
+    // split — the merge keeps the schema defaults for untouched keys.
+    await writeFile(file, JSON.stringify({ host: "0.0.0.0", model: "inception/mercury-3" }));
     const config = await resolveConfig({ configPath: file });
     expect(config.host).toBe("0.0.0.0");
-    expect(config.maxRoundsPerTurn).toBe(32);
+    expect(config.model).toBe("inception/mercury-3");
     expect(config.port).toBe(8111);
+    expect(config.agentUid).toBe(1100);
+    expect(config.agentGid).toBe(1100);
+    expect(config.agentHome).toBe("/home/agent");
+  });
+
+  it("uses defaults for an empty file (touched mount, no content)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yog-config-"));
+    const file = join(dir, "config.json");
+    await writeFile(file, "");
+    const config = await resolveConfig({ configPath: file });
+    expect(config.host).toBe("127.0.0.1");
+    expect(config.agentUid).toBe(1100);
+    expect(config.agentGid).toBe(1100);
+    expect(config.agentHome).toBe("/home/agent");
   });
 
   it("injected config wins over the file", async () => {

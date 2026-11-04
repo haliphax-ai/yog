@@ -12,7 +12,7 @@ import { createInterface } from "node:readline";
 import { mkdir, readFile, spawn, writeFile } from "../host.ts";
 import type { WorkerAbortResponse } from "./protocol.ts";
 import { decodeFrame, encodeFrame, type WorkerResponse, type WorkerRequest } from "./protocol.ts";
-import { buildToolEnv, WRAPPER } from "./wrapper.ts";
+import { buildToolEnv, resolveStateDir, WRAPPER } from "./wrapper.ts";
 import { logger } from "../log.ts";
 
 let currentChild: ReturnType<typeof spawn> | undefined;
@@ -44,12 +44,21 @@ function abortCurrentChild(): WorkerAbortResponse {
   return { ok: true, aborted: true, exitCode: null, signal: "SIGTERM" };
 }
 
-/** Run one script through the persistent-shell wrapper. */
+/**
+ * Run one script through the persistent-shell wrapper. `stateDir` is
+ * resolved here (worker side) against the agent's HOME before spawning:
+ * the capture trap inherits the shell's *final* cwd, so a relative dir
+ * would follow the script's own `cd` and scatter state across whatever
+ * directories the script visited — the snapshot must live at a fixed,
+ * absolute path.
+ */
 async function runBash(
   script: string,
-  stateDir?: string,
+  stateDirArg?: string,
   restore?: Partial<import("./protocol.ts").ShellSnapshot>,
 ): Promise<WorkerResponse> {
+  const agentHome = process.env["HOME"] ?? "/root";
+  const stateDir = resolveStateDir(stateDirArg, agentHome);
   if (stateDir && restore) {
     await hydrateState(stateDir, restore);
   }
@@ -60,7 +69,7 @@ async function runBash(
       // kill the whole tree (bash defers a plain SIGTERM while a foreground
       // child like `sleep` is running — the group kill reaches the child).
       child = spawn("bash", ["-c", WRAPPER, "harness", script], {
-        cwd: process.cwd(),
+        cwd: agentHome,
         env: buildToolEnv(stateDir),
         detached: true,
       });
