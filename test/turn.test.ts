@@ -277,15 +277,12 @@ describe("TurnEngine failure handling", () => {
     await assertion;
 
     // Abort is not a provider error: no `error` event, no `turn.finished` —
-    // the terminal event is `turn.aborted` (the operator ended the turn).
-    expect(sink.events.map((e) => e.type)).toEqual([
-      "turn.started",
-      "message.delta",
-      "turn.aborted",
-    ]);
-    const aborted = sink.events[2]!;
-    if (aborted.type !== "turn.aborted") throw new Error("expected turn.aborted");
-    expect(typeof aborted.data.reason).toBe("string");
+    // and the engine does NOT emit `turn.aborted` either: the abort is hard,
+    // the adapter (or the CLI shell) frames the terminal event itself, so a
+    // late engine event can never leak onto the next turn's stream.
+    expect(sink.events.map((e) => e.type)).toEqual(["turn.started", "message.delta"]);
+    expect(sink.events.some((e) => e.type === "error")).toBe(false);
+    expect(sink.events.some((e) => e.type === "turn.aborted")).toBe(false);
   });
 });
 

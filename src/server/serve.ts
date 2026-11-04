@@ -332,7 +332,6 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         tools: ["bash"],
         features: ["sse", "transcript", "abort"],
       },
-      abortGraceMs: config.abortGraceMs,
       ...(store ? { store } : {}),
       ...(orchestrator ? { orchestrator } : {}),
       bus,
