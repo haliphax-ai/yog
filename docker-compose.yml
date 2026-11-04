@@ -11,8 +11,6 @@ services:
       - SYS_ADMIN
       - SETUID
       - SETGID
-    volumes:
-      - ./projects:/home/agent/projects
     env_file: .env
     environment:
       YOG_HOST: 0.0.0.0
