@@ -51,7 +51,7 @@ describe("AgentFSState", () => {
 
     await state.recordToolCall({
       name: "bash",
-      parameters: { script: "echo hi" },
+      parameters: { command: "echo hi" },
       result: { stdout: "hi\n", exitCode: 0 },
       startedAt: 1_700_000_000_000,
       completedAt: 1_700_000_000_250,
@@ -60,7 +60,7 @@ describe("AgentFSState", () => {
     });
     await state.recordToolCall({
       name: "bash",
-      parameters: { script: "exit 1" },
+      parameters: { command: "exit 1" },
       error: "exit code 1",
       startedAt: 1_700_000_000_500,
       completedAt: 1_700_000_000_700,
@@ -76,7 +76,7 @@ describe("AgentFSState", () => {
 
     const first = rows[0]!;
     expect(first.name).toBe("bash");
-    expect(JSON.parse(String(first.parameters))).toEqual({ script: "echo hi" });
+    expect(JSON.parse(String(first.parameters))).toEqual({ command: "echo hi" });
     expect(JSON.parse(String(first.result))).toEqual({ stdout: "hi\n", exitCode: 0 });
     expect(first.error).toBeNull();
     expect(first.session_id).toBe(sessionId);
@@ -100,7 +100,7 @@ describe("AgentFSState", () => {
     const state = await AgentFSState.open({ path: dbPath });
     await state.recordToolCall({
       name: "bash",
-      parameters: { script: "echo snap" },
+      parameters: { command: "echo snap" },
       result: { stdout: "snap\n", exitCode: 0 },
       startedAt: 1_700_000_000_000,
       completedAt: 1_700_000_000_100,
@@ -136,7 +136,7 @@ describe("AgentFSState", () => {
     expect(b.path).not.toBe(a.path);
     await a.recordToolCall({
       name: "bash",
-      parameters: { script: "echo a" },
+      parameters: { command: "echo a" },
       result: { stdout: "a\n" },
       startedAt: 1_700_000_000_000,
       completedAt: 1_700_000_000_100,

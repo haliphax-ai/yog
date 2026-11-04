@@ -352,16 +352,16 @@ pre-empt mutations:
 A single tool is provided to agents - `bash` - through which they interact with
 a persistent shell **and the harness's descriptors**:
 
-- **input**: `script: string` (required; no extra fields allowed). The
-  script runs via `eval` inside a wrapper shell, giving it full bash syntax -
+- **input**: `command: string` (required; no extra fields allowed). The
+  command runs via `eval` inside a wrapper shell, giving it full bash syntax -
   pipelines, redirection, builtins, functions - and **persistent shell state**:
   cwd, exported variables, and shell functions carry over between calls.
   Each call starts in the agent's HOME (`agentHome`), re-applies the prior
-  snapshot (the prior cwd is `cd`ed into before the script runs), and the
+  snapshot (the prior cwd is `cd`ed into before the command runs), and the
   resulting state is snapshotted (`export -p` + `declare -f` + `pwd -P`)
   into the configured state dir (`agentStateDir`, resolved against the
-  agent's HOME — never the script's own cwd) after every call. The agent rc
-  (`BASH_ENV`, falling back to `~/.bashrc`) is sourced before each script
+  agent's HOME — never the command's own cwd) after every call. The agent rc
+  (`BASH_ENV`, falling back to `~/.bashrc`) is sourced before each command
   as the home baseline.
 
   **Host env is hidden from the tool**: children are spawned with a minimal
