@@ -13,7 +13,7 @@ services:
       - SETUID
       - SETGID
     volumes:
-      - ./projects:/home/agent/projects
+      - ./workspace:/home/agent/workspace
       # Runtime configuration (optional). When the host file does not exist,
       # Compose creates an empty directory at the mountpoint, which the daemon
       # treats as "no config provided" (zod defaults apply). Create
