@@ -19,6 +19,7 @@ interface FakeDelta {
 
 interface FakeChunk {
   choices: { delta: FakeDelta }[];
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
 }
 
 /**
@@ -349,6 +350,142 @@ describe("TurnEngine maxRounds cap", () => {
     expect(finished).toBeDefined();
     if (finished?.type !== "turn.finished") throw new Error("expected turn.finished");
     expect(finished.data.stopReason).toBeUndefined();
+  });
+});
+
+describe("TurnEngine token usage", () => {
+  it("requests usage from the model via stream_options.include_usage", async () => {
+    let createOptions: unknown;
+    const client = {
+      chat: {
+        completions: {
+          create: async (opts: unknown) => {
+            createOptions = opts;
+            return (async function* () {
+              yield { choices: [{ delta: { content: "Hello" } }] } satisfies FakeChunk;
+            })();
+          },
+        },
+      },
+    } as unknown as OpenAI;
+    const sink = new RecordingSink();
+    await new TurnEngine(sink).run(client, "test-model", userMessages(), registry);
+    expect(createOptions).toMatchObject({ stream_options: { include_usage: true } });
+  });
+
+  it("emits turn.finished.usage when the provider sends an usage-bearing final chunk", async () => {
+    const sink = new RecordingSink();
+    const rounds: FakeChunk[][] = [
+      [
+        { choices: [{ delta: { content: "Hello" } }] },
+        {
+          choices: [{ delta: { content: "" } }],
+          usage: { prompt_tokens: 12, completion_tokens: 34, total_tokens: 46 },
+        },
+      ],
+    ];
+    await new TurnEngine(sink).run(fakeClient(rounds), "test-model", userMessages(), registry);
+    const finished = sink.events.find((e) => e.type === "turn.finished");
+    expect(finished?.type).toBe("turn.finished");
+    if (finished?.type !== "turn.finished") throw new Error("expected turn.finished");
+    expect(finished.data.usage).toEqual({
+      prompt_tokens: 12,
+      completion_tokens: 34,
+      total_tokens: 46,
+    });
+  });
+
+  it("omits usage from turn.finished when the provider sends none", async () => {
+    const sink = new RecordingSink();
+    await new TurnEngine(sink).run(
+      fakeClient(scriptRounds),
+      "test-model",
+      userMessages(),
+      registry,
+    );
+    const finished = sink.events.find((e) => e.type === "turn.finished");
+    expect(finished?.type).toBe("turn.finished");
+    if (finished?.type !== "turn.finished") throw new Error("expected turn.finished");
+    expect(finished.data.usage).toBeUndefined();
+  });
+
+  it("aggregates usage across rounds, keeping fields the final round omits", async () => {
+    const sink = new RecordingSink();
+    const rounds: FakeChunk[][] = [
+      [
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_1",
+                    function: { name: "echo", arguments: '{"text":"hi"}' },
+                  },
+                ],
+              },
+            },
+          ],
+          usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+        },
+      ],
+      [
+        {
+          choices: [{ delta: { content: "Done" } }],
+          usage: { total_tokens: 200 },
+        },
+      ],
+    ];
+    await new TurnEngine(sink).run(fakeClient(rounds), "test-model", userMessages(), registry);
+    const finished = sink.events.find((e) => e.type === "turn.finished");
+    if (finished?.type !== "turn.finished") throw new Error("expected turn.finished");
+    expect(finished.data.usage).toEqual({
+      prompt_tokens: 100,
+      completion_tokens: 50,
+      total_tokens: 200,
+    });
+  });
+
+  it("emits usage on the max_rounds terminal path", async () => {
+    const sink = new RecordingSink();
+    const loopClient: OpenAI = {
+      chat: {
+        completions: {
+          create: async () =>
+            (async function* () {
+              yield {
+                choices: [
+                  {
+                    delta: {
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: "call_loop",
+                          function: { name: "echo", arguments: '{"text":"hi"}' },
+                        },
+                      ],
+                    },
+                  },
+                ],
+                usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 },
+              } satisfies FakeChunk;
+            })(),
+        },
+      },
+    } as unknown as OpenAI;
+    await new TurnEngine(sink).run(loopClient, "test-model", userMessages(), registry, {
+      maxRounds: 2,
+    });
+    const finished = sink.events.find((e) => e.type === "turn.finished");
+    expect(finished?.type).toBe("turn.finished");
+    if (finished?.type !== "turn.finished") throw new Error("expected turn.finished");
+    expect(finished.data.stopReason).toBe("max_rounds");
+    expect(finished.data.usage).toEqual({
+      prompt_tokens: 7,
+      completion_tokens: 3,
+      total_tokens: 10,
+    });
   });
 });
 
