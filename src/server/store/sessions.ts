@@ -410,7 +410,7 @@ export class SessionStore {
     const events = await this.listEvents(sessionId);
     const eventUsage = new Map<number, TurnUsage>();
     for (const ev of events) {
-      if (ev.type !== "turn.finished") continue;
+      if (ev.type !== "turn.finished" && ev.type !== "turn.aborted") continue;
       // Event payloads are stored double-encoded (addEvent receives the
       // JSON string of the event data and stringifies it again), so the
       // parsed row payload may itself be a JSON string — unwrap it.

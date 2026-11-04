@@ -115,6 +115,12 @@ export interface TurnOptions {
    * like an unwind so the next turn hydrates a valid conversation.
    */
   maxRounds?: number;
+  /**
+   * Called whenever the accumulated turn usage changes (each round's usage
+   * as it arrives). Lets callers capture the usage at a cut point even when
+   * the turn never reaches a normal finish (abort / unwind).
+   */
+  onUsage?: (usage: TurnUsage) => void;
 }
 
 /**
@@ -205,6 +211,7 @@ export class TurnEngine {
               completion_tokens: chunk.usage.completion_tokens ?? usage?.completion_tokens,
               total_tokens: chunk.usage.total_tokens ?? usage?.total_tokens,
             };
+            opts.onUsage?.(usage);
             roundUsage = {
               prompt_tokens: chunk.usage.prompt_tokens ?? roundUsage?.prompt_tokens,
               completion_tokens: chunk.usage.completion_tokens ?? roundUsage?.completion_tokens,

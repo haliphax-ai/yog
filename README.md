@@ -49,7 +49,7 @@ The SSE stream frames each self-describing envelope
 | `tool.call` | `{ id, name, args }` | model invoked a tool |
 | `tool.result` | `{ id, name, ok, result?, tokens? }` | tool outcome (optional `tokens` = per-call completion-token attribution when the provider reports round usage) |
 | `turn.finished` | `{ turnId, durationMs, usage?, stopReason? }` | normal end (optional `usage` = `{ prompt_tokens, completion_tokens, total_tokens }` when the provider reports it) |
-| `turn.aborted` | `{ reason }` | operator aborted the turn; transcript was healed |
+| `turn.aborted` | `{ reason, usage? }` | operator aborted the turn; transcript was healed (optional `usage` = totals as of the cut point when the provider reported any) |
 | `error` | `{ code, message }` | terminal failure (e.g. `provider_error`) |
 
 **Abort.** `POST /v1/sessions/{id}/abort` ends the session's current turn —
@@ -74,6 +74,11 @@ activeToolCall } }` — `status` is `aborted` when a live turn was unwound and
 `aborted.activeToolCall` names the tool call that was killed, if any.
 Aborts are session-scoped: other sessions' turns are untouched. Abort is a
 capability: `GET /v1/capabilities` advertises it under `features`.
+
+When the model reported usage before the cut, the aborted envelope carries it
+(`usage`), so a client can flush the session totals as of the abort; the turn
+row persists it too for recovery/replay. Terminal `error` envelopes include the
+same optional `usage` when any was captured.
 
 **Deltas are disposable; terminal states are authoritative.** If the SSE
 connection dies mid-turn, the client reads the `turnId` from `turn.started`

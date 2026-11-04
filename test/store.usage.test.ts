@@ -166,6 +166,29 @@ describe("listTurnUsages", () => {
     store.close();
   });
 
+  it("falls back to stored turn.aborted event usage when turn columns are unset", async () => {
+    const store = await SessionStore.open(join(dir, "aborted-events.db"));
+    const session = (await store.createSession()) as any;
+    const turn = (await store.addTurn(session.id, {
+      role: "user",
+      content: "q",
+      status: "running",
+    })) as any;
+    await store.addEvent(session.id, {
+      type: "turn.aborted",
+      payload: JSON.stringify({
+        turnId: "wire-id",
+        reason: "turn aborted by operator",
+        usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 },
+      }),
+    });
+    const metrics = await store.listTurnUsages(session.id);
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0]?.turnId).toBe(turn.id);
+    expect(metrics[0]?.usage).toEqual({ prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 });
+    store.close();
+  });
+
   it("omits turns that have neither usage nor duration", async () => {
     const store = await SessionStore.open(join(dir, "empty.db"));
     const session = (await store.createSession()) as any;

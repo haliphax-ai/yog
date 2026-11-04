@@ -95,6 +95,8 @@ export interface HttpDeps {
   model?: ModelBoundary;
   store?: StoreBoundary | unknown;
   orchestrator?: OrchestratorBoundary | unknown;
+  /** Usage captured as of a terminal cut, keyed by session id. */
+  onUsageFor?: (sessionId: string) => unknown;
   /** Per-daemon event bus: executeTurn publishes, this adapter subscribes. */
   bus?: EventBusBoundary | unknown;
   createTurnEngine?: unknown;
@@ -193,7 +195,7 @@ function turnUsageFromRow(row: Record<string, unknown>): Record<string, number> 
 function turnUsageFromEvents(events: unknown[]): Record<string, number> | undefined {
   for (const raw of events) {
     const ev = raw as { type?: string; data?: unknown };
-    if (ev.type !== "turn.finished") continue;
+    if (ev.type !== "turn.finished" && ev.type !== "turn.aborted") continue;
     const data = ev.data as { usage?: unknown } | undefined;
     const u = data?.usage;
     if (u === null || typeof u !== "object" || Array.isArray(u)) continue;
@@ -629,6 +631,11 @@ export function createHttpServer(deps: HttpDeps): Server {
     const controller = new AbortController();
     let closed = false;
     let handle: TurnHandleLike | undefined;
+    // Usage as of a terminal cut (abort/error), when the model reported any.
+    const cutUsage = (): unknown => {
+      const f = deps.onUsageFor;
+      return typeof f === "function" ? f(session.id) : undefined;
+    };
     const onClose = (): void => {
       if (closed) return;
       closed = true;
@@ -732,7 +739,10 @@ export function createHttpServer(deps: HttpDeps): Server {
               type: "turn.aborted",
               version: 1,
               ts: Date.now(),
-              data: { reason: (err as Error).message || "turn aborted" },
+              data: {
+                reason: (err as Error).message || "turn aborted",
+                ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
+              },
             } as SseEnvelope;
             await persistEvent(envelope);
             await emit(envelope);
@@ -745,7 +755,11 @@ export function createHttpServer(deps: HttpDeps): Server {
               version: 1,
               ts: Date.now(),
               code: e.code ?? "provider_error",
-              data: { code: e.code ?? "provider_error", message: e.message ?? String(err) },
+              data: {
+                code: e.code ?? "provider_error",
+                message: e.message ?? String(err),
+                ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
+              },
             } as SseEnvelope);
           }
         }
@@ -798,7 +812,11 @@ export function createHttpServer(deps: HttpDeps): Server {
           version: 1,
           ts: Date.now(),
           code: e.code ?? "provider_error",
-          data: { code: e.code ?? "provider_error", message: e.message ?? String(err) },
+          data: {
+            code: e.code ?? "provider_error",
+            message: e.message ?? String(err),
+            ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
+          },
         } as SseEnvelope);
       }
     } finally {

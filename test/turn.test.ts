@@ -3,7 +3,7 @@ import type OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import { z } from "zod";
 import { TurnEngine } from "../src/turn.ts";
-import { RecordingSink, StdoutSink, type TurnEvent } from "../src/turn/sink.ts";
+import { RecordingSink, StdoutSink, type TurnEvent, type TurnUsage } from "../src/turn/sink.ts";
 import { ToolRegistry, type ToolSpec } from "../src/toolkit/index.ts";
 import { logger } from "../src/log.ts";
 
@@ -666,5 +666,70 @@ describe("TurnEngine per-tool-call token attribution", () => {
     await new TurnEngine(sink).run(fakeClient(rounds), "test-model", messages, registry);
     const toolMsg = messages.find((m) => m.role === "tool") as unknown as { tokens?: number };
     expect(toolMsg?.tokens).toBe(4);
+  });
+});
+
+describe("TurnEngine onUsage (cut-point usage)", () => {
+  it("reports accumulated usage as it arrives on a normal finish", async () => {
+    const seen: TurnUsage[] = [];
+    const rounds: FakeChunk[][] = [
+      [
+        {
+          choices: [{ delta: { content: "Hi" } }],
+          usage: { prompt_tokens: 5, completion_tokens: 7, total_tokens: 12 },
+        },
+      ],
+    ];
+    await new TurnEngine(new RecordingSink()).run(
+      fakeClient(rounds),
+      "test-model",
+      userMessages(),
+      registry,
+      {
+        onUsage: (u) => void seen.push(u),
+      },
+    );
+    expect(seen).toEqual([{ prompt_tokens: 5, completion_tokens: 7, total_tokens: 12 }]);
+  });
+
+  it("captures usage at the cut point when the turn aborts mid-stream", async () => {
+    const seen: TurnUsage[] = [];
+    const client = {
+      chat: {
+        completions: {
+          create: (args: { signal?: AbortSignal }) =>
+            (async function* () {
+              yield {
+                choices: [{ delta: { content: "x" } }],
+                usage: { total_tokens: 20 },
+              } satisfies FakeChunk;
+              await new Promise<void>((_resolve, reject) => {
+                if (args.signal?.aborted) {
+                  reject(new Error("aborted"));
+                  return;
+                }
+                args.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+                  once: true,
+                });
+              });
+            })(),
+        },
+      },
+    } as unknown as OpenAI;
+    const ac = new AbortController();
+    const runPromise = new TurnEngine(new RecordingSink()).run(
+      client,
+      "test-model",
+      userMessages(),
+      registry,
+      {
+        signal: ac.signal,
+        isAborted: () => ac.signal.aborted,
+        onUsage: (u) => void seen.push(u),
+      },
+    );
+    setTimeout(() => ac.abort(), 20);
+    await expect(runPromise).rejects.toThrow("aborted");
+    expect(seen.at(-1)).toEqual({ total_tokens: 20 });
   });
 });
