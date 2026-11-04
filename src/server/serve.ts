@@ -188,6 +188,9 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     // subscribes per session and frames them as SSE ---
     const bus = new EventEmitter();
     bus.setMaxListeners(0);
+    // Per-session usage as of the last known point, for flushing totals at a
+    // terminal cut (abort/error) even when no turn.finished is emitted.
+    const usageBySession = new Map<string, TurnUsage | undefined>();
     const modelId = config.model;
 
     // --- turn abort plumbing: the abort endpoint kills the session's
@@ -251,7 +254,8 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       // (its event log is diagnostic and stays) and a successful turn leaves
       // no duplicated user row behind.
       let turnId: string | null = null;
-      let finishedUsage: TurnUsage | undefined;
+      let liveUsage: TurnUsage | undefined;
+      usageBySession.set(sessionId, undefined);
       const sink: TurnSink = {
         async emit(ev: TurnEvent): Promise<void> {
           const envelope = ev as unknown as SseEnvelope;
@@ -260,7 +264,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
           }
           if (ev.type === "turn.finished") {
             const u = (ev.data as { usage?: TurnUsage }).usage;
-            if (u !== undefined && u !== null) finishedUsage = u;
+            if (u !== undefined && u !== null) liveUsage = u;
           }
           // Persist first (best effort): never fail the stream for it.
           if (store) {
@@ -289,6 +293,10 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         // abort arriving mid-tool-call or mid-stream still unwinds the turn.
         isAborted: () => ctx.signal?.aborted === true,
         abortReason: "turn aborted by operator",
+        onUsage: (u) => {
+          liveUsage = u;
+          usageBySession.set(sessionId, u);
+        },
         onHeal: (ids) => void healedIds.push(...ids),
         maxRounds: config.maxRoundsPerTurn,
       };
@@ -309,7 +317,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         }
         // Settle the row as finished — the bookkeeping record of a complete
         // turn, never a gate on the stream's success.
-        await store?.finishTurn?.(sessionId, turnRowId, "finished", finishedUsage).catch(() => {});
+        await store?.finishTurn?.(sessionId, turnRowId, "finished", liveUsage).catch(() => {});
       } catch (err) {
         // An operator abort persists that batch so the user prompt and
         // completed tool calls survive for resume (the turn row still
@@ -325,7 +333,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
             // persistence is best effort
           }
         }
-        await store?.finishTurn?.(sessionId, turnRowId, "aborted", finishedUsage).catch(() => {});
+        await store?.finishTurn?.(sessionId, turnRowId, "aborted", liveUsage).catch(() => {});
       }
       return { turnId };
     };
@@ -346,6 +354,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       bus,
       // Turn-abort kill chain (POST /v1/sessions/{id}/abort): kill the
       // session's running bash script, then let the orchestrator unwind.
+      onUsageFor: (sessionId: string) => usageBySession.get(sessionId),
       onAbortKillTool: (sessionId: string) => abortBash(sessionId),
     };
 

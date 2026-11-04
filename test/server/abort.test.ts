@@ -11,7 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer, type Server } from "node:http";
+import type { Server } from "node:http";
 import { EventEmitter } from "node:events";
 import type { AddressInfo } from "node:net";
 import type OpenAI from "openai";
@@ -22,6 +22,7 @@ import { SessionStore } from "../../src/server/store/sessions.ts";
 import { TurnEngine } from "../../src/turn.ts";
 import { tools } from "../../src/register.ts";
 import { setBashExecutor } from "../../src/toolkit/index.ts";
+import type { TurnUsage } from "../../src/turn/sink.ts";
 
 /** `Response.json()` with a loose type: assertions do the checking. */
 async function json(res: Response): Promise<any> {
@@ -100,6 +101,50 @@ function proseThenHangClient(): OpenAI {
   } as unknown as OpenAI;
 }
 
+/** Fake OpenAI client that streams a tool call + a usage-bearing final chunk,
+ *  then hangs until the abort signal fires — the abort-after-usage case. */
+function hangingToolCallWithUsageClient(): OpenAI {
+  return {
+    chat: {
+      completions: {
+        create: (args: { signal?: AbortSignal }) =>
+          (async function* () {
+            yield {
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "call_hang",
+                        function: { name: "bash", arguments: '{"script":"sleep 30"}' },
+                      },
+                    ],
+                  },
+                },
+              ],
+            };
+            yield {
+              choices: [{ delta: { content: "" } }],
+              usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
+            };
+            await new Promise<void>((_resolve, reject) => {
+              if (args.signal?.aborted) {
+                reject(new Error("The operation was aborted"));
+                return;
+              }
+              args.signal?.addEventListener(
+                "abort",
+                () => reject(new Error("The operation was aborted")),
+                { once: true },
+              );
+            });
+          })(),
+      },
+    },
+  } as unknown as OpenAI;
+}
+
 let dir: string;
 let store: SessionStore;
 let server: Server;
@@ -108,6 +153,8 @@ let bus: EventEmitter;
 /** Selectable fake client: the default streams a tool call; the mid-stream
  *  scenario swaps in the prose-only client (nothing to heal). */
 let activeClientFactory = hangingToolCallClient;
+/** Usage as of the last cut point, per session (mirrors serve.ts). */
+const usageBySession = new Map<string, TurnUsage | undefined>();
 
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), "yog-abort-"));
@@ -116,6 +163,7 @@ beforeAll(async () => {
   // sink below publishes to it — the same composition as serve.ts.
   bus = new EventEmitter();
   bus.setMaxListeners(0);
+  usageBySession.clear();
 
   // The bash tool's executor models a tool call in flight that never
   // settles (the thing an abort must rescue): the registry's signal race
@@ -160,11 +208,14 @@ beforeAll(async () => {
         isAborted: () => ctx.signal?.aborted === true,
         abortReason: "turn aborted by operator",
         onHeal: (ids) => void healed.push(...ids),
+        onUsage: (u) => usageBySession.set(sessionId, u),
       });
       if (messages.length > startLen) {
         await store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
       }
-      await store.finishTurn(sessionId, turnRowId, "finished").catch(() => {});
+      await store
+        .finishTurn(sessionId, turnRowId, "finished", usageBySession.get(sessionId))
+        .catch(() => {});
     } catch (err) {
       // Mirror serve.ts's failure policy: an operator abort persists the
       // turn's batch (prompt + any healed stubs) so resume sees it; other
@@ -174,7 +225,9 @@ beforeAll(async () => {
       if ((isOperatorAbort || healed.length > 0) && messages.length > startLen) {
         await store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
       }
-      await store.finishTurn(sessionId, turnRowId, "aborted").catch(() => {});
+      await store
+        .finishTurn(sessionId, turnRowId, "aborted", usageBySession.get(sessionId))
+        .catch(() => {});
     }
     return { turnId };
   };
@@ -194,6 +247,7 @@ beforeAll(async () => {
     // No worker pool in this composition: the kill hook is a no-op that
     // reports "nothing was running" (the fake stream hangs before any tool).
     onAbortKillTool: () => false,
+    onUsageFor: (sessionId: string) => usageBySession.get(sessionId),
   } as any);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -378,6 +432,48 @@ describe("POST /v1/sessions/{id}/abort", () => {
       const user = transcript.find((m) => m.role === "user");
       expect(user?.content).toBe("hang forever");
       expect(transcript).toHaveLength(1);
+    } finally {
+      activeClientFactory = hangingToolCallClient;
+    }
+  });
+
+  it("includes usage captured at the cut point in the aborted frame and persists it", async () => {
+    activeClientFactory = hangingToolCallWithUsageClient;
+    try {
+      const sid = await newSession();
+      const stream = await startTurn(sid);
+      expect(stream.status).toBe(200);
+      await new Promise((r) => setTimeout(r, 150));
+
+      const res = await fetch(`${base}/v1/sessions/${sid}/abort`, { method: "POST" });
+      expect((await json(res)).status).toBe("aborted");
+
+      const text = await stream.text();
+      let abortedData: any;
+      for (const block of text.split("\n\n")) {
+        const line = block.split("\n").find((l) => l.startsWith("data:"));
+        if (!line) continue;
+        let env: any;
+        try {
+          env = JSON.parse(line.slice(5).trim());
+        } catch {
+          continue;
+        }
+        if (env?.type === "turn.aborted") abortedData = env.data;
+      }
+      expect(abortedData?.reason).toBeTruthy();
+      expect(abortedData?.usage).toEqual({
+        prompt_tokens: 10,
+        completion_tokens: 8,
+        total_tokens: 18,
+      });
+
+      // The turn row carries the cut-point usage for recovery/replay.
+      const turns = await store.listTurns(sid);
+      const last = turns.at(-1);
+      expect(last?.status).toBe("aborted");
+      expect(last?.total_tokens).toBe(18);
+      expect(last?.prompt_tokens).toBe(10);
     } finally {
       activeClientFactory = hangingToolCallClient;
     }
