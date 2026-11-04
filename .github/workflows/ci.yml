@@ -48,6 +48,12 @@ jobs:
             sudo apt-get install -yqq --no-install-recommends fuse
       - run: npx vitest run --silent=true .
 
+  depcruise:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: haliphax-ai/yog/.github@main
+      - run: npm run depcruise
+
   oxlint:
     runs-on: ubuntu-latest
     steps:

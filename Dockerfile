@@ -16,6 +16,7 @@ RUN --mount=type=cache,mode=0755,target=/var/cache/apt \
     gnupg \
     jq \
     ripgrep \
+    tini \
     util-linux \
     which \
     && \
@@ -65,9 +66,12 @@ WORKDIR /home/yog
 # dir, not a home) — place it on a volume (see the `yog` launcher) so
 # turso's file locking works and state persists.
 VOLUME ["/var/lib/yog"]
-# The container starts as root only so the entrypoint can setpriv down to the
-# `yog` daemon user with ambient CAP_SETUID/CAP_SETGID (needed to spawn the
-# bash worker as the `agent` user). The harness itself never runs as root.
+# tini is the container init (PID 1): it reaps zombie processes and forwards
+# signals to the daemon, so the node process never becomes init and orphaned
+# children cannot accumulate. The container still starts as root only so the
+# entrypoint can setpriv down to the `yog` daemon user with ambient
+# CAP_SETUID/CAP_SETGID (needed to spawn the bash worker as the `agent` user).
+# The harness itself never runs as root.
 # With no args the entrypoint runs `yog serve`; explicit args (e.g.
 # `run <model> "<prompt>"`) are passed through to the CLI.
-ENTRYPOINT ["/app/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]

@@ -186,12 +186,13 @@ testable without a config file on disk.
 ### Docker
 
 Build the image and run the daemon through Docker Compose. The compose
-manifest starts the daemon container (entrypoint runs `yog serve`),
-mounts `./config.json` at `/var/lib/yog/config.json` (create the host file
-to configure the daemon; it is untracked), publishes port 8111 to the host,
-and waits for `/v1/capabilities` to answer before accepting turns. When no
-config file exists on the host, the entrypoint writes container defaults
-(bind `0.0.0.0`, agent split, `allowOther`) at the mountpoint:
+manifest starts the daemon container (tini init; entrypoint runs `yog
+serve`), mounts `./config.json` at `/var/lib/yog/config.json` (create the
+host file to configure the daemon; it is untracked), publishes port 8111
+to the host, and waits for `/v1/capabilities` to answer before accepting
+turns. When no config file exists on the host, the entrypoint writes
+container defaults (bind `0.0.0.0`, agent split, `allowOther`) at the
+mountpoint:
 
 ```sh
 docker compose up -d --build
@@ -273,11 +274,9 @@ filesystem).
   - `yog.profile` - the `yog` AppArmor profile to load on the host (network
     rules cover the daemon listening on the configured bind address).
 - `Dockerfile` - container image: node:24, daemon + agent users, and the
-  `fuse`/CLI packages; entrypoint runs `yog serve` by default.
+  `fuse`/CLI packages; tini init, entrypoint runs `yog serve` by default.
 - `docker-compose.yml` - Docker Compose manifest: builds the image, runs the
   daemon with FUSE, seccomp, and AppArmor; publishes port 8111 to the host.
-- `Dockerfile` - container image: node:24, daemon + agent users, and the
-  `fuse`/CLI packages; entrypoint runs `yog serve` by default.
 
 </details>
 
@@ -427,6 +426,8 @@ The `fuse-native` addon needs a FUSE device and mount privileges:
 - The entrypoint defaults to `yog serve` with a container-default config
   (bind `0.0.0.0`, so the published port is reachable from the host); a
   mounted `config.json` always wins.
+- `tini` is the container init (PID 1): it reaps zombies and forwards signals
+  to the daemon; the entrypoint script runs as its child.
 - The daemon's state databases are daemon-owned runtime data — they live
   under a dedicated root, `/var/lib/yog` (the configured `stateRoot`):
   `sessions.db` (sessions/turns/events) and `agentfs/<agentId>.db` (audit +
