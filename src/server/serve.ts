@@ -13,7 +13,7 @@ import { SessionOrchestrator } from "./orchestrator.ts";
 import { AgentFSState, DEFAULT_AGENT_ID } from "../state/index.ts";
 import { mountSys, unmountSys } from "../mount.ts";
 import { TurnEngine, type TurnOptions } from "../turn.ts";
-import type { TurnSink, TurnEvent } from "../turn/sink.ts";
+import type { TurnSink, TurnEvent, TurnUsage } from "../turn/sink.ts";
 import { tools, descriptors } from "../register.ts";
 import {
   abortBash,
@@ -251,11 +251,16 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       // (its event log is diagnostic and stays) and a successful turn leaves
       // no duplicated user row behind.
       let turnId: string | null = null;
+      let finishedUsage: TurnUsage | undefined;
       const sink: TurnSink = {
         async emit(ev: TurnEvent): Promise<void> {
           const envelope = ev as unknown as SseEnvelope;
           if (ev.type === "turn.started") {
             turnId = (ev.data as { turnId?: string }).turnId ?? turnId;
+          }
+          if (ev.type === "turn.finished") {
+            const u = (ev.data as { usage?: TurnUsage }).usage;
+            if (u !== undefined && u !== null) finishedUsage = u;
           }
           // Persist first (best effort): never fail the stream for it.
           if (store) {
@@ -304,7 +309,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         }
         // Settle the row as finished — the bookkeeping record of a complete
         // turn, never a gate on the stream's success.
-        await store?.finishTurn?.(sessionId, turnRowId, "finished").catch(() => {});
+        await store?.finishTurn?.(sessionId, turnRowId, "finished", finishedUsage).catch(() => {});
       } catch (err) {
         // An operator abort persists that batch so the user prompt and
         // completed tool calls survive for resume (the turn row still
@@ -320,7 +325,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
             // persistence is best effort
           }
         }
-        await store?.finishTurn?.(sessionId, turnRowId, "aborted").catch(() => {});
+        await store?.finishTurn?.(sessionId, turnRowId, "aborted", finishedUsage).catch(() => {});
       }
       return { turnId };
     };
