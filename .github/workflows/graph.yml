@@ -1,0 +1,49 @@
+name: Graph
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  cancel-in-progress: false
+  group: graph-${{ github.ref_name }}
+
+jobs:
+  graph:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up repo
+        uses: haliphax-ai/yog/.github@main
+
+      - name: Install mermaid-cli
+        run: npm install --global @mermaid-js/mermaid-cli
+
+      - name: Install GraphicsMagick
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphicsmagick
+
+      - name: Check out assets branch
+        uses: actions/checkout@v7
+        with:
+          ref: assets
+          path: assets
+
+      - name: Regenerate dependency graph
+        run: bash ./assets/graph
+
+      - name: Amend and push graph on assets branch
+        run: |
+          cd assets
+          git config user.name "haliphax"
+          git config user.email "haliphax@gmail.com"
+          git add dependencies.jpg dependencies.mmd
+          if git diff --cached --quiet; then
+            echo "dependency graph unchanged; nothing to amend"
+          else
+            git commit --amend --no-edit
+            git push --force origin assets
+          fi
