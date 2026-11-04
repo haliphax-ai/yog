@@ -105,6 +105,17 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       logger.warn(`[yog] warning: agent state unavailable (${(err as Error).message}); continuing`);
     }
 
+    // --- agent-user split: inject spawn opts BEFORE the pool exists ---
+    // WorkerPool spawns its worker processes in the constructor, so uid/gid
+    // drops only engage if the opts are already registered. Injecting after
+    // construction silently produced workers running as the daemon user
+    // with the daemon's HOME (bash children then inherited /home/yog).
+    onAgentSpawn({
+      ...(config.agentUid !== undefined ? { uid: config.agentUid } : {}),
+      ...(config.agentGid !== undefined ? { gid: config.agentGid } : {}),
+      ...(config.agentHome !== undefined ? { home: config.agentHome } : {}),
+    });
+
     // --- worker pool (production caller for the bash tool) ---
     let pool: WorkerPool | undefined;
     try {
@@ -184,13 +195,6 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     // persistent shell state before the child dies ---
     setBashAbort(async (sessionId) => (pool ? pool.abortScript(sessionId) : false));
 
-    // --- agent-user split (container): workers spawn with the configured
-    // agent uid/gid/home; unset uid/gid (local dev) spawns unchanged ---
-    onAgentSpawn({
-      ...(config.agentUid !== undefined ? { uid: config.agentUid } : {}),
-      ...(config.agentGid !== undefined ? { gid: config.agentGid } : {}),
-      ...(config.agentHome !== undefined ? { home: config.agentHome } : {}),
-    });
     /**
      * Turn entry point injected into the orchestrator. Builds the OpenAI
      * client + TurnEngine and routes its sink so every event is BOTH
