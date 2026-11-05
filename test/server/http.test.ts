@@ -116,6 +116,7 @@ beforeAll(async () => {
         tools: ["bash"],
         features: ["sse"],
       },
+      contextWindowFor: (model: string) => (model === "fake-model" ? 64000 : undefined),
       model: fakeModel("happy"),
     },
   };
@@ -136,6 +137,12 @@ describe("capabilities", () => {
     expect(Array.isArray(body.models)).toBe(true);
     expect(Array.isArray(body.tools)).toBe(true);
     expect(body.features).toBeDefined();
+  });
+  it("GET /v1/capabilities?model= resolves that model's context window", async () => {
+    const res = await fetch(`${base}/v1/capabilities?model=fake-model`);
+    expect(res.status).toBe(200);
+    const body = await json(res);
+    expect(body.contextWindowSizes).toEqual({ "fake-model": 64000 });
   });
 });
 

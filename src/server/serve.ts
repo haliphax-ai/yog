@@ -395,11 +395,8 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         models: [modelId],
         tools: ["bash"],
         features: ["sse", "transcript", "abort", "compact", "handoff", "shake"],
-        contextWindowSizes: (() => {
-          const cw = modelInfo?.getContextWindow(modelId);
-          return cw === undefined ? {} : { [modelId]: cw };
-        })(),
       },
+      contextWindowFor: (model: string) => modelInfo?.getContextWindow(model),
       ...(store ? { store } : {}),
       ...(orchestrator ? { orchestrator } : {}),
       ...(compaction ? { compaction } : {}),
