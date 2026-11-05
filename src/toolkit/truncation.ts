@@ -1,10 +1,10 @@
 import { TRUNCATION_IDENTIFIER } from "./types.ts";
 
 /** Default /shake fallback budget for tools without their own truncators. */
-export const FALLBACK_TRUNCATE_CHARS = 500;
+export const FALLBACK_TRUNCATE_CHARS = 1000;
 
 /**
- * Middle-truncate `text` to at most `max` characters: keep the head and the
+ * Middle-truncate `text` to at most `max` chars: keep the head and the
  * tail, replace the dropped middle with the global truncation marker. Applies
  * to any tool arg/result that lacks a bespoke truncator.
  */
