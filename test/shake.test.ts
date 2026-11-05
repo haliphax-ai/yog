@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { bashTool, ToolRegistry } from "../src/toolkit/index.ts";
-import { TRUNCATION_IDENTIFIER, createShakeRunner } from "../src/server/shake.ts";
+import { bashTool, ToolRegistry, middleTruncate } from "../src/toolkit/index.ts";
 import { createDaemon } from "../src/server/serve.ts";
+import { TRUNCATION_IDENTIFIER, createShakeRunner } from "../src/server/shake.ts";
 
 const registry = new ToolRegistry([bashTool]);
 
@@ -238,5 +238,22 @@ describe("HTTP /shake route", () => {
     } finally {
       await daemon.close();
     }
+  });
+});
+
+describe("middleTruncate newline flanking", () => {
+  it("puts the marker on its own line when the value had newlines", () => {
+    const value = "a\n" + "x".repeat(1500) + "\nb";
+    const truncated = middleTruncate(value, 1000);
+    expect(truncated).toContain("\n" + TRUNCATION_IDENTIFIER + "\n");
+    expect(truncated.length).toBeLessThanOrEqual(1000);
+    expect(truncated.startsWith("a\n")).toBe(true);
+    expect(truncated.endsWith("\nb")).toBe(true);
+  });
+
+  it("keeps the marker inline when the value had no newlines", () => {
+    const truncated = middleTruncate("y".repeat(1500), 1000);
+    expect(truncated).toContain(TRUNCATION_IDENTIFIER);
+    expect(truncated).not.toContain("\n");
   });
 });
