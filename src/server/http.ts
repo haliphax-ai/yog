@@ -93,6 +93,8 @@ export interface ModelBoundary {
  * the index signature keeps the seam open for store/orchestrator/factory deps.
  */
 export interface HttpDeps {
+  /** Resolve the context window for an arbitrary model id (models.dev cache). */
+  contextWindowFor?: (model: string) => number | undefined;
   capabilities?: Capabilities;
   model?: ModelBoundary;
   store?: StoreBoundary | unknown;
@@ -280,7 +282,26 @@ export function createHttpServer(deps: HttpDeps): Server {
 
     // GET /v1/capabilities
     if (method === "GET" && segs[0] === "v1" && segs[1] === "capabilities") {
-      sendJson(res, 200, capabilities);
+      if (method === "GET" && segs[0] === "v1" && segs[1] === "capabilities") {
+        // The client names the model it will use (`?model=`); the server
+        // resolves that model's context window from the models.dev cache. A
+        // request without `?model=` gets the plain advertisement.
+        const model = new URL(req.url ?? "", "http://localhost").searchParams.get("model");
+        if (
+          typeof model === "string" &&
+          model !== "" &&
+          typeof deps.contextWindowFor === "function"
+        ) {
+          const cw = deps.contextWindowFor(model);
+          sendJson(res, 200, {
+            ...capabilities,
+            contextWindowSizes: cw === undefined ? {} : { [model]: cw },
+          });
+          return;
+        }
+        sendJson(res, 200, capabilities);
+        return;
+      }
       return;
     }
 
