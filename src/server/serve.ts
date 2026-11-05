@@ -26,6 +26,11 @@ import { mkdir } from "../host.ts";
 import { logger } from "../log.ts";
 import { resolveConfig, type YogConfig, type PartialYogConfig } from "../config.ts";
 import { ModelInfoCache } from "./modelInfo.ts";
+import {
+  createCompactionRunner,
+  type CompactionBoundary,
+  type CompactionKind,
+} from "./compaction.ts";
 import { setDescriptorOwnership } from "../vfs/index.ts";
 
 /** Options accepted by {@link createDaemon}. */
@@ -354,12 +359,34 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     // parallelism, per-session FIFO, abort fan-out) ---
     const orchestrator = new SessionOrchestrator({ store, pool, executeTurn });
 
+    // --- compaction/handoff runner: throwaway summary turn (no tools, no
+    // session history) that resets the transcript to the produced artifact.
+    // Uses a second copy of the session model, or config.compactionModel. ---
+    let compaction: CompactionBoundary | undefined;
+    if (store) {
+      try {
+        compaction = createCompactionRunner({
+          client: openaiClient(config),
+          store,
+          model: modelId,
+          ...(config.compactionModel !== undefined
+            ? { compactionModel: config.compactionModel }
+            : {}),
+          ...(modelInfo ? { modelInfo } : {}),
+        });
+      } catch (err) {
+        logger.warn(
+          `[yog] warning: compaction unavailable (${(err as Error).message}); continuing`,
+        );
+      }
+    }
+
     const deps: HttpDeps = {
       capabilities: {
         contractVersion: "v1",
         models: [modelId],
         tools: ["bash"],
-        features: ["sse", "transcript", "abort"],
+        features: ["sse", "transcript", "abort", "compact", "handoff"],
         ...(modelInfo
           ? {
               contextWindowSizes: {
@@ -372,6 +399,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       },
       ...(store ? { store } : {}),
       ...(orchestrator ? { orchestrator } : {}),
+      ...(compaction ? { compaction } : {}),
       bus,
       // Turn-abort kill chain (POST /v1/sessions/{id}/abort): kill the
       // session's running bash script, then let the orchestrator unwind.

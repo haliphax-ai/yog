@@ -288,6 +288,59 @@ export class SessionStore {
   }
 
   /**
+   * Replace a session's transcript with a fresh message batch (§compaction).
+   * Used by compaction/handoff: after the summary artifact is produced, the
+   * prior history is discarded and the new transcript starts from the
+   * artifact. Runs in one transaction; `seq` restarts at 1 for the fresh
+   * transcript. The session row's `updated_at` is bumped to match.
+   */
+  async resetTranscript(sessionId: string, msgs: ChatCompletionMessageParam[]): Promise<any[]> {
+    const now = Date.now();
+    return this.db.transaction(async (trx: any) => {
+      await trx("session_messages").where("session_id", sessionId).del();
+      await trx("sessions").where("id", sessionId).update({ updated_at: now });
+      let seq = 1;
+      const out: any[] = [];
+      for (const m of msgs) {
+        const role = (m as any).role;
+        const content = (m as any).content ?? null;
+        const tool_call_id = (m as any).tool_call_id ?? null;
+        const name = (m as any).name ?? null;
+        const tool_calls = (m as any).tool_calls;
+        const tool_calls_json =
+          Array.isArray(tool_calls) && tool_calls.length > 0 ? JSON.stringify(tool_calls) : null;
+        const inserted = await trx("session_messages").insert({
+          session_id: sessionId,
+          turn_id: null,
+          seq,
+          role,
+          content,
+          tool_call_id,
+          name,
+          tool_calls_json,
+          tokens: null,
+          created_at: now,
+        });
+        out.push({
+          id: Number(inserted[0]),
+          session_id: sessionId,
+          turn_id: null,
+          seq,
+          role,
+          content,
+          tool_call_id,
+          name,
+          tokens: null,
+          tool_calls_json,
+          created_at: now,
+        });
+        seq += 1;
+      }
+      return out;
+    });
+  }
+
+  /**
    * Read a session's canonical transcript (§4.2).
    *
    * Returns ordered rows mapped to `ChatCompletionMessageParam`-shaped

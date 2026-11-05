@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { encodeEvent, type SseEnvelope } from "./sse.ts";
 import { activeToolCallFor } from "../turn.ts";
 import { logger } from "../log.ts";
+import type { CompactionBoundary, CompactionKind } from "./compaction.ts";
 
 /** Capabilities advertisement served at GET /v1/capabilities. */
 export interface Capabilities {
@@ -102,6 +103,8 @@ export interface HttpDeps {
   createTurnEngine?: unknown;
   /** Bearer token gate (config `apiToken`); unset = auth disabled. */
   apiToken?: string;
+  /** Compaction/handoff runner (see `compaction.ts`). */
+  compaction?: CompactionBoundary;
   [key: string]: unknown;
 }
 
@@ -545,6 +548,43 @@ export function createHttpServer(deps: HttpDeps): Server {
           aborted: { requested: false, sessionId: id, activeToolCall: null },
           session,
         });
+        return;
+      }
+
+      // POST /v1/sessions/{id}/compact | /handoff — run a throwaway summary
+      // turn and start a fresh transcript with the produced artifact.
+      if (
+        method === "POST" &&
+        segs.length === 4 &&
+        (segs[3] === "compact" || segs[3] === "handoff")
+      ) {
+        if (!session) {
+          sendError(res, "unknown_session", `session ${id} not found`);
+          return;
+        }
+        const compaction = deps.compaction;
+        if (typeof compaction !== "function") {
+          sendError(res, "internal", "compaction is not configured on this server");
+          return;
+        }
+        const kind: CompactionKind = segs[3] === "compact" ? "compact" : "handoff";
+        try {
+          const result = await compaction(id, kind);
+          const after = await lookupSession(id);
+          sendJson(res, 200, {
+            ok: true,
+            kind,
+            summary: result.summary,
+            model: result.model,
+            session: after ?? session,
+          });
+        } catch (err) {
+          const code =
+            (err as { code?: string }).code === "unknown_session"
+              ? "unknown_session"
+              : "provider_error";
+          sendError(res, code, err instanceof Error ? err.message : String(err));
+        }
         return;
       }
 

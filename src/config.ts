@@ -62,6 +62,8 @@ export const YogConfigSchema = z
     model: z.string().min(1).default("gpt-4o-mini"),
     /** Path to the local models.dev API JSON (for context-window lookups). */
     modelsDevPath: z.string().min(1).default(MODELS_DEV_PATH),
+    /** Model used for compaction/handoff summary turns; unset = session model. */
+    compactionModel: z.string().min(1).optional(),
     /** OpenAI-compatible endpoint; unset = SDK default. */
     providerBaseUrl: z.string().min(1).optional(),
     /** Provider API key; unset = SDK default resolution. */
