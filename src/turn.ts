@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+import type OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import type { ToolCall, ToolRegistry } from "./toolkit/index.ts";
 import type { ToolCallRecord } from "./state/index.ts";

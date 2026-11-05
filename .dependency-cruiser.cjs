@@ -18,6 +18,27 @@
  *   src/worker/**     worker process + JSONL client (infra; uses host only)
  *   src/state/**      agentfs-backed home/state (the only agentfs-SDK importer)
  *
+ * Dependency invariants added with the compaction/shake work (#17-#19):
+ *
+ *   - src/register.ts is composed only at the composition points: the CLI
+ *     entry and the server domain (manifest-composition-only).
+ *   - The turn layer never imports the server domain — compaction/handoff
+ *     orchestration sits on top of turn.ts, never beneath it
+ *     (turn-no-server).
+ *   - The OpenAI SDK is a transport concern: value imports (client
+ *     construction) live only in src/server/serve.ts; the rest of src/ may
+ *     only import types (openai-client-in-serve-only).
+ *   - Network egress (node:http/https/http2) happens only inside the server
+ *     domain (network-egress-in-server-only).
+ *   - Hardware queries (node:os) stay in the config module, which computes
+ *     the worker-pool default and hands down plain values
+ *     (cpu-query-in-config-only).
+ *
+ * Note: the tsc transpiler is enabled (tsPreCompilationDeps) so `import
+ * type` statements are classified as such — that is what lets the OpenAI
+ * rule separate client construction from type-only usage. node_modules is
+ * in doNotFollow (not excluded) so package-path rules can fire on it.
+ *
  * Encapsulation invariant: no module reaches into another domain's internals.
  * Every domain exposes a single public door — its `index.ts` barrel — and
  * modules outside a domain may only import that barrel (enforced by the
@@ -40,7 +61,12 @@ const DOMAINS = ["vfs", "toolkit", "worker", "state", "server"];
 
 module.exports = {
   options: {
-    exclude: { path: "(node_modules|\\.git|dist|coverage|sys|sys-test|.harness|\\.serena)" },
+    exclude: { path: "(\\.git|dist|coverage|sys|sys-test|.harness|\\.serena)" },
+    // Keep package dependencies in the graph (as non-followed leaves) so
+    // rules can target them by path, e.g. openai-client-in-serve-only.
+    doNotFollow: { path: "node_modules" },
+    // Classify `import type` edges: required by openai-client-in-serve-only.
+    tsPreCompilationDeps: true,
   },
   forbidden: [
     // Cycles are the classic architecture rot; forbid them outright.
@@ -189,6 +215,60 @@ module.exports = {
       from: { path: `^src/(?!${domain}/)` },
       to: { path: `^src/${domain}/(?!index\\.ts$)` },
     })),
+
+    // The wiring manifest is composed only at the composition points: the
+    // CLI entry and the server domain (which adapts it for the daemon).
+    // Mirrors config-only-at-composition for the tools/descriptors manifest.
+    {
+      name: "manifest-composition-only",
+      severity: "error",
+      from: { path: "^src/(?!index\\.ts$|register\\.ts$|server/)" },
+      to: { path: "^src/register\\.ts$" },
+    },
+
+    // The turn layer sits below the server domain: it runs turns, it does
+    // not know about sessions, HTTP, or orchestration. The compaction/handoff
+    // runners live ABOVE turn.ts (src/server/), never beneath it.
+    {
+      name: "turn-no-server",
+      severity: "error",
+      from: { path: "^src/turn(\\.ts|/)" },
+      to: { path: "^src/server/" },
+    },
+
+    // The OpenAI SDK is a transport concern owned by the daemon: only
+    // serve.ts may construct a client (value import). Everywhere else the
+    // SDK may appear only as types — `import type` — so the client instance
+    // is always injected from the composition point.
+    {
+      name: "openai-client-in-serve-only",
+      severity: "error",
+      from: { path: "^src/(?!server/serve\\.ts$)" },
+      to: {
+        path: "node_modules/openai(/|$)",
+        dependencyTypesNot: ["type-only"],
+      },
+    },
+
+    // Outbound network egress is a server-domain concern (model info
+    // bootstrap, the HTTP/SSE surface). No other layer opens sockets.
+    {
+      name: "network-egress-in-server-only",
+      severity: "error",
+      from: { path: "^src/(?!server/)" },
+      to: { path: "^(node:)?(https?|http2)$" },
+    },
+
+    // Hardware queries stay in the config module: defaultWorkers() reads
+    // the CPU count there and hands the pool size down as a plain value.
+    // Keeps worker sizing observable (and overridable) at the composition
+    // point instead of reaching for node:os mid-stack.
+    {
+      name: "cpu-query-in-config-only",
+      severity: "error",
+      from: { path: "^src/(?!config\\.ts$)" },
+      to: { path: "^(node:)?os$" },
+    },
 
     // The logging module is the ONLY place that may touch pino; everything
     // else goes through src/log.ts. Keeps the stream/level policy central.
