@@ -341,6 +341,24 @@ export class SessionStore {
   }
 
   /**
+   * Patch one transcript row in place (§shake). Used by `/shake` rewrite: a
+   * tool-call's arguments or a tool result's content may be truncated after
+   * the fact. Only the columns in `patch` change; seq/turnId/created_at are
+   * untouched so the display timeline remains stable.
+   */
+  async updateMessage(
+    sessionId: string,
+    seq: number,
+    patch: { content?: string | null; tool_calls_json?: string | null },
+  ): Promise<void> {
+    const update: Record<string, unknown> = {};
+    if (patch.content !== undefined) update.content = patch.content;
+    if (patch.tool_calls_json !== undefined) update.tool_calls_json = patch.tool_calls_json;
+    if (Object.keys(update).length === 0) return;
+    await this.db("session_messages").where({ session_id: sessionId, seq }).update(update);
+  }
+
+  /**
    * Read a session's canonical transcript (§4.2).
    *
    * Returns ordered rows mapped to `ChatCompletionMessageParam`-shaped

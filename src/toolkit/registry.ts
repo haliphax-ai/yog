@@ -86,6 +86,11 @@ export class ToolRegistry {
     return this.tools.has(name);
   }
 
+  /** The registered spec for `name`, or undefined. */
+  get(name: string): ToolSpec | undefined {
+    return this.tools.get(name);
+  }
+
   get definitions(): ChatCompletionTool[] {
     return [...this.tools.values()].map(toFunctionTool);
   }

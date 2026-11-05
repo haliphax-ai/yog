@@ -5,9 +5,12 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import {
   buildCompactionMessages,
   createCompactionRunner,
+  estimateTokens,
+  fitSerializedTranscript,
   loadCompactionTemplate,
   resolveCompactionModel,
   serializeTranscript,
+  MIDDLE_TRUNCATION_MARKER,
   type CompactionKind,
 } from "../src/server/compaction.ts";
 
@@ -41,10 +44,13 @@ function stubStore(rows: Array<Record<string, unknown>>) {
   const resetTranscript = vi.fn(
     async (_sessionId: string, msgs: ChatCompletionMessageParam[]) => msgs,
   );
+  const created = { id: "fresh-session" };
+  const createSession = vi.fn(async () => created);
   return {
     getSession: async () => ({ id: "s1", status: "open" }),
     getTranscript: async () => rows,
     resetTranscript,
+    createSession,
   };
 }
 
@@ -77,17 +83,16 @@ describe("message building", () => {
 
   it("builds strict system+user messages with the template for both kinds", async () => {
     const template = await loadCompactionTemplate();
+    const source = serializeTranscript(rows);
     for (const kind of ["compact", "handoff"] as const) {
-      const messages = buildCompactionMessages(template, rows, kind);
+      const messages = buildCompactionMessages(template, source, kind);
       expect(messages).toHaveLength(2);
       expect(messages[0]!.role).toBe("system");
       expect(messages[1]!.role).toBe("user");
       const system = String(messages[0]!.content);
       const user = String(messages[1]!.content);
-      // Strict output instruction in both paths.
       expect(system).toContain("ONLY the completed markdown document");
       expect(system).toContain("no preamble");
-      // Per-kind instruction present.
       if (kind === "compact") {
         expect(system).toContain("compacting a work session");
         expect(system).toContain("tangents");
@@ -95,11 +100,50 @@ describe("message building", () => {
         expect(system).toContain("handoff document");
         expect(system).toContain("taking over this work");
       }
-      // Template + transcript embedded in the user message.
       expect(user).toContain("# <Title>");
       expect(user).toContain("== Conversation transcript ==");
       expect(user).toContain("[1] system: be concise");
     }
+  });
+
+  it("appends user guidance when provided", async () => {
+    const template = await loadCompactionTemplate();
+    const messages = buildCompactionMessages(
+      template,
+      "src",
+      "compact",
+      "  focus on the deploy steps  ",
+    );
+    expect(String(messages[1]!.content)).toContain("== User guidance ==");
+    expect(String(messages[1]!.content)).toContain("focus on the deploy steps");
+  });
+});
+
+describe("token heuristic and middle truncation", () => {
+  it("estimates tokens at chars/4", () => {
+    expect(estimateTokens("abcd")).toBe(1);
+    expect(estimateTokens("abcdefghij")).toBe(3);
+  });
+
+  it("passes a transcript that already fits through unchanged", () => {
+    const lines = ["[1] user: hi", "[2] assistant: hello"];
+    const { text, truncated } = fitSerializedTranscript(lines, 10_000);
+    expect(truncated).toBe(false);
+    expect(text).toBe(lines.join("\n"));
+  });
+
+  it("truncates the middle with an obvious marker when over budget", () => {
+    const lines = Array.from(
+      { length: 200 },
+      (_, i) => `[${i + 1}] user: line ${i} padded content`,
+    );
+    const { text, truncated } = fitSerializedTranscript(lines, 40);
+    expect(truncated).toBe(true);
+    expect(text).toContain(MIDDLE_TRUNCATION_MARKER);
+    const [head, tail] = text.split(MIDDLE_TRUNCATION_MARKER);
+    expect(head).toContain("[1]");
+    expect(tail).toContain("[200]");
+    expect(head).not.toContain("[199]");
   });
 });
 
@@ -114,7 +158,7 @@ describe("resolveCompactionModel", () => {
 describe("createCompactionRunner", () => {
   const summary = "# Compacted\n\n## Goal\nFinish the feature.";
 
-  it("runs an orphan summary turn and resets the transcript with the artifact", async () => {
+  it("compact runs in a fresh session and resets that session's transcript", async () => {
     const store = stubStore([
       { role: "system", content: "system seed" },
       { role: "user", content: "hello" },
@@ -127,11 +171,25 @@ describe("createCompactionRunner", () => {
 
     const result = await runner("s1", "compact" as CompactionKind);
     expect(result.model).toBe("session-model");
-    expect(result.summary).toBe(summary.trim());
-    expect(store.resetTranscript).toHaveBeenCalledTimes(1);
+    expect(result.sessionId).toBe("fresh-session");
+    expect(store.createSession).toHaveBeenCalledTimes(1);
+    expect(store.resetTranscript).toHaveBeenCalledWith("fresh-session", expect.any(Array));
     const fresh = store.resetTranscript.mock.calls[0]![1] as ChatCompletionMessageParam[];
     expect(fresh.map((m) => m.role)).toEqual(["system", "assistant"]);
     expect(fresh[1]!.content).toBe(summary.trim());
+  });
+
+  it("handoff stays in the current session with the intact transcript", async () => {
+    const store = stubStore([{ role: "user", content: "hello" }]);
+    const runner = createCompactionRunner({
+      client: summaryClient(summary),
+      store,
+      model: "session-model",
+    });
+    const result = await runner("s1", "handoff" as CompactionKind);
+    expect(result.sessionId).toBe("s1");
+    expect(store.createSession).not.toHaveBeenCalled();
+    expect(store.resetTranscript).toHaveBeenCalledWith("s1", expect.any(Array));
   });
 
   it("uses the configured compaction model when present", async () => {
@@ -174,11 +232,13 @@ describe("createCompactionRunner", () => {
 });
 
 describe("HTTP compaction routes", () => {
-  it("compact/handoff run the boundary and return the artifact", async () => {
-    const compaction = vi.fn(async (id: string, kind: CompactionKind) => ({
+  it("compact/handoff run the boundary, pass guidance, and return the artifact", async () => {
+    const compaction = vi.fn(async (id: string, kind: CompactionKind, guidance?: string) => ({
       kind,
-      summary: `# ${kind} summary for ${id}`,
+      summary: `# ${kind} summary for ${id} (${guidance})`,
       model: "m",
+      sessionId: id === "s1" && kind === "compact" ? "fresh-session" : id,
+      truncated: false,
     }));
     const daemon = await createDaemon({
       host: "127.0.0.1",
@@ -188,7 +248,7 @@ describe("HTTP compaction routes", () => {
           contractVersion: "v1",
           models: ["m"],
           tools: [],
-          features: ["sse", "transcript", "compact", "handoff"],
+          features: ["sse", "transcript", "compact", "handoff", "shake"],
         },
         compaction,
       },
@@ -201,13 +261,15 @@ describe("HTTP compaction routes", () => {
       for (const kind of ["compact", "handoff"] as const) {
         const res = await fetch(`${daemon.url}/v1/sessions/${session.id}/${kind}`, {
           method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ guidance: "focus" }),
         });
         expect(res.status).toBe(200);
         const body: any = await res.json();
         expect(body.ok).toBe(true);
         expect(body.kind).toBe(kind);
-        expect(body.summary).toBe(`# ${kind} summary for ${session.id}`);
-        expect(compaction).toHaveBeenCalledWith(session.id, kind);
+        expect(body.summary).toBe(`# ${kind} summary for ${session.id} (focus)`);
+        expect(compaction).toHaveBeenCalledWith(session.id, kind, "focus");
       }
     } finally {
       await daemon.close();
@@ -220,7 +282,13 @@ describe("HTTP compaction routes", () => {
       port: 0,
       deps: {
         capabilities: { contractVersion: "v1", models: [], tools: [], features: [] },
-        compaction: async () => ({ kind: "compact", summary: "", model: "m" }),
+        compaction: async () => ({
+          kind: "compact",
+          summary: "",
+          model: "m",
+          sessionId: "x",
+          truncated: false,
+        }),
       },
     });
     try {

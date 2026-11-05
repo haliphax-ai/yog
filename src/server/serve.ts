@@ -31,6 +31,7 @@ import {
   type CompactionBoundary,
   type CompactionKind,
 } from "./compaction.ts";
+import { createShakeRunner, type ShakeOutcome } from "./shake.ts";
 import { setDescriptorOwnership } from "../vfs/index.ts";
 
 /** Options accepted by {@link createDaemon}. */
@@ -381,12 +382,23 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       }
     }
 
+    // --- /shake runner: mechanical transcript rewrite (truncate tool args
+    // and results via each tool's truncators). No model call. ---
+    let shake: ((sessionId: string) => Promise<ShakeOutcome>) | undefined;
+    if (store) {
+      try {
+        shake = createShakeRunner({ store, registry: tools });
+      } catch (err) {
+        logger.warn(`[yog] warning: shake unavailable (${(err as Error).message}); continuing`);
+      }
+    }
+
     const deps: HttpDeps = {
       capabilities: {
         contractVersion: "v1",
         models: [modelId],
         tools: ["bash"],
-        features: ["sse", "transcript", "abort", "compact", "handoff"],
+        features: ["sse", "transcript", "abort", "compact", "handoff", "shake"],
         ...(modelInfo
           ? {
               contextWindowSizes: {
@@ -401,6 +413,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       ...(orchestrator ? { orchestrator } : {}),
       ...(compaction ? { compaction } : {}),
       bus,
+      ...(shake ? { shake } : {}),
       // Turn-abort kill chain (POST /v1/sessions/{id}/abort): kill the
       // session's running bash script, then let the orchestrator unwind.
       onUsageFor: (sessionId: string) => usageBySession.get(sessionId),

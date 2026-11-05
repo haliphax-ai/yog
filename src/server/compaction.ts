@@ -4,10 +4,21 @@
  * Both operations run a *throwaway* summary turn that is orphaned from the
  * session transcript: it never appends history and never receives tools. The
  * turn's only job is to produce a markdown artifact from the shared template
- * (`compaction-template.md`), after which the session transcript is reset to
- * a fresh one containing the artifact. The artifact is produced using a
- * second copy of the session's model by default, or a server-configured
- * compaction model (`config.compactionModel`).
+ * (`compaction-template.md`), after which the resulting transcript starts
+ * fresh with the artifact.
+ *
+ * The two commands are the graduated "strong" rungs of the compaction ladder:
+ *
+ * - `compact`  — guaranteed result. Fits the conversation into the compaction
+ *   model's context window (window − 20,000 token margin) by truncating the
+ *   **middle** (obvious marker) and runs the summary turn in a **fresh
+ *   session**; the old session is left archived untouched.
+ * - `handoff` — maximum continuity. Uses a throwaway turn in the **current**
+ *   session with the **intact** transcript history for full context awareness
+ *   and recency bias.
+ *
+ * Both accept optional free-text user guidance that is passed to the
+ * summarization model.
  */
 
 import { fileURLToPath } from "node:url";
@@ -27,11 +38,15 @@ export interface CompactionResult {
   summary: string;
   /** The model that produced the artifact. */
   model: string;
+  /** Session whose transcript now leads with the artifact. */
+  sessionId: string;
+  /** True when the input transcript had to be truncated to fit the window. */
+  truncated: boolean;
 }
 
 /** Server route boundary: run a compaction for a session. */
 export interface CompactionBoundary {
-  (sessionId: string, kind: CompactionKind): Promise<CompactionResult>;
+  (sessionId: string, kind: CompactionKind, guidance?: string): Promise<CompactionResult>;
 }
 
 /** The slice of the session store the runner needs. */
@@ -39,6 +54,8 @@ export interface CompactionStore {
   getSession(id: string): Promise<unknown>;
   getTranscript(sessionId: string): Promise<Array<Record<string, unknown>>>;
   resetTranscript(sessionId: string, msgs: ChatCompletionMessageParam[]): Promise<unknown>;
+  /** Used by `compact` to run the summary turn in a fresh session. */
+  createSession?(opts?: { title?: string; system?: string }): Promise<{ id: string }>;
 }
 
 /** Options for {@link createCompactionRunner}. */
@@ -69,6 +86,17 @@ export function resolveCompactionModel(model: string, compactionModel?: string):
   return compactionModel !== undefined && compactionModel !== "" ? compactionModel : model;
 }
 
+/** Token margin reserved for the output/instructions when fitting a transcript. */
+export const COMPACTION_TOKEN_MARGIN = 20_000;
+
+/** Window used when the compaction model's window is unknown. */
+export const DEFAULT_COMPACTION_WINDOW = 128_000;
+
+/** chars/4 token heuristic (used where no provider tokenizer is available). */
+export function estimateTokens(text: string): number {
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
 /**
  * Render the session transcript as a readable text block so the summary
  * model can see the conversation without inheriting OpenAI chat-history
@@ -93,6 +121,46 @@ export function serializeTranscript(rows: Array<Record<string, unknown>>): strin
     lines.push(`${seq}${role}: ${body.trim() === "" ? "(no content)" : body.trim()}`);
   }
   return lines.join("\n");
+}
+
+/** Marker inserted where the middle of a too-long transcript is dropped. */
+export const MIDDLE_TRUNCATION_MARKER =
+  "\n\n[... TRUNCATED — middle of conversation omitted to fit the compaction " +
+  "model's context window ...]\n\n";
+
+/**
+ * Fit a serialized transcript (lines) under a token budget by keeping the
+ * earliest and latest lines and truncating the middle. The cut is obvious to
+ * the consumer: the dropped span is replaced by {@link MIDDLE_TRUNCATION_MARKER}.
+ */
+export function fitSerializedTranscript(
+  lines: string[],
+  budgetTokens: number,
+): { text: string; truncated: boolean } {
+  const total = lines.reduce((sum, line) => sum + estimateTokens(line), 0);
+  if (total <= budgetTokens || lines.length < 2) {
+    return { text: lines.join("\n"), truncated: false };
+  }
+  const half = Math.floor(budgetTokens / 2);
+  const head: string[] = [];
+  let headTokens = 0;
+  for (const line of lines) {
+    if (headTokens + estimateTokens(line) > half && head.length > 0) break;
+    head.push(line);
+    headTokens += estimateTokens(line);
+  }
+  const tail: string[] = [];
+  let tailTokens = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i] as string;
+    if (tailTokens + estimateTokens(line) > half && tail.length > 0) break;
+    tail.unshift(line);
+    tailTokens += estimateTokens(line);
+  }
+  return {
+    text: head.join("\n") + MIDDLE_TRUNCATION_MARKER + tail.join("\n"),
+    truncated: true,
+  };
 }
 
 /** Strict single-artifact instruction shared by both paths. */
@@ -124,17 +192,21 @@ function kindInstruction(kind: CompactionKind): string {
 /** Build the message list for a summary turn (system + user only, no tools). */
 export function buildCompactionMessages(
   template: string,
-  transcript: Array<Record<string, unknown>>,
+  sourceText: string,
   kind: CompactionKind,
+  guidance?: string,
 ): ChatCompletionMessageParam[] {
-  const user =
+  let user =
     "Use the template below and fill out every section for this session. " +
     "Replace the <Title> placeholder with a short descriptive title. Do not " +
     "leave any section blank — if a section has nothing relevant, write " +
     '"None." or a brief equivalent.\n\n' +
     template +
     "\n\n== Conversation transcript ==\n\n" +
-    serializeTranscript(transcript);
+    sourceText;
+  if (guidance !== undefined && guidance.trim() !== "") {
+    user += `\n\n== User guidance ==\n\n${guidance.trim()}`;
+  }
   return [
     { role: "system", content: `${kindInstruction(kind)}\n\n${STRICT_OUTPUT}` },
     { role: "user", content: user },
@@ -147,13 +219,22 @@ const NO_TOOLS = new ToolRegistry();
 /**
  * Build the compaction/handoff runner used by the daemon's HTTP layer.
  *
- * The runner owns a throwaway, orphaned turn: a fresh model completion with
- * no tools and no session history (the transcript is supplied as prompt
- * content). On success it resets the session transcript to a fresh one that
- * contains just the produced artifact. A failed or empty artifact throws.
+ * `compact`: fits the conversation to the compaction model's window (minus a
+ * 20,000-token margin) by middle-truncation, then runs the summary turn in a
+ * freshly created session and returns that session id.
+ *
+ * `handoff`: runs the summary turn in the current session with the intact
+ * transcript and keeps the same session id.
+ *
+ * Both reset the target session's transcript to the artifact (preserving any
+ * original system seed). A failed or empty artifact throws.
  */
 export function createCompactionRunner(deps: CompactionRunnerDeps): CompactionBoundary {
-  return async (sessionId: string, kind: CompactionKind): Promise<CompactionResult> => {
+  return async (
+    sessionId: string,
+    kind: CompactionKind,
+    guidance?: string,
+  ): Promise<CompactionResult> => {
     const session = await deps.store.getSession(sessionId);
     if (!session) {
       const error = new Error(`session ${sessionId} not found`) as Error & { code?: string };
@@ -162,9 +243,23 @@ export function createCompactionRunner(deps: CompactionRunnerDeps): CompactionBo
     }
 
     const model = resolveCompactionModel(deps.model, deps.compactionModel);
+    const window = deps.modelInfo?.getContextWindow(model) ?? DEFAULT_COMPACTION_WINDOW;
+    const budget = Math.max(2_000, window - COMPACTION_TOKEN_MARGIN);
+
     const transcript = await deps.store.getTranscript(sessionId);
+    const serialized = serializeTranscript(transcript);
+    const lines = serialized.split("\n");
+
+    let sourceText = serialized;
+    let truncated = false;
+    if (kind === "compact") {
+      const fitted = fitSerializedTranscript(lines, budget);
+      sourceText = fitted.text;
+      truncated = fitted.truncated;
+    }
+
     const template = await loadCompactionTemplate();
-    const messages = buildCompactionMessages(template, transcript, kind);
+    const messages = buildCompactionMessages(template, sourceText, kind, guidance);
 
     // Orphan turn: the sink only collects the streamed artifact text — nothing
     // is persisted to the session and nothing is published to SSE subscribers.
@@ -176,8 +271,17 @@ export function createCompactionRunner(deps: CompactionRunnerDeps): CompactionBo
         }
       },
     };
+
+    // `compact` runs the summary turn in a fresh session (the old session is
+    // left untouched); `handoff` stays in the current session.
+    let targetSession = sessionId;
+    if (kind === "compact" && deps.store.createSession) {
+      const created = await deps.store.createSession();
+      targetSession = created.id;
+    }
+
     const opts: TurnOptions = {
-      sessionId,
+      sessionId: targetSession,
       maxRounds: 1, // one completion; no tool loop
       ...(deps.modelInfo
         ? { contextWindow: deps.modelInfo.getContextWindow(model) ?? undefined }
@@ -199,8 +303,8 @@ export function createCompactionRunner(deps: CompactionRunnerDeps): CompactionBo
       ...systemSeed,
       { role: "assistant", content: trimmed },
     ];
-    await deps.store.resetTranscript(sessionId, fresh);
+    await deps.store.resetTranscript(targetSession, fresh);
 
-    return { kind, summary: trimmed, model };
+    return { kind, summary: trimmed, model, sessionId: targetSession, truncated };
   };
 }

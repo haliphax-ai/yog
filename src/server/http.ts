@@ -6,6 +6,7 @@ import { encodeEvent, type SseEnvelope } from "./sse.ts";
 import { activeToolCallFor } from "../turn.ts";
 import { logger } from "../log.ts";
 import type { CompactionBoundary, CompactionKind } from "./compaction.ts";
+import type { ShakeOutcome } from "./shake.ts";
 
 /** Capabilities advertisement served at GET /v1/capabilities. */
 export interface Capabilities {
@@ -105,6 +106,8 @@ export interface HttpDeps {
   apiToken?: string;
   /** Compaction/handoff runner (see `compaction.ts`). */
   compaction?: CompactionBoundary;
+  /** `/shake` transcript rewrite runner (see `shake.ts`). */
+  shake?: (sessionId: string) => Promise<ShakeOutcome>;
   [key: string]: unknown;
 }
 
@@ -552,7 +555,8 @@ export function createHttpServer(deps: HttpDeps): Server {
       }
 
       // POST /v1/sessions/{id}/compact | /handoff — run a throwaway summary
-      // turn and start a fresh transcript with the produced artifact.
+      // turn and start a fresh transcript with the produced artifact. Both
+      // accept an optional `guidance` field for the summarization model.
       if (
         method === "POST" &&
         segs.length === 4 &&
@@ -567,16 +571,39 @@ export function createHttpServer(deps: HttpDeps): Server {
           sendError(res, "internal", "compaction is not configured on this server");
           return;
         }
+        let guidance: string | undefined;
+        try {
+          const raw = await readBody(req);
+          const parsed: unknown = raw ? JSON.parse(raw) : {};
+          if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+            throw new Error("not an object");
+          }
+          const body = parsed as Record<string, unknown>;
+          if (body.guidance !== undefined && typeof body.guidance !== "string") {
+            sendError(res, "invalid_request", "guidance must be a string");
+            return;
+          }
+          guidance = typeof body.guidance === "string" ? body.guidance : undefined;
+        } catch (err) {
+          if ((err as Error).message === "not an object") {
+            sendError(res, "invalid_request", "request body must be a JSON object");
+            return;
+          }
+          // malformed JSON body — treat as empty body
+        }
         const kind: CompactionKind = segs[3] === "compact" ? "compact" : "handoff";
         try {
-          const result = await compaction(id, kind);
-          const after = await lookupSession(id);
+          const result = await compaction(id, kind, guidance);
+          const targetId = typeof result.sessionId === "string" ? result.sessionId : id;
+          const after = await lookupSession(targetId);
           sendJson(res, 200, {
             ok: true,
             kind,
             summary: result.summary,
             model: result.model,
+            truncated: result.truncated === true,
             session: after ?? session,
+            sessionId: targetId,
           });
         } catch (err) {
           const code =
@@ -584,6 +611,31 @@ export function createHttpServer(deps: HttpDeps): Server {
               ? "unknown_session"
               : "provider_error";
           sendError(res, code, err instanceof Error ? err.message : String(err));
+        }
+        return;
+      }
+
+      // POST /v1/sessions/{id}/shake — truncate tool args/results in place.
+      if (method === "POST" && segs.length === 4 && segs[3] === "shake") {
+        if (!session) {
+          sendError(res, "unknown_session", `session ${id} not found`);
+          return;
+        }
+        const shake = deps.shake;
+        if (typeof shake !== "function") {
+          sendError(res, "internal", "shake is not configured on this server");
+          return;
+        }
+        try {
+          const outcome = await shake(id);
+          const after = await lookupSession(id);
+          sendJson(res, 200, {
+            ok: true,
+            ...outcome,
+            session: after ?? session,
+          });
+        } catch (err) {
+          sendError(res, "internal", err instanceof Error ? err.message : String(err));
         }
         return;
       }
