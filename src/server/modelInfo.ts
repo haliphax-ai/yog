@@ -1,7 +1,8 @@
 /**
- * Model information cache — loads models.dev API JSON and provides
- * context-window lookups. The cache lives in the state dir and is
- * refreshed only when it is at least 24 hours old.
+ * Model information cache — loads models.dev API JSON (from a local file, or
+ * bootstrapped from the public API when the file is absent) and provides
+ * context-window lookups. The cache lives in the state dir and is refreshed
+ * only when it is at least 24 hours old.
  */
 
 import { readFile, writeFile, stat } from "../host.ts";
@@ -25,6 +26,9 @@ export interface ModelsDevCache {
 }
 
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/** Public models.dev API used to bootstrap a missing local source file. */
+export const MODELS_DEV_URL = "https://models.dev/api.json";
 
 export class ModelInfoCache {
   private cache: ModelsDevCache | null = null;
@@ -53,40 +57,86 @@ export class ModelInfoCache {
     return this.refresh();
   }
 
+  /**
+   * Refresh the flattened cache. Only reached when the cache is missing or
+   * older than 24h (see {@link load}). Prefers live data from the models.dev
+   * API so a previously fetched local copy never stays frozen; if the API is
+   * unreachable, falls back to the local source mirror (air-gapped deploys).
+   */
   async refresh(): Promise<ModelsDevCache> {
+    const text = await this.fetchLatest();
+    if (text !== undefined) {
+      return this.parseAndCache(text);
+    }
+
+    // Offline fallback: parse the locally mirrored source if one exists.
     try {
       const data = await readFile(this.sourcePath, "utf8");
-      const source = JSON.parse(data) as Record<string, any>;
-
-      // Flatten the provider → models structure into a simple map
-      const models: Record<string, ModelInfo> = {};
-      for (const [, providerData] of Object.entries(source)) {
-        const pd = providerData?.models as Record<string, ModelInfo> | undefined;
-        if (pd) {
-          for (const [modelId, modelData] of Object.entries(pd)) {
-            models[modelId] = {
-              id: modelId,
-              name: modelData.name,
-              limit: modelData.limit,
-            };
-          }
-        }
-      }
-
-      this.cache = { models, lastUpdated: Date.now() };
-
-      // Persist the cache
-      try {
-        await writeFile(this.cachePath, JSON.stringify(this.cache));
-      } catch (err) {
-        logger.warn(`[modelInfo] failed to write cache: ${(err as Error).message}`);
-      }
-
-      return this.cache;
+      return this.parseAndCache(data);
     } catch (err) {
       logger.error(`[modelInfo] failed to load models.dev data: ${(err as Error).message}`);
-      throw err;
+      throw new Error(`failed to load models.dev data (${(err as Error).message})`);
     }
+  }
+
+  /**
+   * Fetch the newest models.dev snapshot and mirror it to the local source
+   * path so later offline startups have something to parse. Returns
+   * `undefined` when the API is unreachable (the caller chooses the fallback).
+   */
+  private async fetchLatest(): Promise<string | undefined> {
+    try {
+      const res = await fetch(MODELS_DEV_URL);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      try {
+        await writeFile(this.sourcePath, text);
+      } catch (writeErr) {
+        logger.warn(
+          `[modelInfo] failed to persist fetched models.dev data: ${(writeErr as Error).message}`,
+        );
+      }
+      return text;
+    } catch (err) {
+      logger.warn(
+        `[modelInfo] fetch failed (${(err as Error).message}); using local source if present`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Flatten a models.dev JSON document (provider → models) into a simple
+   * lookup map, cache it, and persist the cache file.
+   */
+  private async parseAndCache(data: string): Promise<ModelsDevCache> {
+    const source = JSON.parse(data) as Record<string, any>;
+
+    // Flatten the provider → models structure into a simple map
+    const models: Record<string, ModelInfo> = {};
+    for (const [, providerData] of Object.entries(source)) {
+      const pd = providerData?.models as Record<string, ModelInfo> | undefined;
+      if (pd) {
+        for (const [modelId, modelData] of Object.entries(pd)) {
+          models[modelId] = {
+            id: modelId,
+            name: modelData.name,
+            limit: modelData.limit,
+          };
+        }
+      }
+    }
+
+    this.cache = { models, lastUpdated: Date.now() };
+
+    // Persist the cache
+    try {
+      await writeFile(this.cachePath, JSON.stringify(this.cache));
+    } catch (err) {
+      logger.warn(`[modelInfo] failed to write cache: ${(err as Error).message}`);
+    }
+
+    return this.cache;
   }
 
   getContextWindow(modelId: string): number | undefined {
