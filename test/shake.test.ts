@@ -1,31 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
-import { bashTool, ToolRegistry } from "../src/toolkit/index.ts";
-import { TRUNCATION_IDENTIFIER, createShakeRunner } from "../src/server/shake.ts";
+import { bashTool, ToolRegistry, middleTruncate } from "../src/toolkit/index.ts";
 import { createDaemon } from "../src/server/serve.ts";
+import { TRUNCATION_IDENTIFIER, createShakeRunner } from "../src/server/shake.ts";
 
 const registry = new ToolRegistry([bashTool]);
-const noTools = new ToolRegistry([]);
 
-function stubStore(rows: Array<Record<string, unknown>>) {
-  const updateMessage = vi.fn(async () => {});
-  return {
-    getTranscript: async () => rows,
-    updateMessage,
-  };
+function stubStore(rows: any[]) {
+  const updateMessage = vi.fn(async () => undefined);
+  return { rows, updateMessage, getTranscript: vi.fn(async () => rows) };
 }
 
 describe("bash truncateArgs", () => {
-  it("middle-truncates a long command to 500 chars with the marker", () => {
-    const args = JSON.stringify({ command: "x".repeat(900) });
+  it("middle-truncates a long command to 1000 chars with the marker", () => {
+    const args = JSON.stringify({ command: "x".repeat(1500) });
     const out = JSON.parse(registry.get("bash")!.truncateArgs!(args));
     const command = out.command as string;
-    expect(command.length).toBe(500);
+    expect(command.length).toBe(1000);
     expect(command).toContain(TRUNCATION_IDENTIFIER);
     const parts = command.split(TRUNCATION_IDENTIFIER);
     const head = parts[0]!;
     const tail = parts[1]!;
-    expect(head).toBe("x".repeat(head.length));
-    expect(tail).toBe("x".repeat(tail.length));
     expect(head).toBe("x".repeat(head.length));
     expect(tail).toBe("x".repeat(tail.length));
   });
@@ -37,21 +31,21 @@ describe("bash truncateArgs", () => {
 });
 
 describe("bash truncateResult", () => {
-  it("fairly splits the 500-char budget when both streams are huge", () => {
+  it("fairly splits the 1000-char budget when both streams are huge", () => {
     const tool = registry.get("bash")!;
     const result = tool.truncateResult!({
-      stdout: "o".repeat(1000),
-      stderr: "e".repeat(1000),
+      stdout: "o".repeat(2000),
+      stderr: "e".repeat(2000),
       runtimeMs: 1,
       exitCode: 0,
     }) as { stdout: string; stderr: string };
     expect(result.stdout).toContain(TRUNCATION_IDENTIFIER);
     expect(result.stderr).toContain(TRUNCATION_IDENTIFIER);
-    expect(result.stdout.length).toBe(250);
-    expect(result.stderr.length).toBe(250);
+    expect(result.stdout.length).toBe(500);
+    expect(result.stderr.length).toBe(500);
   });
 
-  it("gives one stream's unused share to the other", () => {
+  it("gives one stream its unused share to the other", () => {
     const tool = registry.get("bash")!;
     const result = tool.truncateResult!({
       stdout: "o".repeat(100),
@@ -59,9 +53,9 @@ describe("bash truncateResult", () => {
       runtimeMs: 1,
       exitCode: 0,
     }) as { stdout: string; stderr: string };
-    expect(result.stdout).toBe("o".repeat(100)); // untouched — inside its share
+    expect(result.stdout).toBe("o".repeat(100));
     expect(result.stderr).toContain(TRUNCATION_IDENTIFIER);
-    expect(result.stderr.length).toBe(400); // 500 − stdout's 100
+    expect(result.stderr.length).toBe(900);
   });
 
   it("returns undefined when nothing needs truncation", () => {
@@ -74,6 +68,13 @@ describe("bash truncateResult", () => {
 
 describe("createShakeRunner", () => {
   it("rewrites assistant args and tool results in place", async () => {
+    const longArgs = JSON.stringify({ command: "x".repeat(1200) });
+    const longResult = JSON.stringify({
+      stdout: "o".repeat(1200),
+      stderr: "e".repeat(1200),
+      runtimeMs: 1,
+      exitCode: 0,
+    });
     const rows = [
       {
         seq: 1,
@@ -83,16 +84,16 @@ describe("createShakeRunner", () => {
           {
             id: "c1",
             type: "function",
-            function: { name: "bash", arguments: JSON.stringify({ command: "y".repeat(700) }) },
+            function: { name: "bash", arguments: longArgs },
           },
         ],
       },
       {
         seq: 2,
         role: "tool",
-        name: "bash",
         tool_call_id: "c1",
-        content: JSON.stringify({ stdout: "o".repeat(900), stderr: "e".repeat(900), exitCode: 0 }),
+        name: "bash",
+        content: longResult,
       },
     ];
     const store = stubStore(rows);
@@ -106,7 +107,7 @@ describe("createShakeRunner", () => {
       [string, number, { tool_calls_json?: string; content?: string }]
     >;
     const argsPatch = updateCalls.find((c) => c[1] === 1)?.[2];
-    expect(argsPatch?.tool_calls_json).toBeDefined();
+    expect(argsPatch).toBeDefined();
     const calls = JSON.parse(argsPatch!.tool_calls_json!);
     expect(calls[0].function.arguments).toContain(TRUNCATION_IDENTIFIER);
 
@@ -126,16 +127,19 @@ describe("createShakeRunner", () => {
           {
             id: "c1",
             type: "function",
-            function: { name: "bash", arguments: '{"command":"echo hi"}' },
+            function: {
+              name: "bash",
+              arguments: JSON.stringify({ command: "echo hi" }),
+            },
           },
         ],
       },
       {
         seq: 2,
         role: "tool",
-        name: "bash",
         tool_call_id: "c1",
-        content: JSON.stringify({ stdout: "ok", stderr: "", exitCode: 0 }),
+        name: "bash",
+        content: JSON.stringify({ stdout: "hi", stderr: "", runtimeMs: 1, exitCode: 0 }),
       },
     ];
     const store = stubStore(rows);
@@ -144,8 +148,11 @@ describe("createShakeRunner", () => {
     expect(outcome).toEqual({ argsTruncated: 0, resultsTruncated: 0 });
     expect(store.updateMessage).not.toHaveBeenCalled();
   });
+});
 
-  it("applies the generic fallback blob for tools without truncators", async () => {
+describe("generic fallback without per-tool truncators", () => {
+  it("wraps oversized args in a truncated blob", async () => {
+    const rawArgs = "y".repeat(1200);
     const rows = [
       {
         seq: 1,
@@ -155,39 +162,54 @@ describe("createShakeRunner", () => {
           {
             id: "c1",
             type: "function",
-            function: { name: "custom", arguments: JSON.stringify({ x: "z".repeat(700) }) },
+            function: { name: "bash", arguments: rawArgs },
           },
         ],
       },
+    ];
+    const store = stubStore(rows);
+    const shake = createShakeRunner({ store, registry: new ToolRegistry([]) });
+    const outcome = await shake("s1");
+    expect(outcome.argsTruncated).toBe(1);
+
+    const argsPatch = (
+      store.updateMessage.mock.calls as unknown as Array<
+        [string, number, { tool_calls_json?: string }]
+      >
+    )[0]?.[2];
+    const calls = JSON.parse(argsPatch!.tool_calls_json!);
+    const blob = JSON.parse(calls[0].function.arguments);
+    expect(blob.truncated).toBeDefined();
+    expect(blob.truncated.length).toBe(1000);
+    expect(blob.truncated).toContain(TRUNCATION_IDENTIFIER);
+  });
+
+  it("wraps oversized results in a truncated blob", async () => {
+    const longContent = "z".repeat(1200);
+    const rows = [
       {
-        seq: 2,
+        seq: 1,
         role: "tool",
-        name: "custom",
         tool_call_id: "c1",
-        content: JSON.stringify({ data: "q".repeat(700) }),
+        name: "bash",
+        content: longContent,
       },
     ];
     const store = stubStore(rows);
-    const shake = createShakeRunner({ store, registry: noTools });
-    const outcome = await shake("s1");
+    await createShakeRunner({ store, registry: new ToolRegistry([]) })("s1");
+    const contentPatch = (
+      store.updateMessage.mock.calls as unknown as Array<[string, number, { content?: string }]>
+    )[0]?.[2];
 
-    expect(outcome).toEqual({ argsTruncated: 1, resultsTruncated: 1 });
-    const updateCalls = store.updateMessage.mock.calls as unknown as Array<
-      [string, number, { tool_calls_json?: string; content?: string }]
-    >;
-    const argsPatch = updateCalls.find((c) => c[1] === 1)?.[2];
-    const calls = JSON.parse(argsPatch!.tool_calls_json!);
-    const argsBlob = JSON.parse(calls[0].function.arguments);
-    expect(argsBlob.truncated).toContain(TRUNCATION_IDENTIFIER);
-
-    const resultPatch = updateCalls.find((c) => c[1] === 2)?.[2];
-    const resultBlob = JSON.parse(resultPatch!.content!);
-    expect(resultBlob.truncated).toContain(TRUNCATION_IDENTIFIER);
+    const blob = JSON.parse(contentPatch!.content!);
+    expect(blob.truncated).toBeDefined();
+    expect(blob.truncated.length).toBe(1000);
+    expect(blob.truncated).toContain(TRUNCATION_IDENTIFIER);
   });
 });
 
 describe("HTTP /shake route", () => {
-  it("returns truncation counts and the refreshed session", async () => {
+  it("returns truncation counts from the boundary", async () => {
     const shake = vi.fn(async () => ({ argsTruncated: 2, resultsTruncated: 1 }));
     const daemon = await createDaemon({
       host: "127.0.0.1",
@@ -203,9 +225,10 @@ describe("HTTP /shake route", () => {
       },
     });
     try {
-      const created = await fetch(`${daemon.url}/v1/sessions`, { method: "POST" });
+      const created = await fetch(daemon.url + "/v1/sessions", { method: "POST" });
+      expect(created.status).toBe(201);
       const session = ((await created.json()) as { session: { id: string } }).session;
-      const res = await fetch(`${daemon.url}/v1/sessions/${session.id}/shake`, {
+      const res = await fetch(daemon.url + "/v1/sessions/" + session.id + "/shake", {
         method: "POST",
       });
       expect(res.status).toBe(200);
@@ -215,5 +238,22 @@ describe("HTTP /shake route", () => {
     } finally {
       await daemon.close();
     }
+  });
+});
+
+describe("middleTruncate newline flanking", () => {
+  it("puts the marker on its own line when the value had newlines", () => {
+    const value = "a\n" + "x".repeat(1500) + "\nb";
+    const truncated = middleTruncate(value, 1000);
+    expect(truncated).toContain("\n" + TRUNCATION_IDENTIFIER + "\n");
+    expect(truncated.length).toBeLessThanOrEqual(1000);
+    expect(truncated.startsWith("a\n")).toBe(true);
+    expect(truncated.endsWith("\nb")).toBe(true);
+  });
+
+  it("keeps the marker inline when the value had no newlines", () => {
+    const truncated = middleTruncate("y".repeat(1500), 1000);
+    expect(truncated).toContain(TRUNCATION_IDENTIFIER);
+    expect(truncated).not.toContain("\n");
   });
 });

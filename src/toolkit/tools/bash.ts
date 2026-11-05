@@ -19,15 +19,14 @@ export interface ShellStateProvider {
 }
 
 /** /shake truncation budgets (chars). */
-export const BASH_ARG_TRUNCATE_CHARS = 500;
-export const BASH_RESULT_TRUNCATE_CHARS = 500;
-/** Middle-truncate a stream to `max` chars (head + tail, marker in the middle). */
+export const BASH_ARG_TRUNCATE_CHARS = 1000;
+export const BASH_RESULT_TRUNCATE_CHARS = 1000;
 function truncateStream(text: string, max: number): string {
   return text.length <= max ? text : middleTruncate(text, max);
 }
 
 /**
- * Split a 500-char budget fairly between stdout and stderr (both middle-
+ * Split a 1000-char budget fairly between stdout and stderr (both middle-
  * truncated). Each stream's base share is half the budget; any unused share
  * from one stream is offered to the other.
  */
@@ -192,7 +191,7 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
   },
 
   /**
-   * /shake: truncate the `command` argument (tail) to 500 chars.
+   * /shake: truncate the `command` argument to 1000 chars (middle cut).
    * The arguments are stored as a JSON string; other fields pass through.
    */
   truncateArgs(raw: string): string {
@@ -213,7 +212,7 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
   },
 
   /**
-   * /shake: truncate stdout/stderr fairly against a shared 500-char budget
+   * /shake: truncate stdout/stderr fairly against a shared 1000-char budget
    * (tail-truncated, marker appended where cut). Other fields are preserved.
    */
   truncateResult(value: unknown): unknown | undefined {
