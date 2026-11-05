@@ -25,6 +25,7 @@ import { onAgentSpawn } from "../worker/index.ts";
 import { mkdir } from "../host.ts";
 import { logger } from "../log.ts";
 import { resolveConfig, type YogConfig, type PartialYogConfig } from "../config.ts";
+import { ModelInfoCache } from "./modelInfo.ts";
 import { setDescriptorOwnership } from "../vfs/index.ts";
 
 /** Options accepted by {@link createDaemon}. */
@@ -86,6 +87,16 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       logger.warn(
         `[yog] warning: session store unavailable (${(err as Error).message}); continuing`,
       );
+    }
+
+    // --- model info cache (best effort: continue without it) ---
+    let modelInfo: ModelInfoCache | undefined;
+    try {
+      const cachePath = join(config.stateRoot, "model-info.json");
+      modelInfo = new ModelInfoCache(cachePath, config.modelsDevPath);
+      await modelInfo.load();
+    } catch (err) {
+      logger.warn(`[yog] warning: model info unavailable (${(err as Error).message}); continuing`);
     }
 
     // --- agent state (best effort, mirrors the `run` path) ---
@@ -299,6 +310,9 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         },
         onHeal: (ids) => void healedIds.push(...ids),
         maxRounds: config.maxRoundsPerTurn,
+        ...(modelInfo
+          ? { contextWindow: modelInfo.getContextWindow(model) ?? undefined }
+          : {}),
       };
       try {
         await new TurnEngine(sink).run(client, model, messages, tools, turnOpts);
@@ -348,6 +362,13 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         models: [modelId],
         tools: ["bash"],
         features: ["sse", "transcript", "abort"],
+        ...(modelInfo
+          ? {
+              contextWindowSizes: {
+                [modelId]: modelInfo.getContextWindow(modelId) ?? 0,
+              },
+            }
+          : {}),
       },
       ...(store ? { store } : {}),
       ...(orchestrator ? { orchestrator } : {}),

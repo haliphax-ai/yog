@@ -23,6 +23,9 @@
 import { z } from "zod";
 import { cpus } from "node:os";
 import { readFile, stat } from "./host.ts";
+import { env } from "node:process";
+
+export const MODELS_DEV_PATH = process.env.YOG_MODELS_DEV_PATH ?? "/var/lib/yog/models.json";
 
 /** Default path the daemon reads its configuration from. */
 export const DEFAULT_CONFIG_PATH = "/var/lib/yog/config.json";
@@ -57,6 +60,8 @@ export const YogConfigSchema = z
     workers: z.number().int().min(1).optional(),
     /** Model id advertised by capabilities and used for turns. */
     model: z.string().min(1).default("gpt-4o-mini"),
+    /** Path to the local models.dev API JSON (for context-window lookups). */
+    modelsDevPath: z.string().min(1).default(MODELS_DEV_PATH),
     /** OpenAI-compatible endpoint; unset = SDK default. */
     providerBaseUrl: z.string().min(1).optional(),
     /** Provider API key; unset = SDK default resolution. */

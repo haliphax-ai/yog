@@ -253,7 +253,7 @@ export class TurnEngine {
           await emit("turn.finished", {
             turnId,
             durationMs: Date.now() - turnStartedAt,
-            ...(usage !== undefined ? { usage } : {}),
+            ...(usage !== undefined ? { usage: { ...usage, context_window: opts.contextWindow } } : {}),
           });
           return;
         }

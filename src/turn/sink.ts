@@ -22,6 +22,8 @@ export interface TurnUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  /** Context window size for the session model (from models.dev). */
+  context_window?: number;
 }
 
 /** Per-event payload shapes, discriminated by the envelope's `type`. */
