@@ -57,37 +57,51 @@ export class ModelInfoCache {
     return this.refresh();
   }
 
+  /**
+   * Refresh the flattened cache. Only reached when the cache is missing or
+   * older than 24h (see {@link load}). Prefers live data from the models.dev
+   * API so a previously fetched local copy never stays frozen; if the API is
+   * unreachable, falls back to the local source mirror (air-gapped deploys).
+   */
   async refresh(): Promise<ModelsDevCache> {
+    const text = await this.fetchLatest();
+    if (text !== undefined) {
+      return this.parseAndCache(text);
+    }
+
+    // Offline fallback: parse the locally mirrored source if one exists.
     try {
       const data = await readFile(this.sourcePath, "utf8");
       return this.parseAndCache(data);
     } catch (err) {
-      // Local source is missing or unreadable — bootstrap from the public
-      // models.dev API so a fresh deploy works out of the box. Best effort:
-      // the caller continues without context windows if this also fails.
-      logger.warn(
-        `[modelInfo] ${(err as Error).message}; attempting to fetch from ${MODELS_DEV_URL}`,
-      );
+      logger.error(`[modelInfo] failed to load models.dev data: ${(err as Error).message}`);
+      throw new Error(`failed to load models.dev data (${(err as Error).message})`);
+    }
+  }
+
+  /**
+   * Fetch the newest models.dev snapshot and mirror it to the local source
+   * path so later offline startups have something to parse. Returns
+   * `undefined` when the API is unreachable (the caller chooses the fallback).
+   */
+  private async fetchLatest(): Promise<string | undefined> {
+    try {
+      const res = await fetch(MODELS_DEV_URL);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
       try {
-        const res = await fetch(MODELS_DEV_URL);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const text = await res.text();
-        // Persist the fetched snapshot as the local source for later startups.
-        try {
-          await writeFile(this.sourcePath, text);
-        } catch (writeErr) {
-          logger.warn(
-            `[modelInfo] failed to persist fetched models.dev data: ${(writeErr as Error).message}`,
-          );
-        }
-        return this.parseAndCache(text);
-      } catch (fetchErr) {
-        const message =
-          `failed to load models.dev data (${(err as Error).message}; ` +
-          `fetch: ${(fetchErr as Error).message})`;
-        logger.error(`[modelInfo] ${message}`);
-        throw new Error(message);
+        await writeFile(this.sourcePath, text);
+      } catch (writeErr) {
+        logger.warn(
+          `[modelInfo] failed to persist fetched models.dev data: ${(writeErr as Error).message}`,
+        );
       }
+      return text;
+    } catch (err) {
+      logger.warn(
+        `[modelInfo] fetch failed (${(err as Error).message}); using local source if present`,
+      );
+      return undefined;
     }
   }
 
