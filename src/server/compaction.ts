@@ -27,8 +27,7 @@ import type OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import { TurnEngine, type TurnOptions } from "../turn.ts";
 import type { TurnSink } from "../turn/sink.ts";
-import { ToolRegistry } from "../toolkit/index.ts";
-
+import { ToolRegistry, TRUNCATION_IDENTIFIER } from "../toolkit/index.ts";
 /** Which summary artifact a client is asking for. */
 export type CompactionKind = "compact" | "handoff";
 
@@ -123,10 +122,9 @@ export function serializeTranscript(rows: Array<Record<string, unknown>>): strin
   return lines.join("\n");
 }
 
-/** Marker inserted where the middle of a too-long transcript is dropped. */
-export const MIDDLE_TRUNCATION_MARKER =
-  "\n\n[... TRUNCATED — middle of conversation omitted to fit the compaction " +
-  "model's context window ...]\n\n";
+/** Marker inserted where the middle of a too-long transcript is dropped
+ *  (same global marker /shake uses for its cuts). */
+export const MIDDLE_TRUNCATION_MARKER = TRUNCATION_IDENTIFIER;
 
 /**
  * Fit a serialized transcript (lines) under a token budget by keeping the
@@ -272,14 +270,13 @@ export function createCompactionRunner(deps: CompactionRunnerDeps): CompactionBo
       },
     };
 
-    // `compact` runs the summary turn in a fresh session (the old session is
-    // left untouched); `handoff` stays in the current session.
+    // Both compact and handoff start a NEW session: the summary turn itself is
+    // thrown away, and only its artifact becomes the new session's transcript.
     let targetSession = sessionId;
-    if (kind === "compact" && deps.store.createSession) {
+    if (deps.store.createSession) {
       const created = await deps.store.createSession();
       targetSession = created.id;
     }
-
     const opts: TurnOptions = {
       sessionId: targetSession,
       maxRounds: 1, // one completion; no tool loop
@@ -293,16 +290,9 @@ export function createCompactionRunner(deps: CompactionRunnerDeps): CompactionBo
     if (trimmed === "") {
       throw new Error(`compaction produced an empty summary (model ${model})`);
     }
-
-    // Start a fresh transcript with the artifact. The session's original
-    // system seed (if any) is preserved; all other history is replaced.
-    const systemSeed = transcript.filter(
-      (row) => row.role === "system",
-    ) as unknown as ChatCompletionMessageParam[];
-    const fresh: ChatCompletionMessageParam[] = [
-      ...systemSeed,
-      { role: "assistant", content: trimmed },
-    ];
+    // Start the fresh session with ONLY the artifact (the throwaway summary
+    // turn and the prior session are not carried forward).
+    const fresh: ChatCompletionMessageParam[] = [{ role: "assistant", content: trimmed }];
     await deps.store.resetTranscript(targetSession, fresh);
 
     return { kind, summary: trimmed, model, sessionId: targetSession, truncated };

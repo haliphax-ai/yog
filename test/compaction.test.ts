@@ -175,11 +175,10 @@ describe("createCompactionRunner", () => {
     expect(store.createSession).toHaveBeenCalledTimes(1);
     expect(store.resetTranscript).toHaveBeenCalledWith("fresh-session", expect.any(Array));
     const fresh = store.resetTranscript.mock.calls[0]![1] as ChatCompletionMessageParam[];
-    expect(fresh.map((m) => m.role)).toEqual(["system", "assistant"]);
-    expect(fresh[1]!.content).toBe(summary.trim());
+    expect(fresh.map((m) => m.role)).toEqual(["assistant"]);
+    expect(fresh[0]!.content).toBe(summary.trim());
   });
-
-  it("handoff stays in the current session with the intact transcript", async () => {
+  it("handoff also starts a fresh session with only the artifact", async () => {
     const store = stubStore([{ role: "user", content: "hello" }]);
     const runner = createCompactionRunner({
       client: summaryClient(summary),
@@ -187,9 +186,12 @@ describe("createCompactionRunner", () => {
       model: "session-model",
     });
     const result = await runner("s1", "handoff" as CompactionKind);
-    expect(result.sessionId).toBe("s1");
-    expect(store.createSession).not.toHaveBeenCalled();
-    expect(store.resetTranscript).toHaveBeenCalledWith("s1", expect.any(Array));
+    expect(result.sessionId).toBe("fresh-session");
+    expect(store.createSession).toHaveBeenCalledTimes(1);
+    expect(store.resetTranscript).toHaveBeenCalledWith("fresh-session", expect.any(Array));
+    const fresh = store.resetTranscript.mock.calls[0]![1] as ChatCompletionMessageParam[];
+    expect(fresh.map((m) => m.role)).toEqual(["assistant"]);
+    expect(fresh[0]!.content).toBe(summary.trim());
   });
 
   it("uses the configured compaction model when present", async () => {

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { TRUNCATION_IDENTIFIER, type ToolResult, type ToolSpec } from "../types.ts";
-
+import { middleTruncate } from "../truncation.ts";
 export interface BashResult extends ToolResult {
   stdout: string | null;
   stderr: string | null;
@@ -21,32 +21,25 @@ export interface ShellStateProvider {
 /** /shake truncation budgets (chars). */
 export const BASH_ARG_TRUNCATE_CHARS = 500;
 export const BASH_RESULT_TRUNCATE_CHARS = 500;
-
-/** Keep the head of `text` up to `max` chars; append the marker when cut. */
-function truncateTail(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return text.slice(0, max) + "\n" + TRUNCATION_IDENTIFIER;
+/** Middle-truncate a stream to `max` chars (head + tail, marker in the middle). */
+function truncateStream(text: string, max: number): string {
+  return text.length <= max ? text : middleTruncate(text, max);
 }
 
 /**
- * Split a 500-char budget fairly between stdout and stderr (both tail-
+ * Split a 500-char budget fairly between stdout and stderr (both middle-
  * truncated). Each stream's base share is half the budget; any unused share
  * from one stream is offered to the other.
  */
 function fairTruncate(stdout: string, stderr: string, budget: number): [string, string] {
   const half = Math.floor(budget / 2);
-  const out = truncateTail(stdout, Math.min(stdout.length, half));
-  const outUsed =
-    out.length - (out.includes(TRUNCATION_IDENTIFIER) ? 1 + TRUNCATION_IDENTIFIER.length : 0);
   const retainedOut = Math.min(stdout.length, half);
   let remaining = budget - retainedOut;
   const retainedErr = Math.min(stderr.length, remaining);
   remaining -= retainedErr;
   // Unused portion of the second stream flows back to the first.
   const extraOut = Math.min(stdout.length - retainedOut, remaining);
-  const outFinal = truncateTail(stdout, retainedOut + extraOut);
-  const errFinal = truncateTail(stderr, retainedErr);
-  return [outFinal, errFinal];
+  return [truncateStream(stdout, retainedOut + extraOut), truncateStream(stderr, retainedErr)];
 }
 
 /** Options the bash tool forwards to the injected executor. */
@@ -207,14 +200,14 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      return truncateTail(raw, BASH_ARG_TRUNCATE_CHARS);
+      return middleTruncate(raw, BASH_ARG_TRUNCATE_CHARS);
     }
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return truncateTail(raw, BASH_ARG_TRUNCATE_CHARS);
+      return middleTruncate(raw, BASH_ARG_TRUNCATE_CHARS);
     }
     const rec = parsed as Record<string, unknown>;
     if (typeof rec.command !== "string") return raw;
-    const command = truncateTail(rec.command, BASH_ARG_TRUNCATE_CHARS);
+    const command = middleTruncate(rec.command, BASH_ARG_TRUNCATE_CHARS);
     if (command === rec.command) return raw;
     return JSON.stringify({ ...rec, command });
   },

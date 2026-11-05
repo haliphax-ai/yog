@@ -11,6 +11,7 @@
  */
 export * from "./types.ts";
 export * from "./registry.ts";
+export * from "./truncation.ts";
 export {
   abortBash,
   bashTool,

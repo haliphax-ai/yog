@@ -1,13 +1,20 @@
 /**
  * `/shake` — the softest rung of the compaction ladder. Mechanical, local,
  * model-free transcript rewriting: tool-call arguments and tool results are
- * truncated (tail-first) using each tool's own truncator, with the global
- * {@link TRUNCATION_IDENTIFIER} marking every cut. No summary is produced and
- * no session/transcript reset happens — the same rows are rewritten in place.
+ * truncated (middle-first) using each tool's own truncator when available, with
+ * the global {@link TRUNCATION_IDENTIFIER} marking every cut. Tools without a
+ * bespoke truncator fall back to a generic 500-char middle-truncation of the
+ * JSON string, wrapped in a `{"truncated":"..."}` blob. No summary is produced
+ * and no session/transcript reset happens — the same rows are rewritten in
+ * place.
  */
 
 import type { ToolRegistry } from "../toolkit/index.ts";
-import { TRUNCATION_IDENTIFIER } from "../toolkit/index.ts";
+import {
+  TRUNCATION_IDENTIFIER,
+  FALLBACK_TRUNCATE_CHARS,
+  middleTruncate,
+} from "../toolkit/index.ts";
 
 /** Outcome of one shake pass. */
 export interface ShakeOutcome {
@@ -34,10 +41,16 @@ export interface ShakeDeps {
 
 export { TRUNCATION_IDENTIFIER };
 
+/** Wrap a middle-truncated JSON string in the generic marker blob. */
+function fallbackBlob(jsonText: string): string {
+  return JSON.stringify({ truncated: middleTruncate(jsonText, FALLBACK_TRUNCATE_CHARS) });
+}
+
 /**
  * Build the shake runner: rewrite a session's transcript in place, applying
- * each tool's `truncateArgs`/`truncateResult` hooks. Rows that change are
- * patched via the store; seq/turnId/timestamps are untouched.
+ * each tool's `truncateArgs`/`truncateResult` hooks (or the generic fallback).
+ * Rows that change are patched via the store; seq/turnId/timestamps are
+ * untouched.
  */
 export function createShakeRunner(deps: ShakeDeps) {
   return async (sessionId: string): Promise<ShakeOutcome> => {
@@ -74,12 +87,16 @@ export function createShakeRunner(deps: ShakeDeps) {
           const name = typeof call.function?.name === "string" ? call.function.name : undefined;
           if (id !== undefined && name !== undefined) callName.set(id, name);
           if (name === undefined) continue;
-          const tool = deps.registry.get(name);
-          if (!tool?.truncateArgs) continue;
           const raw = typeof call.function?.arguments === "string" ? call.function.arguments : "";
           if (raw === "") continue;
-          const replacement = tool.truncateArgs(raw);
-          if (replacement === raw) continue;
+          const tool = deps.registry.get(name);
+          let replacement: string | undefined;
+          if (tool?.truncateArgs) {
+            replacement = tool.truncateArgs(raw);
+          } else if (raw.length > FALLBACK_TRUNCATE_CHARS) {
+            replacement = fallbackBlob(raw);
+          }
+          if (replacement === undefined || replacement === raw) continue;
           next = next.map((c) =>
             c === call ? { ...c, function: { ...c.function, arguments: replacement } } : c,
           );
@@ -87,6 +104,7 @@ export function createShakeRunner(deps: ShakeDeps) {
           argsTruncated += 1;
         }
         if (changed) patch(seq, { tool_calls_json: JSON.stringify(next) });
+        continue;
       }
 
       if (role === "tool") {
@@ -96,21 +114,25 @@ export function createShakeRunner(deps: ShakeDeps) {
             : typeof row.tool_call_id === "string"
               ? callName.get(row.tool_call_id)
               : undefined;
-        const tool = name !== undefined ? deps.registry.get(name) : undefined;
-        if (!tool?.truncateResult) continue;
         if (typeof row.content !== "string") continue;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(row.content);
-        } catch {
-          continue; // not JSON-shaped — leave it alone
+        const tool = name !== undefined ? deps.registry.get(name) : undefined;
+        if (tool?.truncateResult) {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(row.content);
+          } catch {
+            continue; // not JSON-shaped — leave it alone
+          }
+          const replacementValue = tool.truncateResult(parsed);
+          if (replacementValue === undefined) continue;
+          const replacement = JSON.stringify(replacementValue);
+          if (replacement === row.content) continue;
+          patch(seq, { content: replacement });
+          resultsTruncated += 1;
+        } else if (row.content.length > FALLBACK_TRUNCATE_CHARS) {
+          patch(seq, { content: fallbackBlob(row.content) });
+          resultsTruncated += 1;
         }
-        const replacementValue = tool.truncateResult(parsed);
-        if (replacementValue === undefined) continue;
-        const replacement = JSON.stringify(replacementValue);
-        if (replacement === row.content) continue;
-        patch(seq, { content: replacement });
-        resultsTruncated += 1;
       }
     }
 
