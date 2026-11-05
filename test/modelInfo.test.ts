@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { mkdtemp, writeFile, utimes, rm } from "node:fs/promises";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, writeFile, readFile, utimes, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ModelInfoCache } from "../src/server/modelInfo.ts";
@@ -112,6 +112,59 @@ describe("ModelInfoCache", () => {
       const cache2 = new ModelInfoCache(cachePath, sourcePath);
       await cache2.load();
       expect(cache2.getContextWindow("model-long")).toBe(777);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+describe("ModelInfoCache network bootstrap", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("fetches from models.dev when the local source is missing and persists it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yog-modelinfo-"));
+    try {
+      const sourcePath = join(dir, "models.json");
+      const cachePath = join(dir, "model-info.json");
+      // No source file on disk — bootstrap from the network.
+
+      const fetchMock = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        text: async () => SOURCE,
+      }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const cache = new ModelInfoCache(cachePath, sourcePath);
+      await cache.load();
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(cache.getContextWindow("model-long")).toBe(1_100_000);
+      // The fetched snapshot is persisted as the local source.
+      await expect(readFile(sourcePath, "utf8")).resolves.toBe(SOURCE);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not hit the network when the local source exists", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yog-modelinfo-"));
+    try {
+      const sourcePath = join(dir, "models.json");
+      const cachePath = join(dir, "model-info.json");
+      await writeFile(sourcePath, SOURCE);
+
+      const fetchMock = vi.fn(() => {
+        throw new Error("network should not be used");
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const cache = new ModelInfoCache(cachePath, sourcePath);
+      await cache.load();
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(cache.getContextWindow("model-short")).toBe(8000);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
