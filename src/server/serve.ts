@@ -310,9 +310,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         },
         onHeal: (ids) => void healedIds.push(...ids),
         maxRounds: config.maxRoundsPerTurn,
-        ...(modelInfo
-          ? { contextWindow: modelInfo.getContextWindow(model) ?? undefined }
-          : {}),
+        ...(modelInfo ? { contextWindow: modelInfo.getContextWindow(model) ?? undefined } : {}),
       };
       try {
         await new TurnEngine(sink).run(client, model, messages, tools, turnOpts);
@@ -365,7 +363,9 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         ...(modelInfo
           ? {
               contextWindowSizes: {
-                [modelId]: modelInfo.getContextWindow(modelId) ?? 0,
+                ...(modelInfo.getContextWindow(modelId) !== undefined
+                  ? { [modelId]: modelInfo.getContextWindow(modelId)! }
+                  : {}),
               },
             }
           : {}),

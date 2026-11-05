@@ -25,7 +25,7 @@ import { cpus } from "node:os";
 import { readFile, stat } from "./host.ts";
 import { env } from "node:process";
 
-export const MODELS_DEV_PATH = process.env.YOG_MODELS_DEV_PATH ?? "/var/lib/yog/models.json";
+export const MODELS_DEV_PATH = env.YOG_MODELS_DEV_PATH ?? "/var/lib/yog/models.json";
 
 /** Default path the daemon reads its configuration from. */
 export const DEFAULT_CONFIG_PATH = "/var/lib/yog/config.json";

@@ -116,6 +116,11 @@ export interface TurnOptions {
    */
   maxRounds?: number;
   /**
+   * Context window size in tokens for the session's model. When set, it is
+   * forwarded on terminal usage payloads so clients can render fill ratios.
+   */
+  contextWindow?: number;
+  /**
    * Called whenever the accumulated turn usage changes (each round's usage
    * as it arrives). Lets callers capture the usage at a cut point even when
    * the turn never reaches a normal finish (abort / unwind).
@@ -253,7 +258,9 @@ export class TurnEngine {
           await emit("turn.finished", {
             turnId,
             durationMs: Date.now() - turnStartedAt,
-            ...(usage !== undefined ? { usage: { ...usage, context_window: opts.contextWindow } } : {}),
+            ...(usage !== undefined
+              ? { usage: { ...usage, context_window: opts.contextWindow } }
+              : {}),
           });
           return;
         }

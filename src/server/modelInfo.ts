@@ -61,8 +61,8 @@ export class ModelInfoCache {
       // Flatten the provider → models structure into a simple map
       const models: Record<string, ModelInfo> = {};
       for (const [, providerData] of Object.entries(source)) {
-        const pd = providerData?.models;
-        if (pd && typeof pd === "object") {
+        const pd = providerData?.models as Record<string, ModelInfo> | undefined;
+        if (pd) {
           for (const [modelId, modelData] of Object.entries(pd)) {
             models[modelId] = {
               id: modelId,
