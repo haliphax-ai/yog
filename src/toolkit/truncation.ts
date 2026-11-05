@@ -1,10 +1,14 @@
 import { TRUNCATION_IDENTIFIER } from "./types.ts";
 
 /** Default /shake fallback budget for tools without their own truncators. */
-export const FALLBACK_TRUNCATE_CHARS = 1000;
+export const FALLBACK_TRUNCATE_CHARS = 500;
+
+/** Chars-per-token heuristic for estimating context size (chars / 4). */
+export function estimateTokenCount(text: string): number {
+  return Math.max(1, Math.ceil(text.length / 4));
+}
 
 /**
- * Middle-truncate `text` to at most `max` chars: keep the head and the
  * tail, replace the dropped middle with the global truncation marker. Applies
  * to any tool arg/result that lacks a bespoke truncator.
  */

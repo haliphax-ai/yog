@@ -6,22 +6,22 @@
  * bespoke truncator fall back to a generic 500-char middle-truncation of the
  * JSON string, wrapped in a `{"truncated":"..."}` blob. No summary is produced
  * and no session/transcript reset happens — the same rows are rewritten in
- * place.
+ * place via `SessionStore.updateMessage`; seq/turnId/timestamps are untouched.
  */
-
 import type { ToolRegistry } from "../toolkit/index.ts";
 import {
   TRUNCATION_IDENTIFIER,
   FALLBACK_TRUNCATE_CHARS,
   middleTruncate,
+  estimateTokenCount,
 } from "../toolkit/index.ts";
-
-/** Outcome of one shake pass. */
 export interface ShakeOutcome {
   /** Number of tool-call argument payloads truncated. */
   argsTruncated: number;
   /** Number of tool-result payloads truncated. */
   resultsTruncated: number;
+  /** Estimated current transcript size in tokens (chars/4) after the shake. */
+  contextSize: number;
 }
 
 /** Store slice the shake runner needs. */
@@ -143,6 +143,14 @@ export function createShakeRunner(deps: ShakeDeps) {
       });
     }
 
-    return { argsTruncated, resultsTruncated };
+    // Estimated current transcript size (chars/4 over every surviving row).
+    let contextSize = 0;
+    const finalRows = await deps.store.getTranscript(sessionId);
+    for (const row of finalRows) {
+      const content = typeof row.content === "string" ? row.content : "";
+      const calls = typeof row.tool_calls_json === "string" ? row.tool_calls_json : "";
+      contextSize += estimateTokenCount(content) + estimateTokenCount(calls);
+    }
+    return { argsTruncated, resultsTruncated, contextSize };
   };
 }

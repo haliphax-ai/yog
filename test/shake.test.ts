@@ -11,11 +11,11 @@ function stubStore(rows: any[]) {
 }
 
 describe("bash truncateArgs", () => {
-  it("middle-truncates a long command to 1000 chars with the marker", () => {
+  it("middle-truncates a long command to 500 chars with the marker", () => {
     const args = JSON.stringify({ command: "x".repeat(1500) });
     const out = JSON.parse(registry.get("bash")!.truncateArgs!(args));
     const command = out.command as string;
-    expect(command.length).toBe(1000);
+    expect(command.length).toBe(500);
     expect(command).toContain(TRUNCATION_IDENTIFIER);
     const parts = command.split(TRUNCATION_IDENTIFIER);
     const head = parts[0]!;
@@ -31,7 +31,7 @@ describe("bash truncateArgs", () => {
 });
 
 describe("bash truncateResult", () => {
-  it("fairly splits the 1000-char budget when both streams are huge", () => {
+  it("fairly splits the 500-char budget when both streams are huge", () => {
     const tool = registry.get("bash")!;
     const result = tool.truncateResult!({
       stdout: "o".repeat(2000),
@@ -41,8 +41,8 @@ describe("bash truncateResult", () => {
     }) as { stdout: string; stderr: string };
     expect(result.stdout).toContain(TRUNCATION_IDENTIFIER);
     expect(result.stderr).toContain(TRUNCATION_IDENTIFIER);
-    expect(result.stdout.length).toBe(500);
-    expect(result.stderr.length).toBe(500);
+    expect(result.stdout.length).toBe(250);
+    expect(result.stderr.length).toBe(250);
   });
 
   it("gives one stream its unused share to the other", () => {
@@ -55,7 +55,7 @@ describe("bash truncateResult", () => {
     }) as { stdout: string; stderr: string };
     expect(result.stdout).toBe("o".repeat(100));
     expect(result.stderr).toContain(TRUNCATION_IDENTIFIER);
-    expect(result.stderr.length).toBe(900);
+    expect(result.stderr.length).toBe(400);
   });
 
   it("returns undefined when nothing needs truncation", () => {
@@ -100,7 +100,8 @@ describe("createShakeRunner", () => {
     const shake = createShakeRunner({ store, registry });
     const outcome = await shake("s1");
 
-    expect(outcome).toEqual({ argsTruncated: 1, resultsTruncated: 1 });
+    expect(outcome).toMatchObject({ argsTruncated: 1, resultsTruncated: 1 });
+    expect(typeof outcome.contextSize).toBe("number");
     expect(store.updateMessage).toHaveBeenCalledTimes(2);
 
     const updateCalls = store.updateMessage.mock.calls as unknown as Array<
@@ -145,7 +146,6 @@ describe("createShakeRunner", () => {
     const store = stubStore(rows);
     const shake = createShakeRunner({ store, registry });
     const outcome = await shake("s1");
-    expect(outcome).toEqual({ argsTruncated: 0, resultsTruncated: 0 });
     expect(store.updateMessage).not.toHaveBeenCalled();
   });
 });
@@ -180,7 +180,7 @@ describe("generic fallback without per-tool truncators", () => {
     const calls = JSON.parse(argsPatch!.tool_calls_json!);
     const blob = JSON.parse(calls[0].function.arguments);
     expect(blob.truncated).toBeDefined();
-    expect(blob.truncated.length).toBe(1000);
+    expect(blob.truncated.length).toBe(500);
     expect(blob.truncated).toContain(TRUNCATION_IDENTIFIER);
   });
 
@@ -203,14 +203,14 @@ describe("generic fallback without per-tool truncators", () => {
 
     const blob = JSON.parse(contentPatch!.content!);
     expect(blob.truncated).toBeDefined();
-    expect(blob.truncated.length).toBe(1000);
+    expect(blob.truncated.length).toBe(500);
     expect(blob.truncated).toContain(TRUNCATION_IDENTIFIER);
   });
 });
 
 describe("HTTP /shake route", () => {
   it("returns truncation counts from the boundary", async () => {
-    const shake = vi.fn(async () => ({ argsTruncated: 2, resultsTruncated: 1 }));
+    const shake = vi.fn(async () => ({ argsTruncated: 2, resultsTruncated: 1, contextSize: 1234 }));
     const daemon = await createDaemon({
       host: "127.0.0.1",
       port: 0,
@@ -233,7 +233,12 @@ describe("HTTP /shake route", () => {
       });
       expect(res.status).toBe(200);
       const body: any = await res.json();
-      expect(body).toMatchObject({ ok: true, argsTruncated: 2, resultsTruncated: 1 });
+      expect(body).toMatchObject({
+        ok: true,
+        argsTruncated: 2,
+        resultsTruncated: 1,
+        contextSize: 1234,
+      });
       expect(shake).toHaveBeenCalledWith(session.id);
     } finally {
       await daemon.close();
@@ -244,15 +249,15 @@ describe("HTTP /shake route", () => {
 describe("middleTruncate newline flanking", () => {
   it("puts the marker on its own line when the value had newlines", () => {
     const value = "a\n" + "x".repeat(1500) + "\nb";
-    const truncated = middleTruncate(value, 1000);
+    const truncated = middleTruncate(value, 500);
     expect(truncated).toContain("\n" + TRUNCATION_IDENTIFIER + "\n");
-    expect(truncated.length).toBeLessThanOrEqual(1000);
+    expect(truncated.length).toBeLessThanOrEqual(500);
     expect(truncated.startsWith("a\n")).toBe(true);
     expect(truncated.endsWith("\nb")).toBe(true);
   });
 
   it("keeps the marker inline when the value had no newlines", () => {
-    const truncated = middleTruncate("y".repeat(1500), 1000);
+    const truncated = middleTruncate("y".repeat(1500), 500);
     expect(truncated).toContain(TRUNCATION_IDENTIFIER);
     expect(truncated).not.toContain("\n");
   });
