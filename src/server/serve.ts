@@ -26,6 +26,8 @@ import { mkdir } from "../host.ts";
 import { logger } from "../log.ts";
 import { resolveConfig, type YogConfig, type PartialYogConfig } from "../config.ts";
 import { ModelInfoCache } from "./modelInfo.ts";
+import { createCompactionRunner, type CompactionBoundary } from "./compaction.ts";
+import { createShakeRunner, type ShakeOutcome } from "./shake.ts";
 import { setDescriptorOwnership } from "../vfs/index.ts";
 
 /** Options accepted by {@link createDaemon}. */
@@ -354,25 +356,55 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     // parallelism, per-session FIFO, abort fan-out) ---
     const orchestrator = new SessionOrchestrator({ store, pool, executeTurn });
 
+    // --- compaction/handoff runner: throwaway summary turn (no tools, no
+    // session history) that resets the transcript to the produced artifact.
+    // Uses a second copy of the session model, or config.compactionModel. ---
+    let compaction: CompactionBoundary | undefined;
+    if (store) {
+      try {
+        compaction = createCompactionRunner({
+          client: openaiClient(config),
+          store,
+          model: modelId,
+          ...(config.compactionModel !== undefined
+            ? { compactionModel: config.compactionModel }
+            : {}),
+          ...(modelInfo ? { modelInfo } : {}),
+        });
+      } catch (err) {
+        logger.warn(
+          `[yog] warning: compaction unavailable (${(err as Error).message}); continuing`,
+        );
+      }
+    }
+
+    // --- /shake runner: mechanical transcript rewrite (truncate tool args
+    // and results via each tool's truncators). No model call. ---
+    let shake: ((sessionId: string) => Promise<ShakeOutcome>) | undefined;
+    if (store) {
+      try {
+        shake = createShakeRunner({ store, registry: tools });
+      } catch (err) {
+        logger.warn(`[yog] warning: shake unavailable (${(err as Error).message}); continuing`);
+      }
+    }
+
     const deps: HttpDeps = {
       capabilities: {
         contractVersion: "v1",
         models: [modelId],
         tools: ["bash"],
-        features: ["sse", "transcript", "abort"],
-        ...(modelInfo
-          ? {
-              contextWindowSizes: {
-                ...(modelInfo.getContextWindow(modelId) !== undefined
-                  ? { [modelId]: modelInfo.getContextWindow(modelId)! }
-                  : {}),
-              },
-            }
-          : {}),
+        features: ["sse", "transcript", "abort", "compact", "handoff", "shake"],
+        contextWindowSizes: (() => {
+          const cw = modelInfo?.getContextWindow(modelId);
+          return cw === undefined ? {} : { [modelId]: cw };
+        })(),
       },
       ...(store ? { store } : {}),
       ...(orchestrator ? { orchestrator } : {}),
+      ...(compaction ? { compaction } : {}),
       bus,
+      ...(shake ? { shake } : {}),
       // Turn-abort kill chain (POST /v1/sessions/{id}/abort): kill the
       // session's running bash script, then let the orchestrator unwind.
       onUsageFor: (sessionId: string) => usageBySession.get(sessionId),

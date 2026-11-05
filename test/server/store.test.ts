@@ -86,3 +86,28 @@ describe("SessionStore", () => {
     expect(turns[0].status).toBe("interrupted");
   });
 });
+
+describe("SessionStore.resetTranscript", () => {
+  it("replaces the transcript with a fresh batch and restarts seq at 1", async () => {
+    const session = await store.createSession({ system: "seed" });
+    await store.appendMessages(session.id, [
+      { role: "user", content: "old q" },
+      { role: "assistant", content: "old a" },
+    ]);
+
+    const fresh = await store.resetTranscript(session.id, [
+      { role: "system", content: "seed" },
+      { role: "assistant", content: "# Summary" },
+    ]);
+    expect(fresh.map((m) => m.seq)).toEqual([1, 2]);
+    expect(fresh.every((m) => m.turn_id === null)).toBe(true);
+
+    const transcript = await store.getTranscript(session.id);
+    expect(transcript).toHaveLength(2);
+    expect(transcript[0]).toMatchObject({ role: "system", content: "seed", seq: 1 });
+    expect(transcript[1]).toMatchObject({ role: "assistant", content: "# Summary", seq: 2 });
+
+    const sessionRow = await store.getSession(session.id);
+    expect(sessionRow.updated_at).toBeTruthy();
+  });
+});

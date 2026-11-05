@@ -14,6 +14,9 @@ export interface ToolResult {
   [key: string]: unknown;
 }
 
+/** Global marker used wherever /shake truncates args or tool output. */
+export const TRUNCATION_IDENTIFIER = "[✂️ TRUNCATED]";
+
 /**
  * Execution context passed through the registry into every tool run. Carries
  * the abort plumbing: the turn engine stamps the session id (the abort key
@@ -43,4 +46,18 @@ export interface ToolSpec<
   /** Response shape used when the call is aborted (validation error / exception). */
   failure(error: string): TResult;
   run(args: TArgs, ctx?: ToolContext): Promise<TResult>;
+  /**
+   * Optional transcript-rewrite hook for `/shake`: truncate a tool call's
+   * raw arguments (JSON string as stored in the transcript). Return the
+   * (possibly shortened) arguments string; append {@link TRUNCATION_IDENTIFIER}
+   * where content is cut.
+   */
+  truncateArgs?(raw: string): string;
+  /**
+   * Optional transcript-rewrite hook for `/shake`: truncate a stored tool
+   * result value (the parsed JSON of the tool row's content). Return the
+   * replacement value; append {@link TRUNCATION_IDENTIFIER} where content is
+   * cut. `undefined` leaves the result untouched.
+   */
+  truncateResult?(value: unknown): unknown | undefined;
 }

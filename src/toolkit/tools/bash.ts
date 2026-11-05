@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { type ToolResult, type ToolSpec } from "../types.ts";
-
+import { middleTruncate } from "../truncation.ts";
 export interface BashResult extends ToolResult {
   stdout: string | null;
   stderr: string | null;
@@ -16,6 +16,30 @@ export interface BashArgs extends Record<string, unknown> {
 export interface ShellStateProvider {
   load(): Promise<{ cwd?: string; env?: string; functions?: string } | undefined>;
   save(state: { cwd: string; env: string; functions: string }): Promise<void>;
+}
+
+/** /shake truncation budgets (chars). */
+export const BASH_ARG_TRUNCATE_CHARS = 500;
+export const BASH_RESULT_TRUNCATE_CHARS = 500;
+/** Middle-truncate a stream to `max` chars (head + tail, marker in the middle). */
+function truncateStream(text: string, max: number): string {
+  return text.length <= max ? text : middleTruncate(text, max);
+}
+
+/**
+ * Split a 500-char budget fairly between stdout and stderr (both middle-
+ * truncated). Each stream's base share is half the budget; any unused share
+ * from one stream is offered to the other.
+ */
+function fairTruncate(stdout: string, stderr: string, budget: number): [string, string] {
+  const half = Math.floor(budget / 2);
+  const retainedOut = Math.min(stdout.length, half);
+  let remaining = budget - retainedOut;
+  const retainedErr = Math.min(stderr.length, remaining);
+  remaining -= retainedErr;
+  // Unused portion of the second stream flows back to the first.
+  const extraOut = Math.min(stdout.length - retainedOut, remaining);
+  return [truncateStream(stdout, retainedOut + extraOut), truncateStream(stderr, retainedErr)];
 }
 
 /** Options the bash tool forwards to the injected executor. */
@@ -165,5 +189,50 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
         error: err instanceof Error ? err.message : String(err),
       };
     }
+  },
+
+  /**
+   * /shake: truncate the `command` argument (tail) to 500 chars.
+   * The arguments are stored as a JSON string; other fields pass through.
+   */
+  truncateArgs(raw: string): string {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return middleTruncate(raw, BASH_ARG_TRUNCATE_CHARS);
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return middleTruncate(raw, BASH_ARG_TRUNCATE_CHARS);
+    }
+    const rec = parsed as Record<string, unknown>;
+    if (typeof rec.command !== "string") return raw;
+    const command = middleTruncate(rec.command, BASH_ARG_TRUNCATE_CHARS);
+    if (command === rec.command) return raw;
+    return JSON.stringify({ ...rec, command });
+  },
+
+  /**
+   * /shake: truncate stdout/stderr fairly against a shared 500-char budget
+   * (tail-truncated, marker appended where cut). Other fields are preserved.
+   */
+  truncateResult(value: unknown): unknown | undefined {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const rec = value as Record<string, unknown>;
+    const stdout = typeof rec.stdout === "string" ? (rec.stdout as string) : "";
+    const stderr = typeof rec.stderr === "string" ? (rec.stderr as string) : "";
+    if (
+      (rec.stdout === null || rec.stdout === undefined) &&
+      (rec.stderr === null || rec.stderr === undefined)
+    ) {
+      return undefined; // nothing to truncate
+    }
+    const [newOut, newErr] = fairTruncate(stdout, stderr, BASH_RESULT_TRUNCATE_CHARS);
+    if (newOut === rec.stdout && newErr === rec.stderr) return undefined;
+    return {
+      ...rec,
+      stdout: newOut,
+      stderr: newErr,
+    };
   },
 };
