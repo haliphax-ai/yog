@@ -595,14 +595,12 @@ export function createHttpServer(deps: HttpDeps): Server {
         try {
           const result = await compaction(id, kind, guidance);
           const targetId = typeof result.sessionId === "string" ? result.sessionId : id;
-          const after = await lookupSession(targetId);
           sendJson(res, 200, {
             ok: true,
             kind,
             summary: result.summary,
             model: result.model,
             truncated: result.truncated === true,
-            session: after ?? session,
             sessionId: targetId,
           });
         } catch (err) {
