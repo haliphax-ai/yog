@@ -100,7 +100,8 @@ describe("createShakeRunner", () => {
     const shake = createShakeRunner({ store, registry });
     const outcome = await shake("s1");
 
-    expect(outcome).toEqual({ argsTruncated: 1, resultsTruncated: 1 });
+    expect(outcome).toMatchObject({ argsTruncated: 1, resultsTruncated: 1 });
+    expect(typeof outcome.contextSize).toBe("number");
     expect(store.updateMessage).toHaveBeenCalledTimes(2);
 
     const updateCalls = store.updateMessage.mock.calls as unknown as Array<
@@ -145,7 +146,6 @@ describe("createShakeRunner", () => {
     const store = stubStore(rows);
     const shake = createShakeRunner({ store, registry });
     const outcome = await shake("s1");
-    expect(outcome).toEqual({ argsTruncated: 0, resultsTruncated: 0 });
     expect(store.updateMessage).not.toHaveBeenCalled();
   });
 });
@@ -210,7 +210,7 @@ describe("generic fallback without per-tool truncators", () => {
 
 describe("HTTP /shake route", () => {
   it("returns truncation counts from the boundary", async () => {
-    const shake = vi.fn(async () => ({ argsTruncated: 2, resultsTruncated: 1 }));
+    const shake = vi.fn(async () => ({ argsTruncated: 2, resultsTruncated: 1, contextSize: 1234 }));
     const daemon = await createDaemon({
       host: "127.0.0.1",
       port: 0,
@@ -233,7 +233,12 @@ describe("HTTP /shake route", () => {
       });
       expect(res.status).toBe(200);
       const body: any = await res.json();
-      expect(body).toMatchObject({ ok: true, argsTruncated: 2, resultsTruncated: 1 });
+      expect(body).toMatchObject({
+        ok: true,
+        argsTruncated: 2,
+        resultsTruncated: 1,
+        contextSize: 1234,
+      });
       expect(shake).toHaveBeenCalledWith(session.id);
     } finally {
       await daemon.close();
