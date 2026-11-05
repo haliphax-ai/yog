@@ -17,19 +17,18 @@ The daemon is reached by clients at its origin (default
 [yog-client-tui](https://github.com/haliphax-ai/yog-client-tui)
 application, which speaks the v1 HTTP/SSE contract directly.
 
-
 ### Contract endpoints (v1)
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/v1/capabilities` | Advertise server: contract version, models, tools, `features` (`["sse", "transcript", "abort"]`) |
-| POST | `/v1/sessions` | Create a session, optional body `{ title?, system? }` → `{ session: { id, … } }` (201) |
-| GET | `/v1/sessions/{id}` | Session status → `{ session }` |
-| DELETE | `/v1/sessions/{id}` | **Detach** (advisory, `?purge=true` hard-deletes) → `{ session }` |
-| POST | `/v1/sessions/{id}/turns` | Run a turn; streams an SSE transcript (a dormant session is implicitly revived) |
-| POST | `/v1/sessions/{id}/abort` | **Abort the current turn**: kill the tool call in flight, close the model stream, heal the transcript |
-| GET | `/v1/sessions/{id}/transcript` | **Rehydration dump**: the session's canonical transcript → `{ session, messages, turns? }` (optional per-turn metrics) |
-| GET | `/v1/sessions/{id}/turns/{turnId}` | **Turn-status recovery/replay**: fetch terminal turn state when the SSE stream died |
+| Method | Path                               | Purpose                                                                                                                |
+| ------ | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/v1/capabilities`                 | Advertise server: contract version, models, tools, `features` (`["sse", "transcript", "abort"]`)                       |
+| POST   | `/v1/sessions`                     | Create a session, optional body `{ title?, system? }` → `{ session: { id, … } }` (201)                                 |
+| GET    | `/v1/sessions/{id}`                | Session status → `{ session }`                                                                                         |
+| DELETE | `/v1/sessions/{id}`                | **Detach** (advisory, `?purge=true` hard-deletes) → `{ session }`                                                      |
+| POST   | `/v1/sessions/{id}/turns`          | Run a turn; streams an SSE transcript (a dormant session is implicitly revived)                                        |
+| POST   | `/v1/sessions/{id}/abort`          | **Abort the current turn**: kill the tool call in flight, close the model stream, heal the transcript                  |
+| GET    | `/v1/sessions/{id}/transcript`     | **Rehydration dump**: the session's canonical transcript → `{ session, messages, turns? }` (optional per-turn metrics) |
+| GET    | `/v1/sessions/{id}/turns/{turnId}` | **Turn-status recovery/replay**: fetch terminal turn state when the SSE stream died                                    |
 
 Turn requests are JSON: `{ "prompt": "...", "model": "..." }` (`prompt` is
 required; `model` defaults to the server's model). **Clients never send
@@ -42,15 +41,15 @@ is part of every turn's context.
 The SSE stream frames each self-describing envelope
 (`{ id, type, version, ts, data }`) as `event:<type>` / `data:<envelope-json>`:
 
-| Event | `data` payload | Meaning |
-|---|---|---|
-| `turn.started` | `{ turnId, model, ts }` | turn accepted; streaming begins |
-| `message.delta` | `{ text }` | assistant text chunk (print as it arrives) |
-| `tool.call` | `{ id, name, args }` | model invoked a tool |
-| `tool.result` | `{ id, name, ok, result?, tokens? }` | tool outcome (optional `tokens` = per-call completion-token attribution when the provider reports round usage) |
-| `turn.finished` | `{ turnId, durationMs, usage?, stopReason? }` | normal end (optional `usage` = `{ prompt_tokens, completion_tokens, total_tokens }` when the provider reports it) |
-| `turn.aborted` | `{ reason, usage? }` | operator aborted the turn; transcript was healed (optional `usage` = totals as of the cut point when the provider reported any) |
-| `error` | `{ code, message }` | terminal failure (e.g. `provider_error`) |
+| Event           | `data` payload                                | Meaning                                                                                                                         |
+| --------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `turn.started`  | `{ turnId, model, ts }`                       | turn accepted; streaming begins                                                                                                 |
+| `message.delta` | `{ text }`                                    | assistant text chunk (print as it arrives)                                                                                      |
+| `tool.call`     | `{ id, name, args }`                          | model invoked a tool                                                                                                            |
+| `tool.result`   | `{ id, name, ok, result?, tokens? }`          | tool outcome (optional `tokens` = per-call completion-token attribution when the provider reports round usage)                  |
+| `turn.finished` | `{ turnId, durationMs, usage?, stopReason? }` | normal end (optional `usage` = `{ prompt_tokens, completion_tokens, total_tokens }` when the provider reports it)               |
+| `turn.aborted`  | `{ reason, usage? }`                          | operator aborted the turn; transcript was healed (optional `usage` = totals as of the cut point when the provider reported any) |
+| `error`         | `{ code, message }`                           | terminal failure (e.g. `provider_error`)                                                                                        |
 
 **Abort.** `POST /v1/sessions/{id}/abort` ends the session's current turn —
 the abort is hard: the SSE stream frames the terminal `turn.aborted`
@@ -106,7 +105,7 @@ There is no terminal "closed" state short of retention. `DELETE
 stamped, nothing forfeited (transcript, turns, events all stay), idempotent.
 A turn on a dormant session implicitly **revives** it — status back to
 `open`, `detached_at` cleared, retention clock reset; there is no reopen
-endpoint, reusing the id *is* the reopen. A pruned session is the only truly
+endpoint, reusing the id _is_ the reopen. A pruned session is the only truly
 terminal state: `?purge=true` deletes immediately, and dormant sessions past
 the 30-day retention window are pruned at daemon startup, both followed by
 404 `unknown_session` everywhere.
@@ -155,24 +154,24 @@ or validate **fails the startup loudly** — typos must not silently fall back.
 Resolution order (later wins): zod defaults ← config file ← explicit
 injection (`createDaemon({ config })`, used by tests).
 
-| Field | Type | Default | Purpose |
-|---|---|---|---|
-| `host` | string | `127.0.0.1` | HTTP/SSE bind address |
-| `port` | int | `8111` | HTTP/SSE port |
-| `apiToken` | string? | *(unset)* | require `Authorization: Bearer …` on the contract |
-| `dbSlowMs` | int | `50` | log a warning when a store query exceeds this (log-only tripwire) |
-| `stateRoot` | string | `/var/lib/yog` | state root (`sessions.db`, `agentfs/<agentId>.db`) |
-| `statePath` | string? | *(derived)* | full-path override for the agent state db |
-| `workers` | int? | `max(1, cpus - 1)` | worker pool size for parallel tool execution |
-| `model` | string | `gpt-4o-mini` | model id advertised by capabilities and used for turns |
-| `providerBaseUrl` | string? | *(SDK default)* | OpenAI-compatible endpoint |
-| `providerApiKey` | string? | *(SDK default)* | provider API key |
-| `mountPoint` | string | `/yog` | FUSE mountpoint |
-| `allowOther` | bool | `false` | allow other users to reach the mount (container: agent ≠ daemon user) |
-| `maxRoundsPerTurn` | int | `200` | tool-call rounds allowed per turn before the engine stops it with `turn.finished { stopReason: "max_rounds" }` |
-| `agentUid` / `agentGid` | int | `1100` | daemon/agent split: spawn bash workers as this uid/gid (the documented scheme: the `yog` daemon is uid 900, agents start at 1100 — model-executed code never runs as the daemon). Equal to the current process = no drop. |
-| `agentHome` | string | `/home/agent` | HOME **and cwd** for agent-spawned workers |
-| `agentStateDir` | string? | *(unset → `<agentHome>/.harness`)* | persistent shell snapshot directory for the bash tool; relative values resolve against the agent's HOME (never the script's cwd, which changes with the script's own `cd`) |
+| Field                   | Type    | Default                            | Purpose                                                                                                                                                                                                                   |
+| ----------------------- | ------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `host`                  | string  | `127.0.0.1`                        | HTTP/SSE bind address                                                                                                                                                                                                     |
+| `port`                  | int     | `8111`                             | HTTP/SSE port                                                                                                                                                                                                             |
+| `apiToken`              | string? | _(unset)_                          | require `Authorization: Bearer …` on the contract                                                                                                                                                                         |
+| `dbSlowMs`              | int     | `50`                               | log a warning when a store query exceeds this (log-only tripwire)                                                                                                                                                         |
+| `stateRoot`             | string  | `/var/lib/yog`                     | state root (`sessions.db`, `agentfs/<agentId>.db`)                                                                                                                                                                        |
+| `statePath`             | string? | _(derived)_                        | full-path override for the agent state db                                                                                                                                                                                 |
+| `workers`               | int?    | `max(1, cpus - 1)`                 | worker pool size for parallel tool execution                                                                                                                                                                              |
+| `model`                 | string  | `gpt-4o-mini`                      | model id advertised by capabilities and used for turns                                                                                                                                                                    |
+| `providerBaseUrl`       | string? | _(SDK default)_                    | OpenAI-compatible endpoint                                                                                                                                                                                                |
+| `providerApiKey`        | string? | _(SDK default)_                    | provider API key                                                                                                                                                                                                          |
+| `mountPoint`            | string  | `/yog`                             | FUSE mountpoint                                                                                                                                                                                                           |
+| `allowOther`            | bool    | `false`                            | allow other users to reach the mount (container: agent ≠ daemon user)                                                                                                                                                     |
+| `maxRoundsPerTurn`      | int     | `200`                              | tool-call rounds allowed per turn before the engine stops it with `turn.finished { stopReason: "max_rounds" }`                                                                                                            |
+| `agentUid` / `agentGid` | int     | `1100`                             | daemon/agent split: spawn bash workers as this uid/gid (the documented scheme: the `yog` daemon is uid 900, agents start at 1100 — model-executed code never runs as the daemon). Equal to the current process = no drop. |
+| `agentHome`             | string  | `/home/agent`                      | HOME **and cwd** for agent-spawned workers                                                                                                                                                                                |
+| `agentStateDir`         | string? | _(unset → `<agentHome>/.harness`)_ | persistent shell snapshot directory for the bash tool; relative values resolve against the agent's HOME (never the script's cwd, which changes with the script's own `cd`)                                                |
 
 Example `config.json`:
 
@@ -411,7 +410,6 @@ The state layer (`src/state/`) is the only code allowed to import the agentfs
 SDK (enforced by dependency-cruiser). The daemon keeps its own sqlite state
 (`sessions.db`) under the same `stateRoot`.
 
-
 ## Environment requirements
 
 The `fuse-native` addon needs a FUSE device and mount privileges:
@@ -502,7 +500,6 @@ system libfuse2 is installed, provide it:
 ```sh
 LD_LIBRARY_PATH=$PWD/node_modules/fuse-native/prebuilds/linux-x64 npm start -- ...
 ```
-
 
 ## Scripts
 

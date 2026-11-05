@@ -153,7 +153,9 @@ module.exports = {
       name: "worker-leaf",
       severity: "error",
       from: { path: "^src/worker/" },
-      to: { path: "^src/(vfs/|toolkit/|state/|turn/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)" },
+      to: {
+        path: "^src/(vfs/|toolkit/|state/|turn/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)",
+      },
     },
 
     // The config module is a leaf: pure schema + file loader, no domain
@@ -163,7 +165,9 @@ module.exports = {
       name: "config-leaf",
       severity: "error",
       from: { path: "^src/config\\.ts$" },
-      to: { path: "^src/(vfs/|toolkit/|worker/|state/|server/|turn/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)" },
+      to: {
+        path: "^src/(vfs/|toolkit/|worker/|state/|server/|turn/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)",
+      },
     },
 
     // Configuration is loaded once at the composition root (the CLI entry and

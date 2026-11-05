@@ -66,4 +66,4 @@ jobs:
     steps:
       - uses: haliphax-ai/yog/.github@main
       - name: oxfmt
-        run: npx oxfmt --no-error-on-unmatched-pattern .
+        run: npx oxfmt --check --no-error-on-unmatched-pattern .

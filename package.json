@@ -43,7 +43,7 @@
   "nano-staged": {
     "**/*.ts": [
       "oxfmt",
-      "oxlint"
+      "oxlint --fix"
     ]
   }
 }
