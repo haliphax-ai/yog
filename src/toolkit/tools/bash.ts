@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { TRUNCATION_IDENTIFIER, type ToolResult, type ToolSpec } from "../types.ts";
+import { type ToolResult, type ToolSpec } from "../types.ts";
 import { middleTruncate } from "../truncation.ts";
 export interface BashResult extends ToolResult {
   stdout: string | null;

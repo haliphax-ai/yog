@@ -26,11 +26,7 @@ import { mkdir } from "../host.ts";
 import { logger } from "../log.ts";
 import { resolveConfig, type YogConfig, type PartialYogConfig } from "../config.ts";
 import { ModelInfoCache } from "./modelInfo.ts";
-import {
-  createCompactionRunner,
-  type CompactionBoundary,
-  type CompactionKind,
-} from "./compaction.ts";
+import { createCompactionRunner, type CompactionBoundary } from "./compaction.ts";
 import { createShakeRunner, type ShakeOutcome } from "./shake.ts";
 import { setDescriptorOwnership } from "../vfs/index.ts";
 
@@ -399,15 +395,10 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         models: [modelId],
         tools: ["bash"],
         features: ["sse", "transcript", "abort", "compact", "handoff", "shake"],
-        ...(modelInfo
-          ? {
-              contextWindowSizes: {
-                ...(modelInfo.getContextWindow(modelId) !== undefined
-                  ? { [modelId]: modelInfo.getContextWindow(modelId)! }
-                  : {}),
-              },
-            }
-          : {}),
+        contextWindowSizes: (() => {
+          const cw = modelInfo?.getContextWindow(modelId);
+          return cw === undefined ? {} : { [modelId]: cw };
+        })(),
       },
       ...(store ? { store } : {}),
       ...(orchestrator ? { orchestrator } : {}),

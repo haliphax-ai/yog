@@ -7,32 +7,6 @@ import type { Daemon } from "../../src/server/serve.ts";
 import { SessionStore } from "../../src/server/store/sessions.ts";
 import { newSessionId } from "../../src/state/index.ts";
 
-/** Minimal SSE frame parser: splits `event:`/`data:` blocks. */
-interface Frame {
-  event: string;
-  data: any;
-}
-
-function parseSse(text: string): Frame[] {
-  const frames: Frame[] = [];
-  for (const block of text.split("\n\n")) {
-    if (!block.trim()) continue;
-    let event = "";
-    let data = "";
-    for (const line of block.split("\n")) {
-      if (line.startsWith("event:")) event = line.slice(6).trim();
-      else if (line.startsWith("data:")) data += line.slice(5).trim();
-    }
-    if (event) frames.push({ event, data: JSON.parse(data) });
-  }
-  return frames;
-}
-
-/** `Response.json()` with a loose type: assertions do the checking. */
-async function json(res: Response): Promise<any> {
-  return (await res.json()) as any;
-}
-
 /** Fake model that captures the `messages` argument it receives. */
 function capturingModel() {
   const captured: { messages: any[]; prompt: string; model: string }[] = [];
