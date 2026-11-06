@@ -455,6 +455,9 @@ The `fuse-native` addon needs a FUSE device and mount privileges:
   Docker's overlay filesystem). If you see `Failed to unlock file:
   Permission denied`, ensure the volume mount is present (or set
   `statePath` to a path on a real volume).
+- The compose manifest opts the container out of AppArmor entirely
+  (`security_opt: [apparmor=unconfined]`), so no host AppArmor profile —
+  default or otherwise — applies to it. Only seccomp still confines it.
 - On hosts enforcing seccomp, the default profile blocks mount syscalls.
   The image is therefore run with:
 
