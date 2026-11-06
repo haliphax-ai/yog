@@ -17,7 +17,7 @@ const CAPABILITIES = {
   features: ["sse", "transcript"],
 };
 
-/** Fake model (fallback path) that emits usage and per-call tokens. */
+/** Fake model (fallback path) that emits usage and round usage on tool results. */
 function usageModel() {
   return {
     async runTurn(
@@ -53,7 +53,13 @@ function usageModel() {
         type: "tool.result",
         version: 1,
         ts: Date.now(),
-        data: { id: "c1", name: "bash", ok: true, result: { exitCode: 0 }, tokens: 7 },
+        data: {
+          id: "c1",
+          name: "bash",
+          ok: true,
+          result: { exitCode: 0 },
+          usage: { prompt_tokens: 11, completion_tokens: 22, total_tokens: 33 },
+        },
       });
       await ctx.emit({
         id: 5,
@@ -77,7 +83,6 @@ function usageModel() {
         tool_call_id: "c1",
         name: "bash",
         content: JSON.stringify({ exitCode: 0 }),
-        tokens: 7,
       });
     },
   };
@@ -120,8 +125,8 @@ async function runTurn(id: string, prompt: string): Promise<void> {
   await res.text();
 }
 
-describe("conformance: per-turn usage + per-call tokens on the wire", () => {
-  it("transcript dump includes per-turn usage and tool-row tokens", async () => {
+describe("conformance: per-turn usage + round usage on the wire", () => {
+  it("transcript dump includes per-turn usage and no fabricated tool-row tokens", async () => {
     const id = await newSession();
     await runTurn(id, "do it");
 
@@ -132,7 +137,7 @@ describe("conformance: per-turn usage + per-call tokens on the wire", () => {
     expect(roles).toEqual(["user", "assistant", "tool"]);
 
     const toolRow = messages.find((m) => m.role === "tool");
-    expect(toolRow.tokens).toBe(7);
+    expect(toolRow.tokens).toBeUndefined();
 
     expect(Array.isArray(body.turns)).toBe(true);
     const turnMetric = body.turns[0];

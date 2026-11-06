@@ -41,8 +41,20 @@ export type TurnEventDataMap = {
     ok: boolean;
     result?: unknown;
     error?: string;
-    /** Per-call completion-token attribution for this round (optional). */
-    tokens?: number;
+    /**
+     * This round's real usage from the provider (present when the provider
+     * reported usage for the round). Identical on every tool.result within a
+     * round — the API does not segment tokens per call, so this is round
+     * attribution, not per-call attribution. Supersedes the old equal-split
+     * `tokens` estimate.
+     */
+    usage?: TurnUsage;
+    /**
+     * Context growth caused by this result: this round's prompt_tokens minus
+     * the previous round's (i.e. what this round's call+result added to the
+     * next request). Absent for the first round of a turn.
+     */
+    promptDelta?: number;
   };
   /** Normal end of the turn. */
   "turn.finished": { turnId: string; durationMs: number; stopReason?: string; usage?: TurnUsage };
