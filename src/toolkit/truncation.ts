@@ -3,9 +3,21 @@ import { TRUNCATION_IDENTIFIER } from "./types.ts";
 /** Default /shake fallback budget for tools without their own truncators. */
 export const FALLBACK_TRUNCATE_CHARS = 500;
 
-/** Chars-per-token heuristic for estimating context size (chars / 4). */
+/**
+ * Token heuristic for estimating context size, calibrated against real
+ * provider `prompt_tokens` (nemotron-3.5 via OpenRouter, agentic transcript
+ * mix): alphanumeric characters count as ~1 token per 4 chars, everything
+ * else (punctuation, whitespace, symbols) as ~1 per 2 — dense code and JSON
+ * dominate agent transcripts, and plain chars/4 under-counts those by ~2x.
+ */
 export function estimateTokenCount(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
+  let alnum = 0;
+  let other = 0;
+  for (const ch of text) {
+    if (/[A-Za-z0-9]/.test(ch)) alnum += 1;
+    else other += 1;
+  }
+  return Math.max(1, Math.ceil(alnum / 4 + other / 2));
 }
 
 /**

@@ -91,10 +91,9 @@ export const COMPACTION_TOKEN_MARGIN = 20_000;
 /** Window used when the compaction model's window is unknown. */
 export const DEFAULT_COMPACTION_WINDOW = 128_000;
 
-/** chars/4 token heuristic (used where no provider tokenizer is available). */
-export function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
-}
+import { estimateTokenCount as estimateTokens } from "../toolkit/index.ts";
+
+export { estimateTokens };
 
 /**
  * Render the session transcript as a readable text block so the summary

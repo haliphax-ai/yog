@@ -120,7 +120,7 @@ describe("message building", () => {
 });
 
 describe("token heuristic and middle truncation", () => {
-  it("estimates tokens at chars/4", () => {
+  it("estimates tokens weighted: alnum chars/4, non-alnum chars/2", () => {
     expect(estimateTokens("abcd")).toBe(1);
     expect(estimateTokens("abcdefghij")).toBe(3);
   });
