@@ -5,6 +5,7 @@ import type { ToolCallRecord } from "./state/index.ts";
 
 import { logger } from "./log.ts";
 import { newSessionId } from "./state/index.ts";
+import { estimateTokenCount } from "tokenx";
 import {
   StdoutSink,
   TURN_EVENT_VERSION,
@@ -358,6 +359,12 @@ export class TurnEngine {
 
           const toolError = result?.["error"] as string | undefined;
 
+          const payload =
+            result === undefined
+              ? JSON.stringify({ error: `unknown tool "${tc.name}"` })
+              : JSON.stringify(result);
+          const resultTokens = estimateTokenCount(payload);
+
           await emit("tool.result", {
             id: tcId,
             name: tc.name,
@@ -366,6 +373,7 @@ export class TurnEngine {
             error: toolError ?? (result === undefined ? `unknown tool "${tc.name}"` : undefined),
             ...(roundUsageOut !== undefined ? { usage: roundUsageOut } : {}),
             ...(promptDelta !== undefined ? { promptDelta } : {}),
+            ...(resultTokens > 0 ? { resultTokens } : {}),
           });
           if (opts.recorder && opts.sessionId) {
             try {
@@ -385,10 +393,6 @@ export class TurnEngine {
             }
           }
 
-          const payload =
-            result === undefined
-              ? JSON.stringify({ error: `unknown tool "${tc.name}"` })
-              : JSON.stringify(result);
           messages.push({
             role: "tool",
             tool_call_id: tcId,

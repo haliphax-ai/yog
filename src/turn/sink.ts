@@ -55,6 +55,12 @@ export type TurnEventDataMap = {
      * next request). Absent for the first round of a turn.
      */
     promptDelta?: number;
+    /**
+     * Estimated tokens this result adds to the conversation context (tokenx
+     * estimate of the serialized tool message). Present on every result;
+     * differs per call even inside a batch, unlike `usage`.
+     */
+    resultTokens?: number;
   };
   /** Normal end of the turn. */
   "turn.finished": { turnId: string; durationMs: number; stopReason?: string; usage?: TurnUsage };

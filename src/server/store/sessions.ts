@@ -363,9 +363,10 @@ export class SessionStore {
    * Each tool result row also carries round attribution (`usage`,
    * `promptDelta`) sourced from the turn's persisted `tool.result` event —
    * the same envelope fields the live stream emitted — so rehydrated
-   * transcripts can render the same per-result counts. Rows whose turn has
-   * no stored tool.result event (legacy volumes, no-usage providers) simply
-   * omit the fields.
+   * transcripts can render the same per-result counts. Per-call
+   * `resultTokens` estimates ride their own rows (keyed by tool call id).
+   * Rows whose turn has no stored tool.result event (legacy volumes,
+   * no-usage providers) simply omit the fields.
    */
   async getTranscript(
     sessionId: string,
@@ -373,11 +374,13 @@ export class SessionStore {
       afterSeq?: number;
       limit?: number;
       roundAttribution?: Map<number, { usage?: unknown; promptDelta?: number }>;
+      resultTokensByCall?: Map<string, number>;
     } = {},
   ): Promise<any[]> {
     const afterSeq = opts.afterSeq ?? 0;
     const limit = opts.limit;
     const attribution = opts.roundAttribution;
+    const resultTokensByCall = opts.resultTokensByCall;
     const query = this.db("session_messages")
       .where("session_id", sessionId)
       .where("seq", ">", afterSeq)
@@ -393,6 +396,13 @@ export class SessionStore {
       if (row.role === "tool" && round !== undefined) {
         if (round.usage !== undefined) msg.usage = round.usage;
         if (round.promptDelta !== undefined) msg.promptDelta = round.promptDelta;
+      }
+      if (
+        row.role === "tool" &&
+        typeof row.tool_call_id === "string" &&
+        resultTokensByCall?.has(row.tool_call_id)
+      ) {
+        msg.resultTokens = resultTokensByCall.get(row.tool_call_id);
       }
       return {
         ...msg,

@@ -46,7 +46,7 @@ The SSE stream frames each self-describing envelope
 | `turn.started`  | `{ turnId, model, ts }`                           | turn accepted; streaming begins                                                                                                                                                                            |
 | `message.delta` | `{ text }`                                        | assistant text chunk (print as it arrives)                                                                                                                                                                 |
 | `tool.call`     | `{ id, name, args }`                              | model invoked a tool                                                                                                                                                                                       |
-| `tool.result`   | `{ id, name, ok, result?, usage?, promptDelta? }` | tool outcome (optional `usage` = the round's real `{ prompt_tokens, completion_tokens, total_tokens }` when the provider reports it; `promptDelta` = tokens the round added to the next request's context) |
+| `tool.result`   | `{ id, name, ok, result?, usage?, promptDelta?, resultTokens? }` | tool outcome (optional `usage` = the round's real `{ prompt_tokens, completion_tokens, total_tokens }` when the provider reports it; `promptDelta` = tokens the round added to the next request's context; `resultTokens` = tokenx estimate of what THIS result adds to context — set per call, so it differs inside a batch) |
 | `turn.finished` | `{ turnId, durationMs, usage?, stopReason? }`     | normal end (optional `usage` = `{ prompt_tokens, completion_tokens, total_tokens }` when the provider reports it)                                                                                          |
 | `turn.aborted`  | `{ reason, usage? }`                              | operator aborted the turn; transcript was healed (optional `usage` = totals as of the cut point when the provider reported any)                                                                            |
 | `error`         | `{ code, message }`                               | terminal failure (e.g. `provider_error`)                                                                                                                                                                   |
@@ -90,13 +90,14 @@ envelope for an unknown session/turn.
 
 `GET /v1/sessions/{id}/transcript` is the rehydration dump: it returns
 `{ session, messages, turns? }` where each message is
-`{ seq, turnId, ts, role, content, toolCallId?, name?, toolCalls?, usage?, promptDelta? }` —
+`{ seq, turnId, ts, role, content, toolCallId?, name?, toolCalls?, usage?, promptDelta?, resultTokens? }` —
 monotonic `seq` per session, in conversation order. The optional `turns`
 array carries per-turn metrics `{ turnId, usage?, durationMs? }` (usage only
 when the provider reported it), so a client can rebuild per-turn token
 summaries without replaying events; a tool row's `usage` / `promptDelta` are
 the round attribution already carried by the live `tool.result` envelope, so
-rehydration renders the same per-result counts. All fields are additive and
+rehydration renders the same per-result counts; `resultTokens` rides each tool
+row individually. All fields are additive and
 optional — older clients ignore them. It accepts
 `?after=<seq>&limit=<n>` pagination for clients holding partial state, and it
 serves dormant sessions too: dormancy never blocks reads.

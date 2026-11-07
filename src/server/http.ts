@@ -185,6 +185,7 @@ function toWireMessage(m: unknown): Record<string, unknown> {
   if (row.tool_calls !== undefined) out.toolCalls = row.tool_calls;
   if (row.usage !== undefined) out.usage = row.usage;
   if (row.promptDelta !== undefined) out.promptDelta = row.promptDelta;
+  if (row.resultTokens !== undefined) out.resultTokens = row.resultTokens;
   return out;
 }
 
@@ -437,7 +438,10 @@ export function createHttpServer(deps: HttpDeps): Server {
           // persisted tool.result events (the live envelope data), so the
           // dump carries the same usage/promptDelta the stream did. One
           // attribution round per turn: all results of a round share it.
+          // Per-call resultTokens are keyed by tool call id instead — each
+          // result's own estimate rides its own row.
           const attribution = new Map<number, { usage?: unknown; promptDelta?: number }>();
+          const resultTokensByCall = new Map<string, number>();
           if (typeof store!.listEvents === "function") {
             for (const ev of ((await store!.listEvents(id)) ?? []) as Array<
               Record<string, unknown>
@@ -455,12 +459,20 @@ export function createHttpServer(deps: HttpDeps): Server {
               if (data === null || typeof data !== "object" || Array.isArray(data)) continue;
               const usage = (data as any).usage;
               const promptDelta = (data as any).promptDelta;
+              const resultTokens = (data as any).resultTokens;
               const round: { usage?: unknown; promptDelta?: number } = {};
               if (usage !== undefined) round.usage = usage;
               if (typeof promptDelta === "number" && Number.isFinite(promptDelta)) {
                 round.promptDelta = promptDelta;
               }
               if (Object.keys(round).length > 0) attribution.set(turnId, round);
+              if (
+                typeof resultTokens === "number" &&
+                Number.isFinite(resultTokens) &&
+                resultTokens > 0
+              ) {
+                resultTokensByCall.set(String(data.id), resultTokens);
+              }
             }
           }
           const messages = (
@@ -470,6 +482,7 @@ export function createHttpServer(deps: HttpDeps): Server {
                 : {}),
               ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
               ...(attribution.size > 0 ? { roundAttribution: attribution } : {}),
+              ...(resultTokensByCall.size > 0 ? { resultTokensByCall } : {}),
             })
           ).map(toWireMessage);
           // Per-turn metrics (usage/duration) ride alongside the dump so a
