@@ -169,7 +169,10 @@ describe("tool output limiting", () => {
     try {
       const result = await registry.execute(
         "bash",
-        JSON.stringify({ command: "yes | head -c 100000" }),
+        // `tr -d '\n'` keeps the payload newline-free so the JSON escaping
+        // cannot push it past the grace window (the fallback must NOT engage
+        // here — the bash tool's own cap is what's under test).
+        JSON.stringify({ command: "yes | head -c 100000 | tr -d '\n'" }),
       );
       expect(result?.error).toBeUndefined();
       const stdout = String(result?.["stdout"]);
@@ -197,13 +200,14 @@ describe("tool output limiting", () => {
 });
 
 describe("registry fallback cap (capToolResult)", () => {
-  /** A tool with no truncation of its own: returns a huge blob verbatim. */
+  let blobPayload = "x".repeat(2000);
+  /** A tool with no truncation of its own: returns a payload verbatim. */
   const blobTool: ToolSpec = {
     name: "blob",
-    description: "Return a huge payload (no self-limiting).",
+    description: "Return a payload (no self-limiting).",
     schema: z.object({}).strict(),
     failure: (error) => ({ error }),
-    run: async () => ({ data: "x".repeat(2000) }),
+    run: async () => ({ data: blobPayload }),
   };
 
   it("wraps an oversized serialized result in a truncated envelope", async () => {
@@ -219,7 +223,7 @@ describe("registry fallback cap (capToolResult)", () => {
       expect(truncated).toContain(TRUNCATION_IDENTIFIER);
       // Head + tail survive a middle cut.
       expect(truncated.startsWith('{"data":"x')).toBe(true);
-      expect(truncated.endsWith('"x"}')).toBe(true);
+      expect(truncated.endsWith('xxx"}')).toBe(true);
     } finally {
       setToolOutputBudgets(TOOL_OUTPUT_LIMIT_CHARS, TOOL_OUTPUT_GRACE_CHARS);
     }
@@ -227,11 +231,13 @@ describe("registry fallback cap (capToolResult)", () => {
 
   it("leaves a small serialized result untouched", async () => {
     setToolOutputBudgets(200, 50);
+    blobPayload = "small payload";
     const local = new ToolRegistry([blobTool]);
     try {
       const result = await local.execute("blob", "{}");
-      expect(result?.["data"]).toBe("x".repeat(2000));
+      expect(result?.["data"]).toBe("small payload");
     } finally {
+      blobPayload = "x".repeat(2000);
       setToolOutputBudgets(TOOL_OUTPUT_LIMIT_CHARS, TOOL_OUTPUT_GRACE_CHARS);
     }
   });
