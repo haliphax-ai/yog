@@ -78,6 +78,20 @@ export const YogConfigSchema = z
      */
     maxRoundsPerTurn: z.number().int().min(1).default(200),
     /**
+     * Per-tool serialized output budget (chars): a tool's JSON result payload
+     * larger than this (plus `toolOutputGrace` for the JSON wrapper) gets
+     * middle-truncated with the shared truncation marker, so the model cannot
+     * crash its context window with an oversized file read / web fetch. Unset
+     * = the toolkit default (`TOOL_OUTPUT_LIMIT_CHARS`, 50,000).
+     */
+    toolOutputLimit: z.number().int().min(1).optional(),
+    /**
+     * Chars allowed beyond `toolOutputLimit` before the fallback cap engages
+     * (headroom for result JSON structure: keys, braces, numbers). Unset =
+     * the toolkit default (`TOOL_OUTPUT_GRACE_CHARS`, 1,000).
+     */
+    toolOutputGrace: z.number().int().min(0).optional(),
+    /**
      * Agent-user split: the daemon drops its bash worker to this uid/gid
      * with `agentHome` as the agent's HOME. Defaults follow the documented
      * UID scheme (the `yog` daemon is uid 900; agents start at 1100), so a

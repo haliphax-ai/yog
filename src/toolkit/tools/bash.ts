@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { type ToolResult, type ToolSpec } from "../types.ts";
-import { middleTruncate } from "../truncation.ts";
+import { middleTruncate, toolOutputBudgets } from "../truncation.ts";
 export interface BashResult extends ToolResult {
   stdout: string | null;
   stderr: string | null;
@@ -22,12 +22,18 @@ export interface ShellStateProvider {
 export const BASH_ARG_TRUNCATE_CHARS = 500;
 export const BASH_RESULT_TRUNCATE_CHARS = 500;
 
+/**
+ * Live tool-output budgets (chars) come from the composition root via
+ * `setToolOutputBudgets`; defaults hold until it is called, so the tool
+ * stays usable in tests and CLI paths without a config file.
+ */
+
 function truncateStream(text: string, max: number): string {
   return text.length <= max ? text : middleTruncate(text, max);
 }
 
 /**
- * Split a 500-char budget fairly between stdout and stderr (both middle-
+ * Split the output budget fairly between stdout and stderr (both middle-
  * truncated). Each stream's base share is half the budget; any unused share
  * from one stream is offered to the other.
  */
@@ -173,9 +179,15 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
       if (!resp.ok) {
         return { stdout: null, stderr: null, runtimeMs, exitCode: null, error: resp.error };
       }
+      // Limit the tool's own output: the budget (config `toolOutputLimit`,
+      // default 50,000 chars) is fairly split across stdout and stderr, each
+      // middle-truncated with the shared marker where cut. This runs BEFORE
+      // the registry's generic `capToolResult` fallback ever sees the result.
+      const { limit } = toolOutputBudgets();
+      const capped = fairTruncate(resp.stdout ?? "", resp.stderr ?? "", limit);
       return {
-        stdout: resp.stdout ?? null,
-        stderr: resp.stderr ?? null,
+        stdout: capped[0],
+        stderr: capped[1],
         runtimeMs,
         exitCode: resp.exitCode ?? null,
       };
@@ -211,10 +223,10 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
     if (command === rec.command) return raw;
     return JSON.stringify({ ...rec, command });
   },
-
   /**
    * /shake: truncate stdout/stderr fairly against a shared 500-char budget
-   * (tail-truncated, marker appended where cut). Other fields are preserved.
+   * (middle cut, marker appended where content is dropped). Other fields are
+   * preserved.
    */
   truncateResult(value: unknown): unknown | undefined {
     if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
