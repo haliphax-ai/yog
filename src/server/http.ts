@@ -772,6 +772,10 @@ export function createHttpServer(deps: HttpDeps): Server {
       sendError(res, "invalid_request", "model must be a string");
       return;
     }
+    if (body.linger !== undefined && typeof body.linger !== "boolean") {
+      sendError(res, "invalid_request", "linger must be a boolean");
+      return;
+    }
 
     const model = deps.model;
     if (!hasOrchestrator && (!model || typeof model.runTurn !== "function")) {
@@ -793,9 +797,16 @@ export function createHttpServer(deps: HttpDeps): Server {
       const f = deps.onUsageFor;
       return typeof f === "function" ? f(session.id) : undefined;
     };
+    const linger = body.linger === true;
     const onClose = (): void => {
       if (closed) return;
       closed = true;
+      // Linger policy (yog#31): the client asked to detach mid-turn, so a
+      // dropped connection must NOT abort the turn — the engine runs to its
+      // terminal state, which persists as usual and stays replayable from
+      // the turn-status endpoint. Abort-on-disconnect stays the default:
+      // a crashed client must not leak a runaway turn it cannot see.
+      if (linger) return;
       controller.abort(new Error("client disconnected"));
       // Fan the abort out to the orchestrator (queued turns are dropped,
       // in-flight turns get their handle promise rejected) — but only after
@@ -823,6 +834,15 @@ export function createHttpServer(deps: HttpDeps): Server {
       if (ev.type === "error") sawError = true;
       turnLog.debug({ event: ev }, "turn event");
       res.write(encodeEvent(ev));
+    };
+    // Linger mode keeps consuming the bus after the disconnect so the
+    // stream's own bookkeeping (terminal framing, finally-cleanup) keeps
+    // its semantics; the `closed` guard in `emit` makes those writes
+    // no-ops — the wire is gone, nothing is dropped, nothing stalls.
+    const onBusEventLingering = (ev: SseEnvelope): void => {
+      if (ev.type === "turn.started") turnStarted = true;
+      sawError = sawError || ev.type === "error";
+      void persistEvent(ev);
     };
 
     // Record the turn row up front (best effort: persistence never fails the
@@ -871,12 +891,20 @@ export function createHttpServer(deps: HttpDeps): Server {
       if (ev.type === "turn.started") turnStarted = true;
       void emit(ev);
     };
-
+    // Linger mode: after the client hangs up, deliver envelopes through a
+    // persistence-only path — the wire is gone, but the store sink must
+    // keep recording events so turn-status recovery replays the full turn.
+    const subscribeBus = (fn: (ev: SseEnvelope) => void): void => {
+      bus?.on(channel, linger ? onBusEventLingering : fn);
+    };
+    const unsubscribeBus = (fn: (ev: SseEnvelope) => void): void => {
+      bus?.off(channel, linger ? onBusEventLingering : fn);
+    };
     try {
       if (hasOrchestrator) {
+        subscribeBus(onBusEvent);
         // Orchestrator path: the composed executeTurn publishes envelopes to
         // the per-daemon bus; we subscribe for this session and frame them.
-        bus?.on(channel, onBusEvent);
         handle = orchestrator!.runTurn(session.id, body);
         controller.signal.addEventListener("abort", () => handle?.abort(), { once: true });
         try {
@@ -890,7 +918,22 @@ export function createHttpServer(deps: HttpDeps): Server {
           // wire and persists it — this is the row turn-status recovery
           // replays for an aborted turn.
           const isAbort = (err as Error | undefined)?.name === "AbortError";
-          if (isAbort && turnStarted && !closed && !res.writableEnded) {
+          // Linger mode: the wire is already gone — the terminal framing
+          // below would be dropped by `emit`, so skip it; the store sink
+          // keeps its own record for turn-status recovery.
+          if (isAbort && turnStarted && linger) {
+            await persistEvent({
+              id: 0,
+              type: "turn.aborted",
+              version: 1,
+              ts: Date.now(),
+              data: {
+                reason: (err as Error).message || "turn aborted",
+                ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
+              },
+            } as SseEnvelope);
+          }
+          if (isAbort && turnStarted && !linger && !closed && !res.writableEnded) {
             const envelope = {
               id: 0,
               type: "turn.aborted",
@@ -977,7 +1020,7 @@ export function createHttpServer(deps: HttpDeps): Server {
         } as SseEnvelope);
       }
     } finally {
-      bus?.off(channel, onBusEvent);
+      unsubscribeBus(onBusEvent);
       req.off("close", onClose);
       res.off("close", onClose);
       if (!res.writableEnded && !res.destroyed) res.end();
