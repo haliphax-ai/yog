@@ -282,13 +282,10 @@ filesystem).
   - `conformance.test.ts` — external-client conformance suite against an
     ephemeral daemon (contract endpoints, SSE transcript, recovery, errors).
   - `server/`, `state/`, `vfs/`, `worker/`, `toolkit/`, `turn/` — unit suites per layer.
-- `apparmor/`
-  - `yog.profile` - the `yog` AppArmor profile to load on the host (network
-    rules cover the daemon listening on the configured bind address).
 - `Dockerfile` - container image: node:24, daemon + agent users, and the
   `fuse`/CLI packages; tini init, entrypoint runs `yog serve` by default.
 - `docker-compose.yml` - Docker Compose manifest: builds the image, runs the
-  daemon with FUSE, seccomp, and AppArmor; publishes port 8111 to the host.
+  daemon with FUSE and seccomp; publishes port 8111 to the host.
 
 </details>
 
@@ -457,34 +454,18 @@ The `fuse-native` addon needs a FUSE device and mount privileges:
   persists across runs and turso/libsql's file locking works (it misbehaves on
   Docker's overlay filesystem). If you see `Failed to unlock file:
   Permission denied`, ensure the volume mount is present (or set
-  `statePath` to a path on a real volume); to confirm the cause, rerun with
-  `--security-opt apparmor=unconfined` — AppArmor denies would disappear
-  there, whereas an overlay-filesystem problem would not.
-- On hosts enforcing AppArmor/seccomp, the default profiles block mount
-  syscalls. The image is therefore run with:
+  `statePath` to a path on a real volume).
+- The compose manifest opts the container out of AppArmor entirely
+  (`security_opt: [apparmor=unconfined]`), so no host AppArmor profile —
+  default or otherwise — applies to it. Only seccomp still confines it.
+- On hosts enforcing seccomp, the default profile blocks mount syscalls.
+  The image is therefore run with:
 
   ```sh
   docker run --device /dev/fuse \
     --cap-add SYS_ADMIN \
     --cap-add SETUID,SETGID \
     --security-opt seccomp=unconfined \
-    --security-opt apparmor=yog \
-    ...
-  ```
-
-  `apparmor=yog` references an AppArmor profile named `yog` that must be
-  loaded on the host before the container starts. The profile is checked in
-  at `apparmor/yog.profile` and must be kept in sync with the home/mount
-  paths (agent + daemon homes, `/yog`, `capability setuid/setgid` for
-  the worker drop, and the network rules that let the daemon listen on the
-  configured bind address — `0.0.0.0:8111` in the container):
-
-  ```sh
-  ./apparmor/install.sh          # copies, reloads, and verifies the profile
-  # equivalent manually:
-  # sudo cp apparmor/yog.profile /etc/apparmor.d/yog
-  # sudo apparmor_parser -r -W /etc/apparmor.d/yog
-  # sudo aa-status | grep yog    # confirms it is loaded
   ```
 
 All of the above is wired into the `docker-compose.yml` manifest:

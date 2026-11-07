@@ -6,7 +6,7 @@ services:
       - /dev/fuse:/dev/fuse
     env_file: .env
     security_opt:
-      - apparmor=yog
+      - apparmor=unconfined
       - seccomp=./seccomp/yog.json
     cap_add:
       - SYS_ADMIN
