@@ -171,6 +171,8 @@ injection (`createDaemon({ config })`, used by tests).
 | `mountPoint`            | string  | `/yog`                             | FUSE mountpoint                                                                                                                                                                                                           |
 | `allowOther`            | bool    | `false`                            | allow other users to reach the mount (container: agent ≠ daemon user)                                                                                                                                                     |
 | `maxRoundsPerTurn`      | int     | `200`                              | tool-call rounds allowed per turn before the engine stops it with `turn.finished { stopReason: "max_rounds" }`                                                                                                            |
+| `toolOutputLimit`       | int?    | _(unset → toolkit default: 50,000)_ | per-tool serialized output budget (chars): a tool's JSON result larger than this (plus `toolOutputGrace`) gets middle-truncated with the shared truncation marker so the model cannot crash its context window with an oversized file read / web fetch |
+| `toolOutputGrace`       | int?    | _(unset → toolkit default: 1,000)_  | chars allowed beyond `toolOutputLimit` before the fallback cap engages (headroom for the result JSON structure: keys, braces, numbers)                                                                                   |
 | `agentUid` / `agentGid` | int     | `1100`                             | daemon/agent split: spawn bash workers as this uid/gid (the documented scheme: the `yog` daemon is uid 900, agents start at 1100 — model-executed code never runs as the daemon). Equal to the current process = no drop. |
 | `agentHome`             | string  | `/home/agent`                      | HOME **and cwd** for agent-spawned workers                                                                                                                                                                                |
 | `agentStateDir`         | string? | _(unset → `<agentHome>/.harness`)_ | persistent shell snapshot directory for the bash tool; relative values resolve against the agent's HOME (never the script's cwd, which changes with the script's own `cd`)                                                |
@@ -379,6 +381,21 @@ Every response also carries `error?: string`:
 - thrown exceptions are caught and reported the same way;
 - otherwise `error` is absent and the output fields map to the executed
   process (null only if the process could not be spawned).
+
+### Tool output limiting
+
+The model must not be able to crash its context window with an oversized tool
+result (a huge file read, a complex web fetch, …). Tools are expected to limit
+their own output — the `bash` tool middle-truncates its stdout/stderr streams
+against a shared budget — but a registry-level fallback covers every tool:
+
+- When a tool's serialized result JSON exceeds `toolOutputLimit` plus
+  `toolOutputGrace`, the WHOLE serialized payload is middle-truncated to
+  `toolOutputLimit` and wrapped in a single-field `{"truncated": …}` envelope;
+  extra result structure does not survive the cut. `originalLength` preserves
+  the payload's true size for clients.
+- The truncation marker is the same `TRUNCATION_IDENTIFIER` /shake uses, so
+  clients and /shake treat the cuts uniformly.
 
 ### Virtual filesystem action log
 

@@ -2,7 +2,18 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bashTool, setBashExecutor, toFunctionTool, ToolRegistry } from "../src/toolkit/index.ts";
+import {
+  bashTool,
+  setBashExecutor,
+  setToolOutputBudgets,
+  toFunctionTool,
+  ToolRegistry,
+  TOOL_OUTPUT_GRACE_CHARS,
+  TOOL_OUTPUT_LIMIT_CHARS,
+  type ToolSpec,
+} from "../src/toolkit/index.ts";
+import { TRUNCATION_IDENTIFIER } from "../src/toolkit/index.ts";
+import { z } from "zod";
 import { WorkerClient } from "../src/worker/index.ts";
 
 const registry = new ToolRegistry([bashTool]);
@@ -148,6 +159,80 @@ describe("bash shell state persistence", () => {
       expect(r2?.["stdout"]).toBe("/tmp|bar|fn-ok\n");
     } finally {
       rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("tool output limiting", () => {
+  it("caps an oversized bash stdout with the shared truncation marker", async () => {
+    setToolOutputBudgets(1000, 100);
+    try {
+      const result = await registry.execute(
+        "bash",
+        JSON.stringify({ command: "yes | head -c 100000" }),
+      );
+      expect(result?.error).toBeUndefined();
+      const stdout = String(result?.["stdout"]);
+      const stderr = String(result?.["stderr"] ?? "");
+      // The shared budget (limit + grace) bounds stdout + stderr together.
+      expect(stdout.length + stderr.length).toBeLessThanOrEqual(1100);
+      expect(stdout + stderr).toContain(TRUNCATION_IDENTIFIER);
+      // The cut keeps head + tail, not a prefix-only cut.
+      expect(stdout.length).toBeGreaterThan(0);
+    } finally {
+      setToolOutputBudgets(TOOL_OUTPUT_LIMIT_CHARS, TOOL_OUTPUT_GRACE_CHARS);
+    }
+  });
+
+  it("leaves a small result untouched", async () => {
+    setToolOutputBudgets(1000, 100);
+    try {
+      const result = await registry.execute("bash", JSON.stringify({ command: "echo hi" }));
+      expect(result?.error).toBeUndefined();
+      expect(result?.["stdout"]).toBe("hi\n");
+    } finally {
+      setToolOutputBudgets(TOOL_OUTPUT_LIMIT_CHARS, TOOL_OUTPUT_GRACE_CHARS);
+    }
+  });
+});
+
+describe("registry fallback cap (capToolResult)", () => {
+  /** A tool with no truncation of its own: returns a huge blob verbatim. */
+  const blobTool: ToolSpec = {
+    name: "blob",
+    description: "Return a huge payload (no self-limiting).",
+    schema: z.object({}).strict(),
+    failure: (error) => ({ error }),
+    run: async () => ({ data: "x".repeat(2000) }),
+  };
+
+  it("wraps an oversized serialized result in a truncated envelope", async () => {
+    setToolOutputBudgets(200, 50);
+    const local = new ToolRegistry([blobTool]);
+    try {
+      const result = await local.execute("blob", "{}");
+      expect(result?.error).toBeUndefined();
+      expect(Object.keys(result ?? {}).sort()).toEqual(["originalLength", "truncated"]);
+      expect(result?.["originalLength"]).toBe(JSON.stringify({ data: "x".repeat(2000) }).length);
+      const truncated = String(result?.["truncated"]);
+      expect(truncated.length).toBe(200);
+      expect(truncated).toContain(TRUNCATION_IDENTIFIER);
+      // Head + tail survive a middle cut.
+      expect(truncated.startsWith('{"data":"x')).toBe(true);
+      expect(truncated.endsWith('"x"}')).toBe(true);
+    } finally {
+      setToolOutputBudgets(TOOL_OUTPUT_LIMIT_CHARS, TOOL_OUTPUT_GRACE_CHARS);
+    }
+  });
+
+  it("leaves a small serialized result untouched", async () => {
+    setToolOutputBudgets(200, 50);
+    const local = new ToolRegistry([blobTool]);
+    try {
+      const result = await local.execute("blob", "{}");
+      expect(result?.["data"]).toBe("x".repeat(2000));
+    } finally {
+      setToolOutputBudgets(TOOL_OUTPUT_LIMIT_CHARS, TOOL_OUTPUT_GRACE_CHARS);
     }
   });
 });

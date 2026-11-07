@@ -20,6 +20,9 @@ import {
   setBashAbort,
   setBashExecutor,
   setShellStateProvider,
+  setToolOutputBudgets,
+  TOOL_OUTPUT_LIMIT_CHARS,
+  TOOL_OUTPUT_GRACE_CHARS,
 } from "../toolkit/index.ts";
 import { onAgentSpawn } from "../worker/index.ts";
 import { mkdir } from "../host.ts";
@@ -99,6 +102,12 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   });
   const host = opts.host ?? config.host;
   const port = opts.port ?? config.port;
+  // Tool-output budgets come from config: the toolkit's truncation fallback
+  // and the bash tool both read these live values (defaults until wired).
+  setToolOutputBudgets(
+    config.toolOutputLimit ?? TOOL_OUTPUT_LIMIT_CHARS,
+    config.toolOutputGrace ?? TOOL_OUTPUT_GRACE_CHARS,
+  );
 
   if (!opts.deps) {
     // --- persistence (best effort: continue without an audit trail) ---

@@ -8,6 +8,7 @@ import type {
   ChatCompletionTool,
 } from "openai/resources/chat/completions/completions.mjs";
 import { type ToolResult, type ToolSpec } from "./types.ts";
+import { capToolResult } from "./truncation.ts";
 
 /** Derive the OpenAI function definition from a tool spec's zod schema. */
 export function toFunctionTool(spec: ToolSpec): ChatCompletionFunctionTool {
@@ -131,10 +132,16 @@ export class ToolRegistry {
     }
 
     const call: ToolCall = { name, args: parsed as Record<string, unknown> };
-    const runP = tool.run(result.data as Record<string, unknown>, {
-      ...(ctx.sessionId !== undefined ? { sessionId: ctx.sessionId } : {}),
-      ...(ctx.stateDir !== undefined ? { stateDir: ctx.stateDir } : {}),
-    });
+    // Fallback output cap (issue #29): a tool that does not limit itself gets
+    // its serialized result middle-truncated at the registry boundary, so a
+    // huge file read or web fetch can never crash the model's context window.
+    // The bash tool already caps its own streams; this covers every tool.
+    const runP = tool
+      .run(result.data as Record<string, unknown>, {
+        ...(ctx.sessionId !== undefined ? { sessionId: ctx.sessionId } : {}),
+        ...(ctx.stateDir !== undefined ? { stateDir: ctx.stateDir } : {}),
+      })
+      .then((res) => capToolResult(res));
     if (ctx.signal) {
       // Turn abort mid-call: reject so the turn engine's unwind/heal path
       // runs (the announced-but-unanswered call is stubbed there). The
