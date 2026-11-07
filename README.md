@@ -90,12 +90,14 @@ envelope for an unknown session/turn.
 
 `GET /v1/sessions/{id}/transcript` is the rehydration dump: it returns
 `{ session, messages, turns? }` where each message is
-`{ seq, turnId, ts, role, content, toolCallId?, name?, toolCalls? }` —
+`{ seq, turnId, ts, role, content, toolCallId?, name?, toolCalls?, usage?, promptDelta? }` —
 monotonic `seq` per session, in conversation order. The optional `turns`
 array carries per-turn metrics `{ turnId, usage?, durationMs? }` (usage only
 when the provider reported it), so a client can rebuild per-turn token
-summaries without replaying events. All fields are additive and optional —
-older clients ignore them. It accepts
+summaries without replaying events; a tool row's `usage` / `promptDelta` are
+the round attribution already carried by the live `tool.result` envelope, so
+rehydration renders the same per-result counts. All fields are additive and
+optional — older clients ignore them. It accepts
 `?after=<seq>&limit=<n>` pagination for clients holding partial state, and it
 serves dormant sessions too: dormancy never blocks reads.
 

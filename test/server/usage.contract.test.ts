@@ -138,6 +138,14 @@ describe("conformance: per-turn usage + round usage on the wire", () => {
 
     const toolRow = messages.find((m) => m.role === "tool");
     expect(toolRow.tokens).toBeUndefined();
+    // Round attribution rides the tool result row itself — the same
+    // usage/promptDelta the live tool.result envelope carried — so
+    // rehydration renders the same per-result counts as the live stream.
+    expect(toolRow.usage).toEqual({
+      prompt_tokens: 11,
+      completion_tokens: 22,
+      total_tokens: 33,
+    });
 
     expect(Array.isArray(body.turns)).toBe(true);
     const turnMetric = body.turns[0];
@@ -170,5 +178,33 @@ describe("conformance: per-turn usage + round usage on the wire", () => {
     const res = await fetch(`${base}/v1/sessions/${id}/transcript`);
     const body = await json(res);
     expect(body.turns).toBeUndefined();
+  });
+
+  it("tool rows without a stored tool.result round omit usage/promptDelta", async () => {
+    // No-usage path: the fake model only emits usage on some turns. Seed a
+    // tool row directly (pre-usage legacy shape) and assert the dump leaves
+    // round attribution off rather than inventing it.
+    const id = await newSession();
+    const turn = (await store.addTurn(id, {
+      role: "user",
+      content: "legacy",
+      status: "finished",
+    })) as any;
+    await store.appendMessages(id, [
+      {
+        role: "tool",
+        tool_call_id: "legacy-1",
+        name: "bash",
+        content: "{}",
+      } as any,
+    ]);
+    await store.finishTurn(id, turn.id, "finished");
+
+    const res = await fetch(`${base}/v1/sessions/${id}/transcript`);
+    const body = await json(res);
+    const toolRow = (body.messages as any[]).find((m) => m.role === "tool");
+    expect(toolRow).toBeDefined();
+    expect(toolRow.usage).toBeUndefined();
+    expect(toolRow.promptDelta).toBeUndefined();
   });
 });

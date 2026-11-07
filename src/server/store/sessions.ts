@@ -359,13 +359,25 @@ export class SessionStore {
    * objects, plus metadata (`seq`, `turnId`, `ts`) so callers can address
    * rows explicitly. `afterSeq` pages forward from a known seq; `limit`
    * caps the batch. Pass neither for the full transcript from the start.
+   *
+   * Each tool result row also carries round attribution (`usage`,
+   * `promptDelta`) sourced from the turn's persisted `tool.result` event —
+   * the same envelope fields the live stream emitted — so rehydrated
+   * transcripts can render the same per-result counts. Rows whose turn has
+   * no stored tool.result event (legacy volumes, no-usage providers) simply
+   * omit the fields.
    */
   async getTranscript(
     sessionId: string,
-    opts: { afterSeq?: number; limit?: number } = {},
+    opts: {
+      afterSeq?: number;
+      limit?: number;
+      roundAttribution?: Map<number, { usage?: unknown; promptDelta?: number }>;
+    } = {},
   ): Promise<any[]> {
     const afterSeq = opts.afterSeq ?? 0;
     const limit = opts.limit;
+    const attribution = opts.roundAttribution;
     const query = this.db("session_messages")
       .where("session_id", sessionId)
       .where("seq", ">", afterSeq)
@@ -377,6 +389,11 @@ export class SessionStore {
       if (row.tool_call_id !== null) msg.tool_call_id = row.tool_call_id;
       if (row.name !== null) msg.name = row.name;
       if (row.tool_calls_json !== null) msg.tool_calls = JSON.parse(row.tool_calls_json);
+      const round = attribution?.get(row.turn_id);
+      if (row.role === "tool" && round !== undefined) {
+        if (round.usage !== undefined) msg.usage = round.usage;
+        if (round.promptDelta !== undefined) msg.promptDelta = round.promptDelta;
+      }
       return {
         ...msg,
         seq: row.seq,
