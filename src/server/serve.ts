@@ -53,12 +53,33 @@ export interface Daemon {
   close(): Promise<void>;
 }
 
+/** Check if a hostname is openrouter.ai or a subdomain. */
+function isOpenRouterHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^www\./, "");
+  return normalized === "openrouter.ai" || normalized.endsWith(".openrouter.ai");
+}
+
 /** OpenAI client built from the injected configuration (proxy/key overrides;
  * SDK defaults when unset). */
 function openaiClient(config: YogConfig): OpenAI {
+  const baseURL = config.providerBaseUrl;
+  const extraHeaders: Record<string, string> = {};
+  if (baseURL) {
+    try {
+      const url = new URL(baseURL);
+      if (isOpenRouterHostname(url.hostname)) {
+        extraHeaders["HTTP-Referer"] = "https://github.com/haliphax-ai/yog";
+        extraHeaders["X-OpenRouter-Title"] = "yog";
+        extraHeaders["X-OpenRouter-Categories"] = "cli-agent,cloud-agent";
+      }
+    } catch {
+      // Invalid URL - ignore extra headers
+    }
+  }
   return new OpenAI({
-    ...(config.providerBaseUrl ? { baseURL: config.providerBaseUrl } : {}),
+    ...(baseURL ? { baseURL } : {}),
     ...(config.providerApiKey ? { apiKey: config.providerApiKey } : {}),
+    ...(Object.keys(extraHeaders).length > 0 ? { defaultHeaders: extraHeaders } : {}),
   });
 }
 
