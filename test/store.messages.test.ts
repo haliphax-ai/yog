@@ -23,6 +23,9 @@ describe("migration 002: session_messages schema", () => {
     const cols: any = await db.raw("PRAGMA table_info(session_messages)");
     const rows = Array.isArray(cols) ? cols : [];
     const names = rows.map((c: any) => c.name);
+    // Migration 005 dropped the vestigial per-call `tokens` column
+    // (introduced by 004, never written with a real value). The remaining
+    // columns are the transcript's whole truth.
     expect(names).toEqual([
       "id",
       "session_id",
@@ -34,7 +37,6 @@ describe("migration 002: session_messages schema", () => {
       "name",
       "tool_calls_json",
       "created_at",
-      "tokens",
     ]);
 
     const m: any = Object.fromEntries(rows.map((c: any) => [c.name, c]));

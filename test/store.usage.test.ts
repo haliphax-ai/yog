@@ -14,8 +14,8 @@ afterEach(async () => {
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 
-describe("migration 004: turn usage + per-call tokens schema", () => {
-  it("adds nullable usage columns to turns and tokens to session_messages", async () => {
+describe("migration 004: turn usage schema", () => {
+  it("adds nullable usage columns to turns", async () => {
     const db = await openSessionsDb(join(dir, "schema.db"));
     const turnsCols: any = await db.raw("PRAGMA table_info(turns)");
     const turnNames = (Array.isArray(turnsCols) ? turnsCols : []).map((c: any) => c.name);
@@ -25,7 +25,7 @@ describe("migration 004: turn usage + per-call tokens schema", () => {
 
     const msgCols: any = await db.raw("PRAGMA table_info(session_messages)");
     const msgNames = (Array.isArray(msgCols) ? msgCols : []).map((c: any) => c.name);
-    expect(msgNames).toContain("tokens");
+    expect(msgNames).not.toContain("tokens");
 
     db.destroy();
   });
