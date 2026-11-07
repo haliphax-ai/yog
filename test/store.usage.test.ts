@@ -14,8 +14,8 @@ afterEach(async () => {
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 
-describe("migration 004: turn usage + per-call tokens schema", () => {
-  it("adds nullable usage columns to turns and tokens to session_messages", async () => {
+describe("migration 004: turn usage schema", () => {
+  it("adds nullable usage columns to turns", async () => {
     const db = await openSessionsDb(join(dir, "schema.db"));
     const turnsCols: any = await db.raw("PRAGMA table_info(turns)");
     const turnNames = (Array.isArray(turnsCols) ? turnsCols : []).map((c: any) => c.name);
@@ -25,7 +25,7 @@ describe("migration 004: turn usage + per-call tokens schema", () => {
 
     const msgCols: any = await db.raw("PRAGMA table_info(session_messages)");
     const msgNames = (Array.isArray(msgCols) ? msgCols : []).map((c: any) => c.name);
-    expect(msgNames).toContain("tokens");
+    expect(msgNames).not.toContain("tokens");
 
     db.destroy();
   });
@@ -95,8 +95,8 @@ describe("SessionStore finishTurn usage persistence", () => {
   });
 });
 
-describe("session_messages token persistence", () => {
-  it("appendMessages persists per-call tokens and getTranscript only exposes them with withTokens", async () => {
+describe("session_messages legacy tokens field", () => {
+  it("ignores a tokens field on appended messages and never re-exposes it", async () => {
     const store = await SessionStore.open(join(dir, "tokens.db"));
     const session = (await store.createSession()) as any;
     const turn = (await store.addTurn(session.id, {
@@ -104,6 +104,9 @@ describe("session_messages token persistence", () => {
       content: "q",
       status: "running",
     })) as any;
+    // A caller (or a pre-existing fixture) may still carry the removed
+    // per-call `tokens` field; the store must ignore it, not persist or
+    // surface it — per-call attribution no longer exists on the wire.
     await store.appendMessages(
       session.id,
       [
@@ -112,11 +115,12 @@ describe("session_messages token persistence", () => {
       ],
       turn.id,
     );
-    const plain = await store.getTranscript(session.id);
-    expect(plain[1]?.tokens).toBeUndefined();
-    const wired = await store.getTranscript(session.id, { withTokens: true });
-    expect(wired[1]?.tokens).toBe(7);
-    expect(wired[0]?.tokens).toBeUndefined();
+    const rows = await store.getTranscript(session.id);
+    expect(rows[1]?.tokens).toBeUndefined();
+    // The wire dump must never include a `tokens` key, even when the
+    // appended message carried one.
+    const wired = await store.getTranscript(session.id, {});
+    expect(wired[1]?.tokens).toBeUndefined();
     store.close();
   });
 });

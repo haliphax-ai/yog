@@ -42,7 +42,7 @@ export interface StoreBoundary {
   listEvents?(sessionId: string): unknown[];
   getTranscript?(
     sessionId: string,
-    opts?: { afterSeq?: number; limit?: number; withTokens?: boolean },
+    opts?: { afterSeq?: number; limit?: number },
   ): Array<ChatCompletionMessageParam & { seq: number; turnId: number | null; ts: number }>;
   appendMessages?(
     sessionId: string,
@@ -171,7 +171,9 @@ function normalizeSession(row: unknown): SessionRecord {
  * (`tool_call_id`, `tool_calls`) become camelCase (`toolCallId`, `toolCalls`);
  * only the contract's known keys cross the boundary. The store itself stays
  * snake_case — its rows feed the model hydrate (OpenAI message shape) — the
- * conversion is a route-layer concern.
+ * conversion is a route-layer concern. Round attribution on tool result rows
+ * (`usage`, `promptDelta`) is forwarded when present, matching the live
+ * `tool.result` envelope so rehydration renders the same counts.
  */
 function toWireMessage(m: unknown): Record<string, unknown> {
   const row = (m ?? {}) as Record<string, unknown>;
@@ -181,7 +183,8 @@ function toWireMessage(m: unknown): Record<string, unknown> {
   }
   if (row.tool_call_id !== undefined) out.toolCallId = row.tool_call_id;
   if (row.tool_calls !== undefined) out.toolCalls = row.tool_calls;
-  if (row.tokens !== undefined) out.tokens = row.tokens;
+  if (row.usage !== undefined) out.usage = row.usage;
+  if (row.promptDelta !== undefined) out.promptDelta = row.promptDelta;
   return out;
 }
 
@@ -430,13 +433,43 @@ export function createHttpServer(deps: HttpDeps): Server {
           const params = new URL(req.url ?? "", "http://localhost").searchParams;
           const afterSeq = params.get("after") ? Number(params.get("after")) : undefined;
           const limit = params.get("limit") ? Number(params.get("limit")) : undefined;
+          // Round attribution for tool result rows comes from the turns'
+          // persisted tool.result events (the live envelope data), so the
+          // dump carries the same usage/promptDelta the stream did. One
+          // attribution round per turn: all results of a round share it.
+          const attribution = new Map<number, { usage?: unknown; promptDelta?: number }>();
+          if (typeof store!.listEvents === "function") {
+            for (const ev of ((await store!.listEvents(id)) ?? []) as Array<
+              Record<string, unknown>
+            >) {
+              if (ev.type !== "tool.result") continue;
+              const turnId = Number(ev.turn_id);
+              let data: any = ev.payload;
+              if (typeof data === "string") {
+                try {
+                  data = JSON.parse(data);
+                } catch {
+                  continue; // skip unparseable rows
+                }
+              }
+              if (data === null || typeof data !== "object" || Array.isArray(data)) continue;
+              const usage = (data as any).usage;
+              const promptDelta = (data as any).promptDelta;
+              const round: { usage?: unknown; promptDelta?: number } = {};
+              if (usage !== undefined) round.usage = usage;
+              if (typeof promptDelta === "number" && Number.isFinite(promptDelta)) {
+                round.promptDelta = promptDelta;
+              }
+              if (Object.keys(round).length > 0) attribution.set(turnId, round);
+            }
+          }
           const messages = (
             await store!.getTranscript(id, {
               ...(afterSeq !== undefined && Number.isFinite(afterSeq)
                 ? { afterSeq: afterSeq }
                 : {}),
               ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
-              withTokens: true,
+              ...(attribution.size > 0 ? { roundAttribution: attribution } : {}),
             })
           ).map(toWireMessage);
           // Per-turn metrics (usage/duration) ride alongside the dump so a

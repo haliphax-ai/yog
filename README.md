@@ -41,15 +41,15 @@ is part of every turn's context.
 The SSE stream frames each self-describing envelope
 (`{ id, type, version, ts, data }`) as `event:<type>` / `data:<envelope-json>`:
 
-| Event           | `data` payload                                | Meaning                                                                                                                         |
-| --------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `turn.started`  | `{ turnId, model, ts }`                       | turn accepted; streaming begins                                                                                                 |
-| `message.delta` | `{ text }`                                    | assistant text chunk (print as it arrives)                                                                                      |
-| `tool.call`     | `{ id, name, args }`                          | model invoked a tool                                                                                                            |
-| `tool.result`   | `{ id, name, ok, result?, tokens? }`          | tool outcome (optional `tokens` = per-call completion-token attribution when the provider reports round usage)                  |
-| `turn.finished` | `{ turnId, durationMs, usage?, stopReason? }` | normal end (optional `usage` = `{ prompt_tokens, completion_tokens, total_tokens }` when the provider reports it)               |
-| `turn.aborted`  | `{ reason, usage? }`                          | operator aborted the turn; transcript was healed (optional `usage` = totals as of the cut point when the provider reported any) |
-| `error`         | `{ code, message }`                           | terminal failure (e.g. `provider_error`)                                                                                        |
+| Event           | `data` payload                                    | Meaning                                                                                                                                                                                                    |
+| --------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `turn.started`  | `{ turnId, model, ts }`                           | turn accepted; streaming begins                                                                                                                                                                            |
+| `message.delta` | `{ text }`                                        | assistant text chunk (print as it arrives)                                                                                                                                                                 |
+| `tool.call`     | `{ id, name, args }`                              | model invoked a tool                                                                                                                                                                                       |
+| `tool.result`   | `{ id, name, ok, result?, usage?, promptDelta? }` | tool outcome (optional `usage` = the round's real `{ prompt_tokens, completion_tokens, total_tokens }` when the provider reports it; `promptDelta` = tokens the round added to the next request's context) |
+| `turn.finished` | `{ turnId, durationMs, usage?, stopReason? }`     | normal end (optional `usage` = `{ prompt_tokens, completion_tokens, total_tokens }` when the provider reports it)                                                                                          |
+| `turn.aborted`  | `{ reason, usage? }`                              | operator aborted the turn; transcript was healed (optional `usage` = totals as of the cut point when the provider reported any)                                                                            |
+| `error`         | `{ code, message }`                               | terminal failure (e.g. `provider_error`)                                                                                                                                                                   |
 
 **Abort.** `POST /v1/sessions/{id}/abort` ends the session's current turn —
 the abort is hard: the SSE stream frames the terminal `turn.aborted`
@@ -90,13 +90,14 @@ envelope for an unknown session/turn.
 
 `GET /v1/sessions/{id}/transcript` is the rehydration dump: it returns
 `{ session, messages, turns? }` where each message is
-`{ seq, turnId, ts, role, content, toolCallId?, name?, toolCalls?, tokens? }` —
+`{ seq, turnId, ts, role, content, toolCallId?, name?, toolCalls?, usage?, promptDelta? }` —
 monotonic `seq` per session, in conversation order. The optional `turns`
 array carries per-turn metrics `{ turnId, usage?, durationMs? }` (usage only
 when the provider reported it), so a client can rebuild per-turn token
-summaries without replaying events; a tool row's `tokens` is the persisted
-per-call attribution. All fields are additive and optional — older clients
-ignore them. It accepts
+summaries without replaying events; a tool row's `usage` / `promptDelta` are
+the round attribution already carried by the live `tool.result` envelope, so
+rehydration renders the same per-result counts. All fields are additive and
+optional — older clients ignore them. It accepts
 `?after=<seq>&limit=<n>` pagination for clients holding partial state, and it
 serves dormant sessions too: dormancy never blocks reads.
 
