@@ -249,8 +249,6 @@ export class SessionStore {
         const content = (m as any).content ?? null;
         const tool_call_id = (m as any).tool_call_id ?? null;
         const name = (m as any).name ?? null;
-        const tokens = (m as any).tokens;
-        const tokensValue = typeof tokens === "number" && Number.isFinite(tokens) ? tokens : null;
         let tool_calls_json: string | null = null;
         const tool_calls = (m as any).tool_calls;
         if (Array.isArray(tool_calls) && tool_calls.length > 0) {
@@ -265,7 +263,6 @@ export class SessionStore {
           tool_call_id,
           name,
           tool_calls_json,
-          tokens: tokensValue,
           created_at: now,
         });
         out.push({
@@ -277,7 +274,6 @@ export class SessionStore {
           content,
           tool_call_id,
           name,
-          tokens: tokensValue,
           tool_calls_json,
           created_at: now,
         });
@@ -318,7 +314,6 @@ export class SessionStore {
           tool_call_id,
           name,
           tool_calls_json,
-          tokens: null,
           created_at: now,
         });
         out.push({
@@ -330,7 +325,6 @@ export class SessionStore {
           content,
           tool_call_id,
           name,
-          tokens: null,
           tool_calls_json,
           created_at: now,
         });
@@ -368,7 +362,7 @@ export class SessionStore {
    */
   async getTranscript(
     sessionId: string,
-    opts: { afterSeq?: number; limit?: number; withTokens?: boolean } = {},
+    opts: { afterSeq?: number; limit?: number } = {},
   ): Promise<any[]> {
     const afterSeq = opts.afterSeq ?? 0;
     const limit = opts.limit;
@@ -383,7 +377,6 @@ export class SessionStore {
       if (row.tool_call_id !== null) msg.tool_call_id = row.tool_call_id;
       if (row.name !== null) msg.name = row.name;
       if (row.tool_calls_json !== null) msg.tool_calls = JSON.parse(row.tool_calls_json);
-      if (opts.withTokens && row.tokens !== null) msg.tokens = row.tokens;
       return {
         ...msg,
         seq: row.seq,

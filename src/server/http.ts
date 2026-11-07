@@ -42,7 +42,7 @@ export interface StoreBoundary {
   listEvents?(sessionId: string): unknown[];
   getTranscript?(
     sessionId: string,
-    opts?: { afterSeq?: number; limit?: number; withTokens?: boolean },
+    opts?: { afterSeq?: number; limit?: number },
   ): Array<ChatCompletionMessageParam & { seq: number; turnId: number | null; ts: number }>;
   appendMessages?(
     sessionId: string,
@@ -181,7 +181,6 @@ function toWireMessage(m: unknown): Record<string, unknown> {
   }
   if (row.tool_call_id !== undefined) out.toolCallId = row.tool_call_id;
   if (row.tool_calls !== undefined) out.toolCalls = row.tool_calls;
-  if (row.tokens !== undefined) out.tokens = row.tokens;
   return out;
 }
 
@@ -436,7 +435,6 @@ export function createHttpServer(deps: HttpDeps): Server {
                 ? { afterSeq: afterSeq }
                 : {}),
               ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
-              withTokens: true,
             })
           ).map(toWireMessage);
           // Per-turn metrics (usage/duration) ride alongside the dump so a
