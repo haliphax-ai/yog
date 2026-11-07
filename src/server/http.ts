@@ -55,6 +55,8 @@ export interface StoreBoundary {
   listTurnUsages?(
     sessionId: string,
   ): Promise<Array<{ turnId: number; usage?: unknown; durationMs?: number }>>;
+  /** The session's live usage snapshot (as-of-the-last-known-point). */
+  onUsageFor?(sessionId: string): unknown;
 }
 
 /** Handle returned by `orchestrator.runTurn` (see SessionOrchestrator). */
@@ -487,18 +489,43 @@ export function createHttpServer(deps: HttpDeps): Server {
           ).map(toWireMessage);
           // Per-turn metrics (usage/duration) ride alongside the dump so a
           // client can rebuild per-turn summaries without replaying events.
+          // Each row also carries its status — `running` for an in-flight
+          // (typically lingered) turn — so a reconnecting client can tell
+          // the session still has an active turn and behave accordingly
+          // (busy gate, poll-to-settle). A running row has no stored
+          // usage/duration yet (both are stamped at settle time), so the
+          // snapshot from `onUsageFor` fills the usage in: the client's
+          // "last known context total" then stays live instead of showing
+          // the pre-turn figure until the row settles.
           let turns: unknown[] = [];
-          if (typeof store!.listTurnUsages === "function") {
-            const metrics = ((await store!.listTurnUsages(id)) ?? []) as Array<{
-              turnId: number;
-              usage?: unknown;
-              durationMs?: number;
-            }>;
-            turns = metrics.map((m) => ({
-              turnId: m.turnId,
-              ...(m.usage !== undefined ? { usage: m.usage } : {}),
-              ...(m.durationMs !== undefined ? { durationMs: m.durationMs } : {}),
-            }));
+          if (typeof store!.listTurns === "function") {
+            const rows = ((await store!.listTurns(id)) ?? []) as Array<Record<string, unknown>>;
+            const usageById = new Map<number, { usage?: unknown; durationMs?: number }>();
+            if (typeof store!.listTurnUsages === "function") {
+              for (const m of ((await store!.listTurnUsages(id)) ?? []) as Array<{
+                turnId: number;
+                usage?: unknown;
+                durationMs?: number;
+              }>) {
+                usageById.set(m.turnId, {
+                  ...(m.usage !== undefined ? { usage: m.usage } : {}),
+                  ...(m.durationMs !== undefined ? { durationMs: m.durationMs } : {}),
+                });
+              }
+            }
+            const liveUsage = deps.onUsageFor?.(id);
+            turns = rows.map((r) => {
+              const turnId = Number(r.id);
+              const status = typeof r.status === "string" ? r.status : "finished";
+              const stored = usageById.get(turnId) ?? {};
+              const running = status === "running";
+              return {
+                turnId,
+                status,
+                ...(running && liveUsage !== undefined ? { usage: liveUsage } : stored),
+                ...(typeof r.duration_ms === "number" ? { durationMs: r.duration_ms } : {}),
+              };
+            });
           }
           sendJson(res, 200, {
             session,
@@ -909,6 +936,17 @@ export function createHttpServer(deps: HttpDeps): Server {
         controller.signal.addEventListener("abort", () => handle?.abort(), { once: true });
         try {
           await handle.promise;
+          // Settle-sync the adapter's turn row (best effort): the
+          // orchestrator path settles its own executeTurn row; this one is
+          // what the transcript dump reads, so it must not stay `running`
+          // after a successful turn.
+          if (store !== undefined && store.finishTurn !== undefined) {
+            try {
+              await store.finishTurn(session.id, turnRowId, "finished");
+            } catch {
+              // settle-sync is best effort
+            }
+          }
         } catch (err) {
           // An operator abort rejects the handle immediately — the abort is
           // hard: the adapter frames the terminal `turn.aborted` itself and
@@ -932,6 +970,13 @@ export function createHttpServer(deps: HttpDeps): Server {
                 ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
               },
             } as SseEnvelope);
+            if (store !== undefined && store.finishTurn !== undefined) {
+              try {
+                await store.finishTurn(session.id, turnRowId, "aborted");
+              } catch {
+                // settle-sync is best effort
+              }
+            }
           }
           if (isAbort && turnStarted && !linger && !closed && !res.writableEnded) {
             const envelope = {
@@ -946,6 +991,13 @@ export function createHttpServer(deps: HttpDeps): Server {
             } as SseEnvelope;
             await persistEvent(envelope);
             await emit(envelope);
+            if (store !== undefined && store.finishTurn !== undefined) {
+              try {
+                await store.finishTurn(session.id, turnRowId, "aborted");
+              } catch {
+                // settle-sync is best effort
+              }
+            }
           }
           if (!isAbort && !sawError && !closed && !res.writableEnded) {
             const e = err as { code?: string; message?: string };
@@ -998,9 +1050,26 @@ export function createHttpServer(deps: HttpDeps): Server {
               // persistence is best effort
             }
           }
+          // Settle-sync the adapter's turn row (best effort): with no
+          // orchestrator (injected-deps / test daemons) nothing else settles
+          // this row — it must not stay `running` after a finished turn.
+          if (store !== undefined && store.finishTurn !== undefined) {
+            try {
+              await store.finishTurn(session.id, turnRowId, "finished");
+            } catch {
+              // settle-sync is best effort
+            }
+          }
         } catch {
           // Failed turn persists nothing (except its event log, which is
           // diagnostic). The transcript stays at the last turn boundary.
+          if (store !== undefined && store.finishTurn !== undefined) {
+            try {
+              await store.finishTurn(session.id, turnRowId, "aborted");
+            } catch {
+              // settle-sync is best effort
+            }
+          }
         }
       }
     } catch (err) {
