@@ -799,8 +799,8 @@ export function createHttpServer(deps: HttpDeps): Server {
       sendError(res, "invalid_request", "model must be a string");
       return;
     }
-    if (body.linger !== undefined && typeof body.linger !== "boolean") {
-      sendError(res, "invalid_request", "linger must be a boolean");
+    if (body.abortOnDisconnect !== undefined && typeof body.abortOnDisconnect !== "boolean") {
+      sendError(res, "invalid_request", "abortOnDisconnect must be a boolean");
       return;
     }
 
@@ -824,15 +824,17 @@ export function createHttpServer(deps: HttpDeps): Server {
       const f = deps.onUsageFor;
       return typeof f === "function" ? f(session.id) : undefined;
     };
-    const linger = body.linger === true;
+    // Disconnect policy (yog#31): linger is the DEFAULT — a dropped
+    // connection only detaches the stream; the engine runs the turn to its
+    // terminal state, which persists as usual and stays replayable from
+    // the turn-status endpoint. A client that wants the legacy behavior
+    // (abort the turn when the wire goes away) must ask for it with
+    // `abortOnDisconnect: true` — the abort endpoint (`POST /abort` or
+    // Esc in the TUI) remains the way to stop a turn while attached.
+    const linger = body.abortOnDisconnect !== true;
     const onClose = (): void => {
       if (closed) return;
       closed = true;
-      // Linger policy (yog#31): the client asked to detach mid-turn, so a
-      // dropped connection must NOT abort the turn — the engine runs to its
-      // terminal state, which persists as usual and stays replayable from
-      // the turn-status endpoint. Abort-on-disconnect stays the default:
-      // a crashed client must not leak a runaway turn it cannot see.
       if (linger) return;
       controller.abort(new Error("client disconnected"));
       // Fan the abort out to the orchestrator (queued turns are dropped,

@@ -230,13 +230,13 @@ describe("turn streaming", () => {
     }
   });
 
-  it("closing the connection aborts the in-flight turn", async () => {
+  it("closing the connection aborts the in-flight turn (abortOnDisconnect opt-in)", async () => {
     const { session } = await json(await fetch(`${base}/v1/sessions`, { method: "POST" }));
     const controller = new AbortController();
     const res = await fetch(`${base}/v1/sessions/${session.id}/turns`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: "long" }),
+      body: JSON.stringify({ prompt: "long", abortOnDisconnect: true }),
       signal: controller.signal,
     });
     const reader = res.body!.getReader();
@@ -252,20 +252,20 @@ describe("turn streaming", () => {
     expect(typeof raced).toBe("string");
   });
 
-  it("non-boolean linger in the turn body → 400 invalid_request", async () => {
+  it("non-boolean abortOnDisconnect in the turn body → 400 invalid_request", async () => {
     const { session } = await json(await fetch(`${base}/v1/sessions`, { method: "POST" }));
     const res = await fetch(`${base}/v1/sessions/${session.id}/turns`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: "hi", linger: "yes" }),
+      body: JSON.stringify({ prompt: "hi", abortOnDisconnect: "yes" }),
     });
     expect(res.status).toBe(400);
     const body = await json(res);
     expect(body.error.code).toBe("invalid_request");
-    expect(body.error.message).toContain("linger");
+    expect(body.error.message).toContain("abortOnDisconnect");
   });
 
-  it("closing the connection with linger:true lets the turn finish and recover", async () => {
+  it("closing the connection lets the turn finish and recover (default linger)", async () => {
     // Own sqlite store: the recovery endpoint is store-backed, and this
     // daemon has none injected by default.
     const store = await SessionStore.open(join(tmpdir(), `yog-linger-${Date.now()}.db`));
@@ -284,7 +284,7 @@ describe("turn streaming", () => {
       const res = await fetch(`${d.url}/v1/sessions/${session.id}/turns`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: "long", linger: true }),
+        body: JSON.stringify({ prompt: "long" }),
         signal: controller.signal,
       });
       const reader = res.body!.getReader();

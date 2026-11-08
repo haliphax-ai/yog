@@ -277,7 +277,7 @@ function startTurn(sessionId: string): Promise<Response> {
   return fetch(`${base}/v1/sessions/${sessionId}/turns`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt: "hang forever" }),
+    body: JSON.stringify({ prompt: "hang forever", abortOnDisconnect: true }),
   });
 }
 
