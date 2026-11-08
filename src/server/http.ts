@@ -864,14 +864,16 @@ export function createHttpServer(deps: HttpDeps): Server {
       turnLog.debug({ event: ev }, "turn event");
       res.write(encodeEvent(ev));
     };
-    // Linger mode keeps consuming the bus after the disconnect so the
-    // stream's own bookkeeping (terminal framing, finally-cleanup) keeps
-    // its semantics; the `closed` guard in `emit` makes those writes
-    // no-ops — the wire is gone, nothing is dropped, nothing stalls.
+    // Linger mode (the default): after the client hangs up, the bus listener
+    // keeps consuming envelopes so the stream's own bookkeeping stays
+    // correct — `turnStarted`/`sawError` still track the engine's progress
+    // (terminal framing depends on them), while `emit`'s `closed` guard
+    // makes the wire writes no-ops. Persistence is NOT done here: the
+    // engine's sink in serve.ts already recorded every event, so a
+    // persist-only path would double-write `turn_events` (§4.8 dedup).
     const onBusEventLingering = (ev: SseEnvelope): void => {
       if (ev.type === "turn.started") turnStarted = true;
       sawError = sawError || ev.type === "error";
-      void persistEvent(ev);
     };
 
     // Record the turn row up front (best effort: persistence never fails the
@@ -920,14 +922,17 @@ export function createHttpServer(deps: HttpDeps): Server {
       if (ev.type === "turn.started") turnStarted = true;
       void emit(ev);
     };
-    // Linger mode: after the client hangs up, deliver envelopes through a
-    // persistence-only path — the wire is gone, but the store sink must
-    // keep recording events so turn-status recovery replays the full turn.
+    // Linger mode: the wire listener below is subscribed unconditionally —
+    // before the disconnect `emit` frames envelopes as usual; after it, the
+    // `closed` guard turns those writes into no-ops while bookkeeping keeps
+    // running. Nothing is persisted from either bus listener (§4.8 dedup).
     const subscribeBus = (fn: (ev: SseEnvelope) => void): void => {
-      bus?.on(channel, linger ? onBusEventLingering : fn);
+      bus?.on(channel, fn);
+      if (linger) bus?.on(channel, onBusEventLingering);
     };
     const unsubscribeBus = (fn: (ev: SseEnvelope) => void): void => {
-      bus?.off(channel, linger ? onBusEventLingering : fn);
+      bus?.off(channel, fn);
+      if (linger) bus?.off(channel, onBusEventLingering);
     };
     try {
       if (hasOrchestrator) {
@@ -958,29 +963,13 @@ export function createHttpServer(deps: HttpDeps): Server {
           // wire and persists it — this is the row turn-status recovery
           // replays for an aborted turn.
           const isAbort = (err as Error | undefined)?.name === "AbortError";
-          // Linger mode: the wire is already gone — the terminal framing
-          // below would be dropped by `emit`, so skip it; the store sink
-          // keeps its own record for turn-status recovery.
-          if (isAbort && turnStarted && linger) {
-            await persistEvent({
-              id: 0,
-              type: "turn.aborted",
-              version: 1,
-              ts: Date.now(),
-              data: {
-                reason: (err as Error).message || "turn aborted",
-                ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
-              },
-            } as SseEnvelope);
-            if (store !== undefined && store.finishTurn !== undefined) {
-              try {
-                await store.finishTurn(session.id, turnRowId, "aborted");
-              } catch {
-                // settle-sync is best effort
-              }
-            }
-          }
-          if (isAbort && turnStarted && !linger && !closed && !res.writableEnded) {
+          // The engine emits no terminal event on abort, so the adapter
+          // frames `turn.aborted` itself: persist it (the sole writer of
+          // this event — turn-status recovery replays it), frame it on the
+          // wire while the client is still attached (a lingered/disconnected
+          // stream drops the write inside `emit`), and settle the adapter's
+          // turn row so the transcript dump does not show `running` forever.
+          if (isAbort && turnStarted) {
             const envelope = {
               id: 0,
               type: "turn.aborted",

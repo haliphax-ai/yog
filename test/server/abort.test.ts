@@ -277,7 +277,7 @@ function startTurn(sessionId: string): Promise<Response> {
   return fetch(`${base}/v1/sessions/${sessionId}/turns`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt: "hang forever", abortOnDisconnect: true }),
+    body: JSON.stringify({ prompt: "hang forever" }),
   });
 }
 
@@ -332,7 +332,10 @@ describe("POST /v1/sessions/{id}/abort", () => {
     expect(turns.at(-1)?.status).toBe("aborted");
     expect(turns.at(-1)?.finished_at).not.toBeNull();
     const events = await store.listEvents(sid);
-    expect(events.some((e: any) => e.type === "turn.aborted")).toBe(true);
+    // Persisted exactly once: the adapter is the sole writer of this event
+    // (the engine emits no terminal event on abort), so a duplicate row
+    // would mean the framing path persisted it twice.
+    expect(events.filter((e: any) => e.type === "turn.aborted")).toHaveLength(1);
 
     // The session is idle now: a second abort is a no-op success.
     const again = await fetch(`${base}/v1/sessions/${sid}/abort`, { method: "POST" });

@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { EventEmitter } from "node:events";
 import { createDaemon, type DaemonOptions } from "../../src/server/serve.ts";
 import type { Daemon } from "../../src/server/serve.ts";
+import { createHttpServer } from "../../src/server/http.ts";
 import { SessionStore } from "../../src/server/store/sessions.ts";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -324,4 +326,83 @@ describe("turn streaming", () => {
       store.close();
     }
   }, 15_000);
+});
+
+describe("orchestrator-path streaming (bus delivery)", () => {
+  it("default linger mode delivers tool.call/tool.result/turn.finished on the wire (no double persist)", async () => {
+    // Mirrors the real daemon composition: executeTurn's sink persists
+    // each envelope once, then publishes it to the per-daemon bus; the
+    // HTTP adapter subscribes per session and frames the envelopes.
+    const store = await SessionStore.open(join(tmpdir(), `yog-wire-${Date.now()}.db`));
+    const bus = new EventEmitter();
+    bus.setMaxListeners(0);
+    const orchestrator = {
+      runTurn: (sessionId: string) => {
+        const publish = async (type: string, data: unknown): Promise<void> => {
+          await store.addEvent(sessionId, { type, payload: JSON.stringify(data), version: 1 });
+          bus.emit(`session:${sessionId}`, {
+            id: 0,
+            type,
+            version: 1,
+            ts: Date.now(),
+            data,
+          });
+        };
+        const promise = (async () => {
+          await publish("turn.started", { turnId: "t-wire", model: "fake", ts: Date.now() });
+          await publish("message.delta", { text: "hello " });
+          await publish("tool.call", { id: "c1", name: "bash", args: "{}" });
+          await publish("tool.result", { id: "c1", name: "bash", ok: true, result: "ok" });
+          await publish("message.delta", { text: "world" });
+          await publish("turn.finished", { turnId: "t-wire", durationMs: 1 });
+        })();
+        return { promise, abort: () => undefined };
+      },
+    };
+    const server = createHttpServer({
+      capabilities: { contractVersion: "v1", models: [], tools: [], features: ["sse"] },
+      store,
+      orchestrator,
+      bus,
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    try {
+      const port = (server.address() as { port: number }).port;
+      const created = await fetch(`http://127.0.0.1:${port}/v1/sessions`, { method: "POST" });
+      const { session } = (await created.json()) as { session: { id: string } };
+      const res = await fetch(`http://127.0.0.1:${port}/v1/sessions/${session.id}/turns`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "hi" }),
+      });
+      const frames = parseSse(await res.text());
+      const types = frames.map((f) => f.event);
+      for (const expected of [
+        "turn.started",
+        "message.delta",
+        "tool.call",
+        "tool.result",
+        "turn.finished",
+      ]) {
+        expect(types).toContain(expected);
+      }
+      // §4.8 dedup: the sink persists each event exactly once — the
+      // adapter's bus subscriber must not write a second row. Counts
+      // match what the orchestrator published (two deltas by design).
+      const events = await store.listEvents(session.id);
+      const expectedCounts: Record<string, number> = {
+        "turn.started": 1,
+        "message.delta": 2,
+        "tool.call": 1,
+        "tool.result": 1,
+        "turn.finished": 1,
+      };
+      for (const [t, n] of Object.entries(expectedCounts)) {
+        expect(events.filter((e: any) => e.type === t)).toHaveLength(n);
+      }
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+      store.close();
+    }
+  });
 });
