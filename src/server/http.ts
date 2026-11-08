@@ -55,6 +55,8 @@ export interface StoreBoundary {
   listTurnUsages?(
     sessionId: string,
   ): Promise<Array<{ turnId: number; usage?: unknown; durationMs?: number }>>;
+  /** The session's live usage snapshot (as-of-the-last-known-point). */
+  onUsageFor?(sessionId: string): unknown;
 }
 
 /** Handle returned by `orchestrator.runTurn` (see SessionOrchestrator). */
@@ -487,18 +489,43 @@ export function createHttpServer(deps: HttpDeps): Server {
           ).map(toWireMessage);
           // Per-turn metrics (usage/duration) ride alongside the dump so a
           // client can rebuild per-turn summaries without replaying events.
+          // Each row also carries its status — `running` for an in-flight
+          // (typically lingered) turn — so a reconnecting client can tell
+          // the session still has an active turn and behave accordingly
+          // (busy gate, poll-to-settle). A running row has no stored
+          // usage/duration yet (both are stamped at settle time), so the
+          // snapshot from `onUsageFor` fills the usage in: the client's
+          // "last known context total" then stays live instead of showing
+          // the pre-turn figure until the row settles.
           let turns: unknown[] = [];
-          if (typeof store!.listTurnUsages === "function") {
-            const metrics = ((await store!.listTurnUsages(id)) ?? []) as Array<{
-              turnId: number;
-              usage?: unknown;
-              durationMs?: number;
-            }>;
-            turns = metrics.map((m) => ({
-              turnId: m.turnId,
-              ...(m.usage !== undefined ? { usage: m.usage } : {}),
-              ...(m.durationMs !== undefined ? { durationMs: m.durationMs } : {}),
-            }));
+          if (typeof store!.listTurns === "function") {
+            const rows = ((await store!.listTurns(id)) ?? []) as Array<Record<string, unknown>>;
+            const usageById = new Map<number, { usage?: unknown; durationMs?: number }>();
+            if (typeof store!.listTurnUsages === "function") {
+              for (const m of ((await store!.listTurnUsages(id)) ?? []) as Array<{
+                turnId: number;
+                usage?: unknown;
+                durationMs?: number;
+              }>) {
+                usageById.set(m.turnId, {
+                  ...(m.usage !== undefined ? { usage: m.usage } : {}),
+                  ...(m.durationMs !== undefined ? { durationMs: m.durationMs } : {}),
+                });
+              }
+            }
+            const liveUsage = deps.onUsageFor?.(id);
+            turns = rows.map((r) => {
+              const turnId = Number(r.id);
+              const status = typeof r.status === "string" ? r.status : "finished";
+              const stored = usageById.get(turnId) ?? {};
+              const running = status === "running";
+              return {
+                turnId,
+                status,
+                ...(running && liveUsage !== undefined ? { usage: liveUsage } : stored),
+                ...(typeof r.duration_ms === "number" ? { durationMs: r.duration_ms } : {}),
+              };
+            });
           }
           sendJson(res, 200, {
             session,
@@ -772,6 +799,10 @@ export function createHttpServer(deps: HttpDeps): Server {
       sendError(res, "invalid_request", "model must be a string");
       return;
     }
+    if (body.abortOnDisconnect !== undefined && typeof body.abortOnDisconnect !== "boolean") {
+      sendError(res, "invalid_request", "abortOnDisconnect must be a boolean");
+      return;
+    }
 
     const model = deps.model;
     if (!hasOrchestrator && (!model || typeof model.runTurn !== "function")) {
@@ -793,9 +824,18 @@ export function createHttpServer(deps: HttpDeps): Server {
       const f = deps.onUsageFor;
       return typeof f === "function" ? f(session.id) : undefined;
     };
+    // Disconnect policy (yog#31): linger is the DEFAULT — a dropped
+    // connection only detaches the stream; the engine runs the turn to its
+    // terminal state, which persists as usual and stays replayable from
+    // the turn-status endpoint. A client that wants the legacy behavior
+    // (abort the turn when the wire goes away) must ask for it with
+    // `abortOnDisconnect: true` — the abort endpoint (`POST /abort` or
+    // Esc in the TUI) remains the way to stop a turn while attached.
+    const linger = body.abortOnDisconnect !== true;
     const onClose = (): void => {
       if (closed) return;
       closed = true;
+      if (linger) return;
       controller.abort(new Error("client disconnected"));
       // Fan the abort out to the orchestrator (queued turns are dropped,
       // in-flight turns get their handle promise rejected) — but only after
@@ -823,6 +863,15 @@ export function createHttpServer(deps: HttpDeps): Server {
       if (ev.type === "error") sawError = true;
       turnLog.debug({ event: ev }, "turn event");
       res.write(encodeEvent(ev));
+    };
+    // Linger mode keeps consuming the bus after the disconnect so the
+    // stream's own bookkeeping (terminal framing, finally-cleanup) keeps
+    // its semantics; the `closed` guard in `emit` makes those writes
+    // no-ops — the wire is gone, nothing is dropped, nothing stalls.
+    const onBusEventLingering = (ev: SseEnvelope): void => {
+      if (ev.type === "turn.started") turnStarted = true;
+      sawError = sawError || ev.type === "error";
+      void persistEvent(ev);
     };
 
     // Record the turn row up front (best effort: persistence never fails the
@@ -871,16 +920,35 @@ export function createHttpServer(deps: HttpDeps): Server {
       if (ev.type === "turn.started") turnStarted = true;
       void emit(ev);
     };
-
+    // Linger mode: after the client hangs up, deliver envelopes through a
+    // persistence-only path — the wire is gone, but the store sink must
+    // keep recording events so turn-status recovery replays the full turn.
+    const subscribeBus = (fn: (ev: SseEnvelope) => void): void => {
+      bus?.on(channel, linger ? onBusEventLingering : fn);
+    };
+    const unsubscribeBus = (fn: (ev: SseEnvelope) => void): void => {
+      bus?.off(channel, linger ? onBusEventLingering : fn);
+    };
     try {
       if (hasOrchestrator) {
+        subscribeBus(onBusEvent);
         // Orchestrator path: the composed executeTurn publishes envelopes to
         // the per-daemon bus; we subscribe for this session and frame them.
-        bus?.on(channel, onBusEvent);
         handle = orchestrator!.runTurn(session.id, body);
         controller.signal.addEventListener("abort", () => handle?.abort(), { once: true });
         try {
           await handle.promise;
+          // Settle-sync the adapter's turn row (best effort): the
+          // orchestrator path settles its own executeTurn row; this one is
+          // what the transcript dump reads, so it must not stay `running`
+          // after a successful turn.
+          if (store !== undefined && store.finishTurn !== undefined) {
+            try {
+              await store.finishTurn(session.id, turnRowId, "finished");
+            } catch {
+              // settle-sync is best effort
+            }
+          }
         } catch (err) {
           // An operator abort rejects the handle immediately — the abort is
           // hard: the adapter frames the terminal `turn.aborted` itself and
@@ -890,7 +958,29 @@ export function createHttpServer(deps: HttpDeps): Server {
           // wire and persists it — this is the row turn-status recovery
           // replays for an aborted turn.
           const isAbort = (err as Error | undefined)?.name === "AbortError";
-          if (isAbort && turnStarted && !closed && !res.writableEnded) {
+          // Linger mode: the wire is already gone — the terminal framing
+          // below would be dropped by `emit`, so skip it; the store sink
+          // keeps its own record for turn-status recovery.
+          if (isAbort && turnStarted && linger) {
+            await persistEvent({
+              id: 0,
+              type: "turn.aborted",
+              version: 1,
+              ts: Date.now(),
+              data: {
+                reason: (err as Error).message || "turn aborted",
+                ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
+              },
+            } as SseEnvelope);
+            if (store !== undefined && store.finishTurn !== undefined) {
+              try {
+                await store.finishTurn(session.id, turnRowId, "aborted");
+              } catch {
+                // settle-sync is best effort
+              }
+            }
+          }
+          if (isAbort && turnStarted && !linger && !closed && !res.writableEnded) {
             const envelope = {
               id: 0,
               type: "turn.aborted",
@@ -903,6 +993,13 @@ export function createHttpServer(deps: HttpDeps): Server {
             } as SseEnvelope;
             await persistEvent(envelope);
             await emit(envelope);
+            if (store !== undefined && store.finishTurn !== undefined) {
+              try {
+                await store.finishTurn(session.id, turnRowId, "aborted");
+              } catch {
+                // settle-sync is best effort
+              }
+            }
           }
           if (!isAbort && !sawError && !closed && !res.writableEnded) {
             const e = err as { code?: string; message?: string };
@@ -955,9 +1052,26 @@ export function createHttpServer(deps: HttpDeps): Server {
               // persistence is best effort
             }
           }
+          // Settle-sync the adapter's turn row (best effort): with no
+          // orchestrator (injected-deps / test daemons) nothing else settles
+          // this row — it must not stay `running` after a finished turn.
+          if (store !== undefined && store.finishTurn !== undefined) {
+            try {
+              await store.finishTurn(session.id, turnRowId, "finished");
+            } catch {
+              // settle-sync is best effort
+            }
+          }
         } catch {
           // Failed turn persists nothing (except its event log, which is
           // diagnostic). The transcript stays at the last turn boundary.
+          if (store !== undefined && store.finishTurn !== undefined) {
+            try {
+              await store.finishTurn(session.id, turnRowId, "aborted");
+            } catch {
+              // settle-sync is best effort
+            }
+          }
         }
       }
     } catch (err) {
@@ -977,7 +1091,7 @@ export function createHttpServer(deps: HttpDeps): Server {
         } as SseEnvelope);
       }
     } finally {
-      bus?.off(channel, onBusEvent);
+      unsubscribeBus(onBusEvent);
       req.off("close", onClose);
       res.off("close", onClose);
       if (!res.writableEnded && !res.destroyed) res.end();

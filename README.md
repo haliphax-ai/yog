@@ -19,16 +19,16 @@ application, which speaks the v1 HTTP/SSE contract directly.
 
 ### Contract endpoints (v1)
 
-| Method | Path                               | Purpose                                                                                                                |
-| ------ | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| GET    | `/v1/capabilities`                 | Advertise server: contract version, models, tools, `features` (`["sse", "transcript", "abort"]`)                       |
-| POST   | `/v1/sessions`                     | Create a session, optional body `{ title?, system? }` → `{ session: { id, … } }` (201)                                 |
-| GET    | `/v1/sessions/{id}`                | Session status → `{ session }`                                                                                         |
-| DELETE | `/v1/sessions/{id}`                | **Detach** (advisory, `?purge=true` hard-deletes) → `{ session }`                                                      |
-| POST   | `/v1/sessions/{id}/turns`          | Run a turn; streams an SSE transcript (a dormant session is implicitly revived)                                        |
-| POST   | `/v1/sessions/{id}/abort`          | **Abort the current turn**: kill the tool call in flight, close the model stream, heal the transcript                  |
-| GET    | `/v1/sessions/{id}/transcript`     | **Rehydration dump**: the session's canonical transcript → `{ session, messages, turns? }` (optional per-turn metrics) |
-| GET    | `/v1/sessions/{id}/turns/{turnId}` | **Turn-status recovery/replay**: fetch terminal turn state when the SSE stream died                                    |
+| Method | Path                               | Purpose                                                                                                                                                                                                                              |
+| ------ | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| GET    | `/v1/capabilities`                 | Advertise server: contract version, models, tools, `features` (`["sse", "transcript", "abort"]`)                                                                                                                                     |
+| POST   | `/v1/sessions`                     | Create a session, optional body `{ title?, system? }` → `{ session: { id, … } }` (201)                                                                                                                                               |
+| GET    | `/v1/sessions/{id}`                | Session status → `{ session }`                                                                                                                                                                                                       |
+| DELETE | `/v1/sessions/{id}`                | **Detach** (advisory, `?purge=true` hard-deletes) → `{ session }`                                                                                                                                                                    |
+| POST   | `/v1/sessions/{id}/turns`          | Run a turn; streams an SSE transcript (a dormant session is implicitly revived). A disconnect detaches the stream by default — the turn keeps running server-side; pass `abortOnDisconnect: true` for the legacy wire-tied behavior. |
+| POST   | `/v1/sessions/{id}/abort`          | **Abort the current turn**: kill the tool call in flight, close the model stream, heal the transcript                                                                                                                                |
+| GET    | `/v1/sessions/{id}/transcript`     | **Rehydration dump**: the session's canonical transcript → `{ session, messages, turns? }` (optional per-turn metrics)                                                                                                               |
+| GET    | `/v1/sessions/{id}/turns/{turnId}` | **Turn-status recovery/replay**: fetch terminal turn state when the SSE stream died                                                                                                                                                  |
 
 Turn requests are JSON: `{ "prompt": "...", "model": "..." }` (`prompt` is
 required; `model` defaults to the server's model). **Clients never send
@@ -85,6 +85,19 @@ and recovers the terminal state from
 `GET /v1/sessions/{id}/turns/{turnId}` — the recovery endpoint returns the
 turn with its stored events, or a 404 `{ error: { code, message } }`
 envelope for an unknown session/turn.
+
+### Disconnect policy
+
+A disconnect detaches the stream, not the turn (yog#31): the engine runs the
+turn to its terminal state (events keep persisting, the turn row settles
+`finished`/`aborted` as usual), and the terminal state stays replayable from
+`GET /v1/sessions/{id}/turns/{turnId}` — rehydrate from the transcript on
+the next connect. This is how a UI quit, crash, or power loss mid-turn keeps
+the turn alive: the server owns the turn, not the socket.
+
+The legacy wire-tied behavior (disconnect aborts the in-flight turn) is
+opt-in: pass `"abortOnDisconnect": true` in the turn body. While attached,
+`POST /v1/sessions/{id}/abort` remains the way to stop a turn.
 
 ### Transcripts, resume, and session dormancy
 

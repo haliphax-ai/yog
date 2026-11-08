@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDaemon, type DaemonOptions } from "../../src/server/serve.ts";
 import type { Daemon } from "../../src/server/serve.ts";
+import { SessionStore } from "../../src/server/store/sessions.ts";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 /** Minimal SSE frame parser: splits `event:`/`data:` blocks. */
 interface Frame {
@@ -227,13 +230,13 @@ describe("turn streaming", () => {
     }
   });
 
-  it("closing the connection aborts the in-flight turn", async () => {
+  it("closing the connection aborts the in-flight turn (abortOnDisconnect opt-in)", async () => {
     const { session } = await json(await fetch(`${base}/v1/sessions`, { method: "POST" }));
     const controller = new AbortController();
     const res = await fetch(`${base}/v1/sessions/${session.id}/turns`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: "long" }),
+      body: JSON.stringify({ prompt: "long", abortOnDisconnect: true }),
       signal: controller.signal,
     });
     const reader = res.body!.getReader();
@@ -248,4 +251,77 @@ describe("turn streaming", () => {
     ]);
     expect(typeof raced).toBe("string");
   });
+
+  it("non-boolean abortOnDisconnect in the turn body → 400 invalid_request", async () => {
+    const { session } = await json(await fetch(`${base}/v1/sessions`, { method: "POST" }));
+    const res = await fetch(`${base}/v1/sessions/${session.id}/turns`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "hi", abortOnDisconnect: "yes" }),
+    });
+    expect(res.status).toBe(400);
+    const body = await json(res);
+    expect(body.error.code).toBe("invalid_request");
+    expect(body.error.message).toContain("abortOnDisconnect");
+  });
+
+  it("closing the connection lets the turn finish and recover (default linger)", async () => {
+    // Own sqlite store: the recovery endpoint is store-backed, and this
+    // daemon has none injected by default.
+    const store = await SessionStore.open(join(tmpdir(), `yog-linger-${Date.now()}.db`));
+    const d = await createDaemon({
+      host: "127.0.0.1",
+      port: 0,
+      deps: {
+        capabilities: { contractVersion: "v1", models: [], tools: [], features: [] },
+        model: fakeModel("happy"),
+        store,
+      },
+    });
+    try {
+      const { session } = await json(await fetch(`${d.url}/v1/sessions`, { method: "POST" }));
+      const controller = new AbortController();
+      const res = await fetch(`${d.url}/v1/sessions/${session.id}/turns`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "long" }),
+        signal: controller.signal,
+      });
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      // Accumulate until the first complete SSE block (blank-line
+      // terminated) — reader chunks may coalesce multiple frames.
+      let text = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value, { stream: true });
+        if (text.includes("\n\n")) break;
+      }
+      const dataLine = text
+        .split("\n\n")[0]!
+        .split("\n")
+        .find((l) => l.startsWith("data:"));
+      expect(dataLine).toBeDefined();
+      const started = JSON.parse(dataLine!.slice(5).trim());
+      const turnId = String(started.data.turnId);
+      // Detach: hang up while the turn is still in flight (the fake model
+      // drains for 40ms before finishing).
+      controller.abort();
+      // Give the daemon a moment to notice the close and the engine to run
+      // to its terminal state, then probe the turn-status endpoint.
+      await new Promise((r) => setTimeout(r, 300));
+      const got = await fetch(`${d.url}/v1/sessions/${session.id}/turns/${turnId}`);
+      expect(got.status).toBe(200);
+      const { turn } = await json(got);
+      expect(turn.status).toBe("finished");
+      const types = turn.events.map((e: any) => e.type);
+      expect(types).toContain("turn.started");
+      expect(types).toContain("turn.finished");
+    } finally {
+      // The dangling socket must not hold the daemon open.
+      await d.close();
+      store.close();
+    }
+  }, 15_000);
 });
