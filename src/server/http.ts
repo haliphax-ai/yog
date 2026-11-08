@@ -487,6 +487,150 @@ export function createHttpServer(deps: HttpDeps): Server {
               ...(resultTokensByCall.size > 0 ? { resultTokensByCall } : {}),
             })
           ).map(toWireMessage);
+          // In-flight (running) turns have no canonical transcript rows yet:
+          // serve.ts only appends `messages.slice(startLen)` at settle time.
+          // A reconnecting client polling this dump would therefore see only
+          // the previous turn while the in-flight turn generates, and the
+          // poll gate on usage meant nothing landed even after settle for
+          // the duplicate adapter row. Reconstruct the running turn's
+          // completed rounds from its persisted `turn_events` (the sink
+          // records every event incrementally) and append them as synthetic
+          // transcript rows so a poll rehydrates the in-flight turn
+          // progressively. Settled turns use the real rows above and get
+          // no synthetic duplicates.
+          if (typeof store!.listTurns === "function") {
+            const rowsForSynthetic = ((await store!.listTurns(id)) ?? []) as Array<
+              Record<string, unknown>
+            >;
+            const runningRows = rowsForSynthetic.filter((r) => r.status === "running");
+            if (runningRows.length > 0 && typeof store!.listEvents === "function") {
+              const allEvents = ((await store!.listEvents(id)) ?? []) as Array<
+                Record<string, unknown>
+              >;
+              const eventsByTurn = new Map<number, Array<Record<string, unknown>>>();
+              for (const ev of allEvents) {
+                const tid = Number(ev.turn_id);
+                if (!Number.isFinite(tid)) continue;
+                const list = eventsByTurn.get(tid) ?? [];
+                list.push(ev);
+                eventsByTurn.set(tid, list);
+              }
+              let nextSeq =
+                messages.reduce(
+                  (max, m) => Math.max(max, typeof m.seq === "number" ? m.seq : 0),
+                  0,
+                ) + 1;
+              for (const r of runningRows) {
+                const turnId = Number(r.id);
+                const evs = eventsByTurn.get(turnId) ?? [];
+                if (evs.length === 0) continue;
+                const synth: Array<Record<string, unknown>> = [];
+                const parsePayload = (ev: Record<string, unknown>): Record<string, unknown> => {
+                  let data: unknown = ev.payload;
+                  if (typeof data === "string") {
+                    try {
+                      data = JSON.parse(data);
+                    } catch {
+                      return {};
+                    }
+                  }
+                  return data !== null && typeof data === "object" && !Array.isArray(data)
+                    ? (data as Record<string, unknown>)
+                    : {};
+                };
+                // User prompt from the turn row itself.
+                const promptText =
+                  typeof r.prompt === "string"
+                    ? r.prompt
+                    : typeof (r.request as any)?.prompt === "string"
+                      ? (r.request as any).prompt
+                      : "";
+                if (promptText) {
+                  synth.push({ seq: nextSeq++, turnId, role: "user", content: promptText });
+                }
+                let assistantText = "";
+                let pendingCalls: Array<{ id: string; name: string; arguments: string }> = [];
+                const flushAssistant = (): void => {
+                  if (assistantText) {
+                    synth.push({
+                      seq: nextSeq++,
+                      turnId,
+                      role: "assistant",
+                      content: assistantText,
+                    });
+                    assistantText = "";
+                  }
+                  if (pendingCalls.length > 0) {
+                    synth.push({
+                      seq: nextSeq++,
+                      turnId,
+                      role: "assistant",
+                      content: null,
+                      toolCalls: pendingCalls.map((c) => ({
+                        id: c.id,
+                        type: "function",
+                        function: { name: c.name, arguments: c.arguments },
+                      })),
+                    });
+                    pendingCalls = [];
+                  }
+                };
+                for (const ev of evs) {
+                  const data = parsePayload(ev);
+                  if (ev.type === "message.delta" && typeof data.text === "string") {
+                    assistantText += data.text;
+                  } else if (ev.type === "tool.call") {
+                    // A tool call closes the open prose segment (mirrors the
+                    // engine: text streamed in a tool round is discarded, but
+                    // completed prose before the call is part of the turn).
+                    if (assistantText) {
+                      synth.push({
+                        seq: nextSeq++,
+                        turnId,
+                        role: "assistant",
+                        content: assistantText,
+                      });
+                      assistantText = "";
+                    }
+                    pendingCalls.push({
+                      id: typeof data.id === "string" ? data.id : "",
+                      name: typeof data.name === "string" ? data.name : "",
+                      arguments:
+                        typeof data.args === "string" ? data.args : JSON.stringify(data.args ?? {}),
+                    });
+                  } else if (ev.type === "tool.result") {
+                    flushAssistant();
+                    const resultPayload =
+                      data.result !== undefined
+                        ? data.result
+                        : data.error
+                          ? { error: data.error }
+                          : null;
+                    synth.push({
+                      seq: nextSeq++,
+                      turnId,
+                      role: "tool",
+                      content:
+                        typeof resultPayload === "string"
+                          ? resultPayload
+                          : JSON.stringify(resultPayload ?? null),
+                      toolCallId: typeof data.id === "string" ? data.id : undefined,
+                      name: typeof data.name === "string" ? data.name : undefined,
+                      ...(typeof data.resultTokens === "number"
+                        ? { resultTokens: data.resultTokens }
+                        : {}),
+                      ...(data.usage !== undefined ? { usage: data.usage } : {}),
+                      ...(typeof data.promptDelta === "number"
+                        ? { promptDelta: data.promptDelta }
+                        : {}),
+                    } as Record<string, unknown>);
+                  }
+                }
+                flushAssistant();
+                messages.push(...synth);
+              }
+            }
+          }
           // Per-turn metrics (usage/duration) ride alongside the dump so a
           // client can rebuild per-turn summaries without replaying events.
           // Each row also carries its status — `running` for an in-flight
@@ -568,6 +712,10 @@ export function createHttpServer(deps: HttpDeps): Server {
             for (const ev of ((await store!.listEvents(id)) ?? []) as Array<
               Record<string, unknown>
             >) {
+              // Only this turn's events: listEvents returns every turn's
+              // events for the session, and replaying all of them would
+              // re-render prior turns as if they were this one.
+              if (Number(ev.turn_id) !== Number(row.id)) continue;
               const payload = ev.payload;
               let data: unknown;
               if (typeof payload === "string") {
@@ -876,11 +1024,16 @@ export function createHttpServer(deps: HttpDeps): Server {
       sawError = sawError || ev.type === "error";
     };
 
-    // Record the turn row up front (best effort: persistence never fails the
-    // stream); every emitted event below is persisted alongside it. The row
-    // id is stamped on the transcript rows this turn produces (§4.8).
+    // Record the turn row up front on the fallback path only (best effort:
+    // persistence never fails the stream). On the orchestrator path the
+    // composed executeTurn in serve.ts owns the turn row — creating a
+    // second adapter row here would leave a duplicate `running` row with
+    // no usage, events, or transcript rows stamped on it, and a
+    // reconnecting client polling for that row would never see the
+    // settled turn's usage or messages land. The row id is stamped on
+    // the transcript rows this turn produces (§4.8).
     let turnRowId: number | null = null;
-    if (store?.addTurn) {
+    if (store?.addTurn && !hasOrchestrator) {
       try {
         const row = await store.addTurn(session.id, {
           role: "user",
