@@ -248,7 +248,7 @@ describe("event persistence dedup (§4.8)", () => {
       const res = await fetch(`http://127.0.0.1:${port}/v1/sessions/s-dedup/turns`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: "hi", abortOnDisconnect: true }),
+        body: JSON.stringify({ prompt: "hi" }),
       });
       await res.text();
       // delivery worked (SSE got the frame)…
