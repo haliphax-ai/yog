@@ -337,7 +337,7 @@ describe("orchestrator-path streaming (bus delivery)", () => {
     const bus = new EventEmitter();
     bus.setMaxListeners(0);
     const orchestrator = {
-      runTurn: (sessionId: string) => {
+      runTurn: (sessionId: string, req: any) => {
         const publish = async (type: string, data: unknown): Promise<void> => {
           await store.addEvent(sessionId, { type, payload: JSON.stringify(data), version: 1 });
           bus.emit(`session:${sessionId}`, {
@@ -349,6 +349,14 @@ describe("orchestrator-path streaming (bus delivery)", () => {
           });
         };
         const promise = (async () => {
+          // Mirrors serve.ts executeTurn: the orchestrator path owns the
+          // turn row (the HTTP adapter no longer creates a duplicate).
+          await store.addTurn(sessionId, {
+            role: "user",
+            content: req?.prompt ?? "hi",
+            status: "running",
+            model: "fake",
+          });
           await publish("turn.started", { turnId: "t-wire", model: "fake", ts: Date.now() });
           await publish("message.delta", { text: "hello " });
           await publish("tool.call", { id: "c1", name: "bash", args: "{}" });
@@ -405,4 +413,138 @@ describe("orchestrator-path streaming (bus delivery)", () => {
       store.close();
     }
   });
+});
+
+describe("transcript dump for in-flight (running) turns", () => {
+  it("rehydrates the running turn's completed rounds from persisted events, and drops synthetic rows once settled", async () => {
+    const store = await SessionStore.open(join(tmpdir(), `yog-inflight-${Date.now()}.db`));
+    const bus = new EventEmitter();
+    bus.setMaxListeners(0);
+    const usageBySession = new Map<string, any>();
+    let releaseTurn!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    const orchestrator = {
+      runTurn: (sessionId: string, req: any) => {
+        const promise = (async () => {
+          const turnRow = await store.addTurn(sessionId, {
+            role: "user",
+            content: req.prompt,
+            status: "running",
+            model: "fake",
+          });
+          const turnRowId = turnRow.id;
+          const publish = async (type: string, data: unknown) => {
+            await store.addEvent(sessionId, { type, payload: JSON.stringify(data), version: 1 });
+            bus.emit(`session:${sessionId}`, { id: 0, type, version: 1, ts: Date.now(), data });
+          };
+          await publish("turn.started", { turnId: "t-inflight", model: "fake", ts: Date.now() });
+          await publish("message.delta", { text: "partial " });
+          await publish("tool.call", { id: "c1", name: "bash", args: "{}" });
+          await publish("tool.result", {
+            id: "c1",
+            name: "bash",
+            ok: true,
+            result: "ok",
+            resultTokens: 5,
+          });
+          usageBySession.set(sessionId, {
+            prompt_tokens: 10,
+            completion_tokens: 2,
+            total_tokens: 12,
+          });
+          await gate;
+          await publish("message.delta", { text: "done" });
+          await publish("turn.finished", { turnId: "t-inflight", durationMs: 1 });
+          await store.appendMessages(
+            sessionId,
+            [
+              { role: "user", content: req.prompt },
+              { role: "assistant", content: "partial done" },
+            ] as any,
+            turnRowId,
+          );
+          await store.finishTurn(sessionId, turnRowId, "finished", usageBySession.get(sessionId));
+        })();
+        return { promise, abort: () => undefined };
+      },
+    };
+    const server = createHttpServer({
+      capabilities: {
+        contractVersion: "v1",
+        models: [],
+        tools: [],
+        features: ["sse", "transcript"],
+      },
+      store,
+      orchestrator,
+      bus,
+      onUsageFor: (sid: string) => usageBySession.get(sid),
+    } as any);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    try {
+      const port = (server.address() as { port: number }).port;
+      const base = `http://127.0.0.1:${port}`;
+      const { session } = (await (
+        await fetch(`${base}/v1/sessions`, { method: "POST" })
+      ).json()) as any;
+      const sid = session.id;
+      const ac = new AbortController();
+      const res = await fetch(`${base}/v1/sessions/${sid}/turns`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "inflight q" }),
+        signal: ac.signal,
+      });
+      const reader = res.body!.getReader();
+      const dec = new TextDecoder();
+      let txt = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        txt += dec.decode(value, { stream: true });
+        if (txt.includes("\n\n")) break;
+      }
+      ac.abort(); // disconnect mid-turn (linger)
+      await new Promise((r) => setTimeout(r, 100));
+      // While running: transcript dump must carry the in-flight turn
+      // (user prompt + completed tool round + partial prose), not just
+      // the previous turn — with no usage gate on the client side.
+      const runningDump = (await (
+        await fetch(`${base}/v1/sessions/${sid}/transcript`)
+      ).json()) as any;
+      expect(runningDump.turns?.some((t: any) => t.status === "running")).toBe(true);
+      const runningMessages = runningDump.messages.map((m: any) => `${m.role}:${m.content ?? ""}`);
+      expect(runningMessages).toContain("user:inflight q");
+      expect(runningMessages.some((m: string) => m.startsWith("tool:"))).toBe(true);
+      expect(
+        runningDump.messages.some(
+          (m: any) => m.role === "assistant" && String(m.content ?? "").includes("partial"),
+        ),
+      ).toBe(true);
+      // Settle it.
+      releaseTurn();
+      await new Promise((r) => setTimeout(r, 200));
+      const settledDump = (await (
+        await fetch(`${base}/v1/sessions/${sid}/transcript`)
+      ).json()) as any;
+      expect(settledDump.turns?.some((t: any) => t.status === "running")).toBe(false);
+      // Exactly one user + one assistant from the real persisted rows —
+      // no synthetic duplicates remain.
+      expect(settledDump.messages.filter((m: any) => m.role === "user")).toHaveLength(1);
+      expect(settledDump.messages.filter((m: any) => m.role === "assistant")).toHaveLength(1);
+      expect(settledDump.messages.find((m: any) => m.role === "assistant")?.content).toBe(
+        "partial done",
+      );
+      // Single turn row: no duplicate adapter row.
+      const turns = await store.listTurns(sid);
+      expect(turns).toHaveLength(1);
+      expect(turns[0].status).toBe("finished");
+    } finally {
+      releaseTurn();
+      await new Promise<void>((r) => server.close(() => r()));
+      store.close();
+    }
+  }, 15_000);
 });
