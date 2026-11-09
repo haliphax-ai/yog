@@ -78,6 +78,26 @@ export const YogConfigSchema = z
      */
     maxRoundsPerTurn: z.number().int().min(1).default(200),
     /**
+     * Provider 429 retry policy (engine, per round): total requests
+     * allowed per round, initial try included. `1` disables retrying
+     * (the first 429 is terminal `rate_limited`). Default 6.
+     */
+    rateLimitMaxAttempts: z.number().int().min(1).default(6),
+    /**
+     * First exponential backoff wait (ms) after a 429 with no usable
+     * server hint. Default 1000.
+     */
+    rateLimitBaseDelayMs: z.number().int().min(0).default(1000),
+    /**
+     * Cap for any single backoff wait (ms), server hints included.
+     * Default 60_000.
+     */
+    rateLimitMaxDelayMs: z.number().int().min(0).default(60_000),
+    /**
+     * Exponential multiplier per failed attempt. Default 2.
+     */
+    rateLimitBackoffFactor: z.number().min(1).default(2),
+    /**
      * Per-tool serialized output budget (chars): a tool's JSON result payload
      * larger than this (plus `toolOutputGrace` for the JSON wrapper) gets
      * middle-truncated with the shared truncation marker, so the model cannot

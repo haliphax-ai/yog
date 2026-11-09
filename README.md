@@ -64,7 +64,8 @@ The SSE stream frames each self-describing envelope
 | `message.delta` | `{ text }`                                                       | assistant text chunk (print as it arrives)                                                                                                                                                                                                                                                                                    |
 | `tool.call`     | `{ id, name, args }`                                             | model invoked a tool                                                                                                                                                                                                                                                                                                          |
 | `tool.result`   | `{ id, name, ok, result?, usage?, promptDelta?, resultTokens? }` | tool outcome (optional `usage` = the round's real `{ prompt_tokens, completion_tokens, total_tokens }` when the provider reports it; `promptDelta` = tokens the round added to the next request's context; `resultTokens` = tokenx estimate of what THIS result adds to context — set per call, so it differs inside a batch) |
-| `turn.finished` | `{ turnId, durationMs, usage?, stopReason? }`                    | normal end (optional `usage` = `{ prompt_tokens, completion_tokens, total_tokens }` when the provider reports it)                                                                                                                                                                                                             |
+| `rate_limited`    | `{ attempt, maxAttempts, delayMs, retryAfterMs?, resetMs?, round, status, providerMessage? }` | non-terminal: provider returned 429 for this round and the engine is backing off before resubmitting the same transcript (show a "retrying in …" notice; `delayMs` is the upcoming wait) |
+| `turn.finished` | `{ turnId, durationMs, usage?, stopReason?, rateLimitRetries? }`                    | normal end (optional `usage` = `{ prompt_tokens, completion_tokens, total_tokens }` when the provider reports it; `rateLimitRetries` = number of 429 backoffs this turn went through)                                                                                                                                                                                                             |
 | `turn.aborted`  | `{ reason, usage? }`                                             | operator aborted the turn; transcript was healed (optional `usage` = totals as of the cut point when the provider reported any)                                                                                                                                                                                               |
 | `error`         | `{ code, message }`                                              | terminal failure (e.g. `provider_error`)                                                                                                                                                                                                                                                                                      |
 
@@ -107,6 +108,33 @@ status rides the `turns[]` entries of `transcript.get` and `turn.get`'s
 turn distinctly from an operator abort. Persisting the partial output
 does not resume execution: the next turn is a fresh turn that hydrates
 the healed transcript.
+**Rate limits (429).** A 429 at the *start* of a tool-loop round is not
+terminal: the request was rejected before any chunk was produced, so
+`messages` is unchanged and no tool from that round has run. The engine
+backs off and resubmits the *identical* transcript — no synthetic user
+message, no transcript healing, and tools from earlier rounds are not
+re-executed. Each backoff is signalled on the stream as a non-terminal
+`rate_limited` event (`{ attempt, maxAttempts, delayMs, retryAfterMs?,
+resetMs?, round, status, providerMessage? }`) *before* the wait, so a
+client can render "rate limited, retrying in …" instead of stalling
+silently; `turn.finished` then carries `rateLimitRetries` (the number
+of backoffs the turn went through). The wait honours the server's
+hints when present — `Retry-After` / `retry-after-ms` and the
+`x-ratelimit-reset-*` windows (the larger of tokens/requests governs) —
+clamped to `rateLimitMaxDelayMs`; with no usable hint it is exponential
+(`rateLimitBaseDelayMs`, ×`rateLimitBackoffFactor` per attempt, jittered).
+The OpenAI SDK's own silent retries are disabled per request
+(`maxRetries: 0`) so every backoff is the signalled one. After
+`rateLimitMaxAttempts` total tries for a round the turn ends with a
+terminal `error { code: "rate_limited" }` and the usual partial-batch
+persist/heal path. A failure *after* streaming has begun (deltas
+already emitted, tool calls possibly announced) cannot be retried
+transparently and stays terminal, exactly as before. The policy is
+configurable via `rateLimitMaxAttempts` / `rateLimitBaseDelayMs` /
+`rateLimitMaxDelayMs` / `rateLimitBackoffFactor` (see Configuration);
+`GET /v1/capabilities` advertises the `rate-limit-retry` feature.
+Backoff waits are abortable: `turn.abort` during a wait unwinds the
+turn immediately with no further provider request.
 
 **Deltas are disposable; terminal states are authoritative.** If the SSE
 connection dies mid-turn, the client reads the `turnId` from `turn.started`
@@ -215,6 +243,10 @@ injection (`createDaemon({ config })`, used by tests).
 | `mountPoint`            | string  | `/yog`                              | FUSE mountpoint                                                                                                                                                                                                                                        |
 | `allowOther`            | bool    | `false`                             | allow other users to reach the mount (container: agent ≠ daemon user)                                                                                                                                                                                  |
 | `maxRoundsPerTurn`      | int     | `200`                               | tool-call rounds allowed per turn before the engine stops it with `turn.finished { stopReason: "max_rounds" }`                                                                                                                                         |
+| `rateLimitMaxAttempts`  | int     | `6`                                 | provider 429 retry policy (per round, initial try included); `1` disables retrying                                                                                                                                                                                                                      |
+| `rateLimitBaseDelayMs`  | int     | `1000`                              | first exponential backoff wait (ms) after a 429 with no usable server hint                                                                                                                                                                                                                        |
+| `rateLimitMaxDelayMs`   | int     | `60000`                             | cap for any single backoff wait (ms), server hints included                                                                                                                                                                                                                              |
+| `rateLimitBackoffFactor`| number  | `2`                                 | exponential multiplier per failed attempt                                                                                                                                                                                                                             |
 | `toolOutputLimit`       | int?    | _(unset → toolkit default: 50,000)_ | per-tool serialized output budget (chars): a tool's JSON result larger than this (plus `toolOutputGrace`) gets middle-truncated with the shared truncation marker so the model cannot crash its context window with an oversized file read / web fetch |
 | `toolOutputGrace`       | int?    | _(unset → toolkit default: 1,000)_  | chars allowed beyond `toolOutputLimit` before the fallback cap engages (headroom for the result JSON structure: keys, braces, numbers)                                                                                                                 |
 | `agentUid` / `agentGid` | int     | `1100`                              | daemon/agent split: spawn bash workers as this uid/gid (the documented scheme: the `yog` daemon is uid 900, agents start at 1100 — model-executed code never runs as the daemon). Equal to the current process = no drop.                              |

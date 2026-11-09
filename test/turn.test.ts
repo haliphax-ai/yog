@@ -2,7 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import { z } from "zod";
-import { TurnEngine } from "../src/turn.ts";
+import {
+  TurnEngine,
+  isRateLimitError,
+  parseRateLimitResetMs,
+  rateLimitDelayMs,
+  rateLimitHints,
+  resolveRateLimitPolicy,
+} from "../src/turn.ts";
 import { RecordingSink, StdoutSink, type TurnEvent, type TurnUsage } from "../src/turn/sink.ts";
 import { ToolRegistry, type ToolSpec } from "../src/toolkit/index.ts";
 import { logger } from "../src/log.ts";
@@ -1013,5 +1020,334 @@ describe("TurnEngine abort of an active tool call (issue #35)", () => {
     expect(sink.events.some((e) => e.type === "error")).toBe(false);
     expect(sink.events.at(-1)?.type).toBe("turn.finished");
     expect(danglingIds(messages)).toEqual([]);
+  });
+});
+
+describe("TurnEngine 429 rate-limit retry", () => {
+  /** Build an SDK-shaped 429: status + Headers-like `.get()`. */
+  function rateLimitError(
+    headers: Record<string, string> = {},
+    message = "429 rate limited",
+  ): Error {
+    const err = new Error(message) as Error & {
+      status: number;
+      code: string;
+      headers: { get(n: string): string | null };
+    };
+    err.name = "RateLimitError";
+    err.status = 429;
+    err.code = "rate_limit_exceeded";
+    err.headers = {
+      get: (n: string) => {
+        const key = Object.keys(headers).find((k) => k.toLowerCase() === n.toLowerCase());
+        return key === undefined ? null : headers[key]!;
+      },
+    };
+    return err;
+  }
+
+  const noSleep = async (): Promise<void> => {};
+  const fastPolicy = {
+    maxAttempts: 4,
+    baseDelayMs: 10,
+    maxDelayMs: 1000,
+    backoffFactor: 2,
+    jitterRatio: 0,
+    sleep: noSleep,
+    random: () => 0,
+  };
+
+  it("isRateLimitError recognises status/code/name, not a bare 429 message", () => {
+    expect(isRateLimitError(rateLimitError())).toBe(true);
+    expect(isRateLimitError(Object.assign(new Error("x"), { status: 429 }))).toBe(true);
+    expect(isRateLimitError(Object.assign(new Error("x"), { code: "rate_limited" }))).toBe(true);
+    expect(isRateLimitError(new Error("429 rate limited"))).toBe(false);
+    expect(isRateLimitError(new Error("provider exploded"))).toBe(false);
+    expect(isRateLimitError(null)).toBe(false);
+  });
+
+  it("parses x-ratelimit-reset durations and Retry-After hints", () => {
+    expect(parseRateLimitResetMs("20ms")).toBe(20);
+    expect(parseRateLimitResetMs("1m20s")).toBe(80_000);
+    expect(parseRateLimitResetMs("2h0s0ms")).toBe(7_200_000);
+    expect(parseRateLimitResetMs("garbage")).toBeUndefined();
+    const err = rateLimitError({
+      "Retry-After": "2",
+      "x-ratelimit-reset-tokens": "1m20s",
+      "x-ratelimit-reset-requests": "20ms",
+    });
+    expect(rateLimitHints(err)).toEqual({ retryAfterMs: 2000, resetMs: 80_000 });
+    // Server hint wins over exponential, clamped to maxDelayMs.
+    expect(rateLimitDelayMs(err, 1, { ...fastPolicy, maxDelayMs: 5000 })).toBe(5000);
+  });
+
+  it("falls back to exponential backoff when no hint is present", () => {
+    const err = rateLimitError();
+    expect(rateLimitDelayMs(err, 1, fastPolicy)).toBe(10);
+    expect(rateLimitDelayMs(err, 2, fastPolicy)).toBe(20);
+    expect(rateLimitDelayMs(err, 3, fastPolicy)).toBe(40);
+  });
+
+  it("resolveRateLimitPolicy defaults and clamps", () => {
+    const p = resolveRateLimitPolicy(undefined);
+    expect(p.maxAttempts).toBe(6);
+    expect(p.baseDelayMs).toBe(1000);
+    expect(p.maxDelayMs).toBe(60_000);
+    expect(resolveRateLimitPolicy({ maxAttempts: 0 }).maxAttempts).toBe(1);
+  });
+
+  it("retries a 429 at create() with the identical transcript and signals rate_limited", async () => {
+    const sink = new RecordingSink();
+    const messages = userMessages();
+    const seen: unknown[][] = [];
+    let calls = 0;
+    const client: OpenAI = {
+      chat: {
+        completions: {
+          create: async (body: any) => {
+            seen.push(structuredClone(body.messages));
+            calls += 1;
+            if (calls === 1) throw rateLimitError({ "Retry-After": "1" });
+            return (async function* () {
+              yield { choices: [{ delta: { content: "hi" } }] };
+            })();
+          },
+        },
+      },
+    } as unknown as OpenAI;
+
+    await new TurnEngine(sink).run(client, "test-model", messages, registry, {
+      rateLimit: { ...fastPolicy, maxDelayMs: 5000 },
+    });
+
+    expect(calls).toBe(2);
+    // The retry resubmitted the identical transcript (no synthetic message).
+    expect(seen[1]).toEqual(seen[0]);
+    expect(seen[1]).toEqual([{ role: "user", content: "hi" }]);
+    const types = sink.events.map((e) => e.type);
+    expect(types).toEqual(["turn.started", "rate_limited", "message.delta", "turn.finished"]);
+    const limited = sink.events[1]!;
+    expect(limited.type).toBe("rate_limited");
+    if (limited.type === "rate_limited") {
+      expect(limited.data.attempt).toBe(1);
+      expect(limited.data.maxAttempts).toBe(4);
+      expect(limited.data.delayMs).toBe(1000);
+      expect(limited.data.retryAfterMs).toBe(1000);
+      expect(limited.data.round).toBe(0);
+      expect(limited.data.status).toBe(429);
+      expect(limited.data.providerMessage).toContain("429");
+    }
+    const finished = sink.events.at(-1)!;
+    expect(finished.type).toBe("turn.finished");
+    if (finished.type === "turn.finished") expect(finished.data.rateLimitRetries).toBe(1);
+    // No transcript healing, no synthetic rows: just user + final assistant.
+    expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    // Event ids stay monotonic across the backoff.
+    expect(sink.events.map((e) => e.id)).toEqual([0, 1, 2, 3]);
+  });
+
+  it("retries a 429 mid-tool-loop without re-executing the tool or duplicating rows", async () => {
+    let toolRuns = 0;
+    const countingTool: ToolSpec<{ text: string }> = {
+      name: "echo",
+      description: "Echo text back.",
+      schema: z.object({ text: z.string() }).strict(),
+      failure: (error) => ({ error }),
+      run: async (args) => {
+        toolRuns += 1;
+        return { echo: args["text"], exitCode: 0, runtimeMs: 1 };
+      },
+    };
+    const countingRegistry = new ToolRegistry([countingTool]);
+    const sink = new RecordingSink();
+    const messages = userMessages();
+    let calls = 0;
+    const client: OpenAI = {
+      chat: {
+        completions: {
+          create: async () => {
+            calls += 1;
+            if (calls === 2) throw rateLimitError();
+            if (calls === 1) {
+              return (async function* () {
+                yield {
+                  choices: [
+                    {
+                      delta: {
+                        tool_calls: [
+                          {
+                            index: 0,
+                            id: "call_1",
+                            function: { name: "echo", arguments: '{"text":"hi"}' },
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                };
+              })();
+            }
+            return (async function* () {
+              yield { choices: [{ delta: { content: "Done" } }] };
+            })();
+          },
+        },
+      },
+    } as unknown as OpenAI;
+
+    await new TurnEngine(sink).run(client, "test-model", messages, countingRegistry, {
+      rateLimit: fastPolicy,
+    });
+
+    expect(calls).toBe(3);
+    expect(toolRuns).toBe(1);
+    expect(messages.filter((m) => m.role === "tool")).toHaveLength(1);
+    expect(messages.filter((m) => m.role === "assistant")).toHaveLength(2);
+    expect(messages.some((m) => m.role === "user")).toBe(true);
+    expect(messages.filter((m) => m.role === "user")).toHaveLength(1);
+    const limited = sink.events.filter((e) => e.type === "rate_limited");
+    expect(limited).toHaveLength(1);
+    expect((limited[0] as any).data.round).toBe(1);
+    expect(sink.events.at(-1)?.type).toBe("turn.finished");
+  });
+
+  it("exhausts to a terminal rate_limited error after maxAttempts", async () => {
+    const sink = new RecordingSink();
+    let calls = 0;
+    const client: OpenAI = {
+      chat: {
+        completions: {
+          create: async () => {
+            calls += 1;
+            throw rateLimitError();
+          },
+        },
+      },
+    } as unknown as OpenAI;
+
+    await expect(
+      new TurnEngine(sink).run(client, "test-model", userMessages(), registry, {
+        rateLimit: { ...fastPolicy, maxAttempts: 3 },
+      }),
+    ).rejects.toThrow("429");
+
+    expect(calls).toBe(3);
+    expect(sink.events.filter((e) => e.type === "rate_limited")).toHaveLength(2);
+    const terminal = sink.events.at(-1)!;
+    expect(terminal.type).toBe("error");
+    if (terminal.type === "error") expect(terminal.data.code).toBe("rate_limited");
+  });
+
+  it("does not retry non-429 failures from create()", async () => {
+    const sink = new RecordingSink();
+    let calls = 0;
+    const client: OpenAI = {
+      chat: {
+        completions: {
+          create: async () => {
+            calls += 1;
+            throw new Error("provider exploded");
+          },
+        },
+      },
+    } as unknown as OpenAI;
+
+    await expect(
+      new TurnEngine(sink).run(client, "test-model", userMessages(), registry, {
+        rateLimit: fastPolicy,
+      }),
+    ).rejects.toThrow("provider exploded");
+
+    expect(calls).toBe(1);
+    expect(sink.events.some((e) => e.type === "rate_limited")).toBe(false);
+    const terminal = sink.events.at(-1)!;
+    expect(terminal.type).toBe("error");
+    if (terminal.type === "error") expect(terminal.data.code).toBe("provider_error");
+  });
+
+  it("does not retry a failure after streaming has begun (mid-stream stays terminal)", async () => {
+    const sink = new RecordingSink();
+    let calls = 0;
+    const client: OpenAI = {
+      chat: {
+        completions: {
+          create: async () => {
+            calls += 1;
+            return (async function* () {
+              yield { choices: [{ delta: { content: "partial" } }] };
+              throw rateLimitError();
+            })();
+          },
+        },
+      },
+    } as unknown as OpenAI;
+
+    await expect(
+      new TurnEngine(sink).run(client, "test-model", userMessages(), registry, {
+        rateLimit: fastPolicy,
+      }),
+    ).rejects.toThrow("429");
+
+    expect(calls).toBe(1);
+    expect(sink.events.some((e) => e.type === "rate_limited")).toBe(false);
+    expect(sink.events.map((e) => e.type)).toEqual(["turn.started", "message.delta", "error"]);
+  });
+
+  it("aborts promptly during backoff without another create()", async () => {
+    const sink = new RecordingSink();
+    const controller = new AbortController();
+    let calls = 0;
+    const client: OpenAI = {
+      chat: {
+        completions: {
+          create: async () => {
+            calls += 1;
+            throw rateLimitError();
+          },
+        },
+      },
+    } as unknown as OpenAI;
+
+    const running = new TurnEngine(sink).run(client, "test-model", userMessages(), registry, {
+      signal: controller.signal,
+      // Long real delay: the abort must interrupt it, not wait it out.
+      rateLimit: {
+        maxAttempts: 5,
+        baseDelayMs: 60_000,
+        maxDelayMs: 60_000,
+        backoffFactor: 2,
+        jitterRatio: 0,
+      },
+    });
+    const assertion = expect(running).rejects.toMatchObject({ name: "AbortError" });
+    await vi.waitFor(() => expect(sink.events.some((e) => e.type === "rate_limited")).toBe(true));
+    controller.abort();
+    await assertion;
+
+    expect(calls).toBe(1);
+    expect(sink.events.some((e) => e.type === "error")).toBe(false);
+    expect(sink.events.some((e) => e.type === "turn.finished")).toBe(false);
+  });
+
+  it("passes maxRetries: 0 so the SDK does not retry invisibly", async () => {
+    const sink = new RecordingSink();
+    const optionsSeen: unknown[] = [];
+    const client: OpenAI = {
+      chat: {
+        completions: {
+          create: async (_body: any, opts: any) => {
+            optionsSeen.push(opts);
+            return (async function* () {
+              yield { choices: [{ delta: { content: "ok" } }] };
+            })();
+          },
+        },
+      },
+    } as unknown as OpenAI;
+
+    await new TurnEngine(sink).run(client, "test-model", userMessages(), registry, {
+      rateLimit: fastPolicy,
+    });
+    expect(optionsSeen[0]).toMatchObject({ maxRetries: 0 });
   });
 });

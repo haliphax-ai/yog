@@ -28,6 +28,10 @@ describe("YogConfigSchema", () => {
     expect(config.agentUid).toBe(1100);
     expect(config.agentGid).toBe(1100);
     expect(config.agentHome).toBe("/home/agent");
+    expect(config.rateLimitMaxAttempts).toBe(6);
+    expect(config.rateLimitBaseDelayMs).toBe(1000);
+    expect(config.rateLimitMaxDelayMs).toBe(60_000);
+    expect(config.rateLimitBackoffFactor).toBe(2);
   });
 
   it("rejects unknown fields and out-of-range values", () => {
@@ -39,6 +43,10 @@ describe("YogConfigSchema", () => {
     expect(YogConfigSchema.safeParse({ port: "8111" }).success).toBe(false);
     expect(YogConfigSchema.safeParse({ maxRoundsPerTurn: 0 }).success).toBe(false);
     expect(YogConfigSchema.safeParse({ workers: 0 }).success).toBe(false);
+    expect(YogConfigSchema.safeParse({ rateLimitMaxAttempts: 0 }).success).toBe(false);
+    expect(YogConfigSchema.safeParse({ rateLimitBaseDelayMs: -1 }).success).toBe(false);
+    expect(YogConfigSchema.safeParse({ rateLimitMaxDelayMs: -1 }).success).toBe(false);
+    expect(YogConfigSchema.safeParse({ rateLimitBackoffFactor: 0.5 }).success).toBe(false);
   });
 
   it("accepts partial overrides", () => {

@@ -379,6 +379,12 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
           usageBySession.set(sessionId, u);
         },
         maxRounds: config.maxRoundsPerTurn,
+        rateLimit: {
+          maxAttempts: config.rateLimitMaxAttempts,
+          baseDelayMs: config.rateLimitBaseDelayMs,
+          maxDelayMs: config.rateLimitMaxDelayMs,
+          backoffFactor: config.rateLimitBackoffFactor,
+        },
         ...(modelInfo ? { contextWindow: modelInfo.getContextWindow(model) ?? undefined } : {}),
       };
       try {
@@ -444,6 +450,12 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
             ? { compactionModel: config.compactionModel }
             : {}),
           ...(modelInfo ? { modelInfo } : {}),
+          rateLimit: {
+            maxAttempts: config.rateLimitMaxAttempts,
+            baseDelayMs: config.rateLimitBaseDelayMs,
+            maxDelayMs: config.rateLimitMaxDelayMs,
+            backoffFactor: config.rateLimitBackoffFactor,
+          },
         });
       } catch (err) {
         logger.warn(
@@ -468,7 +480,16 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         contractVersion: "v1",
         models: [modelId],
         tools: ["bash"],
-        features: ["messages", "stream", "transcript", "abort", "compact", "handoff", "shake"],
+        features: [
+          "messages",
+          "stream",
+          "transcript",
+          "abort",
+          "compact",
+          "handoff",
+          "shake",
+          "rate-limit-retry",
+        ],
         messageTypes: [...MESSAGE_TYPES],
       },
       contextWindowFor: (model: string) => modelInfo?.getContextWindow(model),

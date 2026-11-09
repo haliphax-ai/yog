@@ -63,8 +63,46 @@ export type TurnEventDataMap = {
     resultTokens?: number;
   };
   /** Normal end of the turn. */
-  "turn.finished": { turnId: string; durationMs: number; stopReason?: string; usage?: TurnUsage };
-  /** Terminal error; the turn stops. */
+  "turn.finished": {
+    turnId: string;
+    durationMs: number;
+    stopReason?: string;
+    usage?: TurnUsage;
+    /**
+     * Number of 429-triggered backoffs this turn went through before
+     * finishing (one per `rate_limited` event). Absent when the provider
+     * never rate-limited the turn.
+     */
+    rateLimitRetries?: number;
+  };
+  /**
+   * Non-terminal: the provider returned 429 for the current round's
+   * request and the engine is backing off before resubmitting the *same*
+   * transcript. Emitted before each wait, so clients can show a
+   * "rate limited, retrying in ..." notice instead of a silent stall.
+   * The turn does not end here — `turn.finished` (or a terminal
+   * `error` with code `rate_limited` after exhaustion) follows.
+   */
+  rate_limited: {
+    /** 1-based ordinal of the failed request (1 = first try failed). */
+    attempt: number;
+    /** Total requests allowed for this round, initial try included. */
+    maxAttempts: number;
+    /** Upcoming backoff wait in milliseconds (server hint or exponential). */
+    delayMs: number;
+    /** Server-provided wait hint in ms (`Retry-After` / `retry-after-ms`), when sent. */
+    retryAfterMs?: number;
+    /** Server-provided reset hint in ms (`x-ratelimit-reset-*`), when sent. */
+    resetMs?: number;
+    /** 0-based tool-loop round whose request was rate-limited. */
+    round: number;
+    /** HTTP status from the provider (429). */
+    status: number;
+    /** Provider error message, when present. */
+    providerMessage?: string;
+  };
+  /** Terminal error; the turn stops. `code` is `provider_error`, or
+   * `rate_limited` when a 429 exhausted the retry policy. */
   error: { code: string; message: string; details?: unknown };
   /** Terminal abort: the operator ended the turn (transcript was healed). */
   "turn.aborted": { reason: string };

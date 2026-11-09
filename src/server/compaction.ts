@@ -66,6 +66,8 @@ export interface CompactionRunnerDeps {
   /** Server-configured compaction model; unset = same as `model`. */
   compactionModel?: string;
   modelInfo?: { getContextWindow(modelId: string): number | undefined } | undefined;
+  /** 429 retry policy for the summary turn (see `TurnOptions.rateLimit`). */
+  rateLimit?: Partial<import("../turn.ts").RateLimitPolicy>;
 }
 
 /** Name of the markdown template file, relative to this module. */
@@ -279,6 +281,7 @@ export function createCompactionRunner(deps: CompactionRunnerDeps): CompactionBo
     const opts: TurnOptions = {
       sessionId: targetSession,
       maxRounds: 1, // one completion; no tool loop
+      ...(deps.rateLimit ? { rateLimit: deps.rateLimit } : {}),
       ...(deps.modelInfo
         ? { contextWindow: deps.modelInfo.getContextWindow(model) ?? undefined }
         : {}),
