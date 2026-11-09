@@ -78,6 +78,277 @@ export function unansweredToolCallIds(messages: ChatCompletionMessageParam[]): S
 }
 
 /**
+ * Bounded retry policy for provider 429s at the *start* of a round.
+ *
+ * A 429 from `chat.completions.create()` means the request was rejected
+ * before any chunk was produced: `messages` is unchanged, no assistant
+ * text was emitted, and no tool from *this* round has run (tools belong
+ * to earlier, already-appended rounds). The engine therefore resubmits
+ * the identical `messages` array after a backoff — no synthetic user
+ * message, no transcript "healing", no tool re-execution.
+ *
+ * Only failures of the initial `create()` call are retried. A failure
+ * after streaming has begun cannot be transparently retried (deltas
+ * were already emitted and tool calls may have been announced); it
+ * unwinds to the terminal/heal path exactly as before.
+ */
+export interface RateLimitPolicy {
+  /**
+   * Total requests allowed per round, initial try included
+   * (default 6 = 1 initial try + 5 retries). `1` disables retrying.
+   */
+  maxAttempts: number;
+  /** First exponential wait in ms (default 1000). */
+  baseDelayMs: number;
+  /**
+   * Cap for any single wait in ms (default 60_000). Server hints
+   * (`Retry-After`, `x-ratelimit-reset-*`) are clamped to this cap; a
+   * hint above the cap simply trades for another 429 + retry until
+   * `maxAttempts` is exhausted.
+   */
+  maxDelayMs: number;
+  /** Exponential multiplier per failed attempt (default 2). */
+  backoffFactor: number;
+  /**
+   * Jitter fraction in [0, 1): the exponential delay is scaled by
+   * `1 - random() * jitterRatio` (default 0.25, matching the SDK).
+   * Server-hinted delays are *not* jittered — the server's wait is
+   * authoritative.
+   */
+  jitterRatio?: number;
+  /** Injectable timer for tests (defaults to real `setTimeout`). */
+  sleep?: (ms: number) => Promise<void>;
+  /** Injectable randomness in [0, 1) for tests (defaults to `Math.random`). */
+  random?: () => number;
+}
+
+/** Default 429 retry policy (see {@link RateLimitPolicy}). */
+export const DEFAULT_RATE_LIMIT_POLICY: Required<
+  Pick<RateLimitPolicy, "maxAttempts" | "baseDelayMs" | "maxDelayMs" | "backoffFactor">
+> = {
+  maxAttempts: 6,
+  baseDelayMs: 1_000,
+  maxDelayMs: 60_000,
+  backoffFactor: 2,
+};
+
+/** Resolve a partial policy against the defaults (invalid values fall back). */
+export function resolveRateLimitPolicy(
+  policy?: Partial<RateLimitPolicy>,
+): Required<Pick<RateLimitPolicy, "maxAttempts" | "baseDelayMs" | "maxDelayMs" | "backoffFactor">> &
+  RateLimitPolicy {
+  const num = (v: unknown, dflt: number): number =>
+    typeof v === "number" && Number.isFinite(v) ? v : dflt;
+  const maxAttempts = Math.max(
+    1,
+    Math.floor(num(policy?.maxAttempts, DEFAULT_RATE_LIMIT_POLICY.maxAttempts)),
+  );
+  const baseDelayMs = Math.max(0, num(policy?.baseDelayMs, DEFAULT_RATE_LIMIT_POLICY.baseDelayMs));
+  const maxDelayMs = Math.max(0, num(policy?.maxDelayMs, DEFAULT_RATE_LIMIT_POLICY.maxDelayMs));
+  const backoffFactor = Math.max(
+    1,
+    num(policy?.backoffFactor, DEFAULT_RATE_LIMIT_POLICY.backoffFactor),
+  );
+  const jitterRatio =
+    policy?.jitterRatio === undefined ? 0.25 : Math.min(1, Math.max(0, policy.jitterRatio));
+  return {
+    maxAttempts,
+    baseDelayMs,
+    maxDelayMs: Math.max(maxDelayMs, 0),
+    backoffFactor,
+    jitterRatio,
+    ...(policy?.sleep ? { sleep: policy.sleep } : {}),
+    ...(policy?.random ? { random: policy.random } : {}),
+  };
+}
+
+/**
+ * Whether `err` is a provider rate-limit (429) failure. Recognises the
+ * OpenAI SDK's `RateLimitError` shape (`status: 429`), an explicit
+ * `code` of `rate_limit_exceeded` / `rate_limited`, and the class name.
+ * A bare message mentioning "429" is deliberately *not* enough: plain
+ * `Error("429 rate limited")` values are also used for mid-stream
+ * failures, which must stay terminal rather than retry.
+ */
+export function isRateLimitError(err: unknown): boolean {
+  if (err === null || typeof err !== "object") return false;
+  const rec = err as Record<string, unknown>;
+  if (rec.status === 429 || rec.statusCode === 429) return true;
+  const code = typeof rec.code === "string" ? rec.code : undefined;
+  if (code === "rate_limit_exceeded" || code === "rate_limited") return true;
+  if (err instanceof Error && err.name === "RateLimitError") return true;
+  // Some SDK/proxy errors nest the body: { error: { code, type } }.
+  const inner = rec.error;
+  if (inner !== null && typeof inner === "object") {
+    const innerCode = (inner as Record<string, unknown>).code;
+    if (innerCode === "rate_limit_exceeded" || innerCode === "rate_limited") return true;
+  }
+  return false;
+}
+
+type HeaderGetter = (name: string) => string | undefined;
+
+function headerGetterFrom(err: unknown): HeaderGetter | undefined {
+  if (err === null || typeof err !== "object") return undefined;
+  const rec = err as Record<string, unknown>;
+  const candidates: unknown[] = [
+    rec.headers,
+    (rec.response as Record<string, unknown> | undefined)?.headers,
+  ];
+  for (const h of candidates) {
+    if (h === null || typeof h !== "object") continue;
+    if (typeof (h as { get?: unknown }).get === "function") {
+      const get = (h as { get: (n: string) => unknown }).get.bind(h);
+      return (name) => {
+        const v = get(name);
+        return typeof v === "string" ? v : v === null || v === undefined ? undefined : String(v);
+      };
+    }
+    if (Array.isArray(h)) continue;
+    const map = h as Record<string, unknown>;
+    // Plain object: case-insensitive lookup, first value wins.
+    const lower: Record<string, string> = {};
+    for (const [k, v] of Object.entries(map)) {
+      const val = Array.isArray(v) ? v[0] : v;
+      if (typeof val === "string") lower[k.toLowerCase()] = val;
+      else if (typeof val === "number") lower[k.toLowerCase()] = String(val);
+    }
+    if (Object.keys(lower).length > 0) {
+      return (name) => lower[name.toLowerCase()];
+    }
+  }
+  return undefined;
+}
+
+/** Parse an OpenAI `x-ratelimit-reset-*` duration ("20ms", "1m20s", "2h0s0ms") to ms. */
+export function parseRateLimitResetMs(value: string): number | undefined {
+  const v = value.trim();
+  if (v === "") return undefined;
+  // Composite duration: sequence of <int><unit> where unit is h|m|s|ms.
+  if (/^(?:\d+(?:ms|h|m|s))+$/.test(v)) {
+    let total = 0;
+    for (const m of v.matchAll(/(\d+)(ms|h|m|s)/g)) {
+      const n = Number(m[1]);
+      const unit = m[2];
+      total +=
+        unit === "h" ? n * 3_600_000 : unit === "m" ? n * 60_000 : unit === "s" ? n * 1_000 : n;
+    }
+    return total;
+  }
+  const n = Number(v);
+  if (!Number.isFinite(n)) return undefined;
+  // Bare numbers: epoch timestamps are implausibly large for a wait, so
+  // treat huge values as epoch ms/s, everything else as seconds.
+  if (n > 1e14) return n - Date.now();
+  if (n > 1e10) return n * 1000 - Date.now();
+  return n * 1_000 - (v.includes(".") ? 0 : 0);
+}
+
+function parseRetryAfterMs(value: string, now: number): number | undefined {
+  const v = value.trim();
+  if (v === "") return undefined;
+  const asSeconds = Number(v);
+  if (Number.isFinite(asSeconds)) return Math.max(0, asSeconds * 1_000);
+  const asDate = Date.parse(v);
+  if (!Number.isNaN(asDate)) return Math.max(0, asDate - now);
+  return undefined;
+}
+
+/**
+ * Server wait hints carried by a 429 error, in ms. `retryAfterMs` comes
+ * from `retry-after-ms` / `Retry-After`; `resetMs` is the largest
+ * `x-ratelimit-reset-*` window (tokens and requests must both refill,
+ * so the larger governs). Both are undefined when the provider sent
+ * no usable hint.
+ */
+export function rateLimitHints(
+  err: unknown,
+  now = Date.now(),
+): { retryAfterMs?: number; resetMs?: number } {
+  const get = headerGetterFrom(err);
+  if (!get) return {};
+  let retryAfterMs: number | undefined;
+  const retryAfterMsRaw = get("retry-after-ms");
+  if (retryAfterMsRaw !== undefined) {
+    const n = Number(retryAfterMsRaw);
+    if (Number.isFinite(n)) retryAfterMs = Math.max(0, n);
+  }
+  if (retryAfterMs === undefined) {
+    const retryAfterRaw = get("retry-after");
+    if (retryAfterRaw !== undefined) retryAfterMs = parseRetryAfterMs(retryAfterRaw, now);
+  }
+  let resetMs: number | undefined;
+  for (const name of [
+    "x-ratelimit-reset-tokens",
+    "x-ratelimit-reset-requests",
+    "x-ratelimit-reset",
+  ]) {
+    const raw = get(name);
+    if (raw === undefined) continue;
+    const ms = parseRateLimitResetMs(raw);
+    if (ms !== undefined) resetMs = resetMs === undefined ? ms : Math.max(resetMs, ms);
+  }
+  return {
+    ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+    ...(resetMs !== undefined ? { resetMs } : {}),
+  };
+}
+
+/**
+ * Backoff wait (ms) before the next try after failed attempt `attempt`
+ * (1-based): the largest server hint when present (clamped to
+ * `maxDelayMs`), otherwise exponential `baseDelayMs * factor^(attempt-1)`
+ * with jitter, also clamped.
+ */
+export function rateLimitDelayMs(
+  err: unknown,
+  attempt: number,
+  policy: RateLimitPolicy,
+  now = Date.now(),
+): number {
+  const resolved = resolveRateLimitPolicy(policy);
+  const hints = rateLimitHints(err, now);
+  const hinted = [hints.retryAfterMs, hints.resetMs].filter(
+    (v): v is number => typeof v === "number" && Number.isFinite(v),
+  );
+  if (hinted.length > 0) {
+    return Math.min(resolved.maxDelayMs, Math.max(0, Math.max(...hinted)));
+  }
+  const exponential =
+    resolved.baseDelayMs * Math.pow(resolved.backoffFactor, Math.max(0, attempt - 1));
+  const jittered =
+    exponential * (1 - (resolved.jitterRatio ?? 0.25) * (resolved.random?.() ?? Math.random()));
+  return Math.min(resolved.maxDelayMs, Math.max(0, jittered));
+}
+
+/** Abortable backoff wait: wakes promptly when `checkAbort` would throw. */
+async function sleepBackoff(
+  ms: number,
+  checkAbort: () => void,
+  sleep?: (ms: number) => Promise<void>,
+): Promise<void> {
+  if (sleep) {
+    // Injected sleep (tests): honour an abort that fires while waiting.
+    // Slice the wait so `checkAbort` is probed periodically even when the
+    // injected timer is long; simple fakes that resolve immediately just
+    // complete in one slice.
+    const deadline = Date.now() + Math.max(0, ms);
+    while (true) {
+      checkAbort();
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      await sleep(Math.min(remaining, 50));
+    }
+  }
+  const deadline = Date.now() + Math.max(0, ms);
+  while (true) {
+    checkAbort();
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(remaining, 50)));
+  }
+}
+/**
  * Agent turn engine: streams one chat completion, executes any tool calls it
  * contains (feeding results back in), and repeats until the model answers
  * without tools. This is the loop every agent run funnels through as the
@@ -127,6 +398,13 @@ export interface TurnOptions {
    * the turn never reaches a normal finish (abort / unwind).
    */
   onUsage?: (usage: TurnUsage) => void;
+  /**
+   * Bounded 429 retry policy for the initial `create()` of each round
+   * (see {@link RateLimitPolicy}). Unset = {@link DEFAULT_RATE_LIMIT_POLICY}.
+   * The daemon wires this from config (`rateLimit*`); tests inject small
+   * delays / a fake `sleep` for determinism.
+   */
+  rateLimit?: Partial<RateLimitPolicy>;
 }
 
 /**
@@ -186,16 +464,62 @@ export class TurnEngine {
       let usage: TurnUsage | undefined;
       // Previous round's prompt_tokens, for the per-round context-growth delta.
       let prevRoundPrompt: number | undefined;
+      const rateLimitPolicy = resolveRateLimitPolicy(opts.rateLimit);
+      // Total 429 backoffs this turn (reported on `turn.finished`).
+      let rateLimitRetries = 0;
       for (let round = 0; round < maxRounds; round++) {
         let roundUsage: TurnUsage | undefined;
-        const stream = await client.chat.completions.create({
-          model: modelId,
-          messages,
-          tools: tools.definitions,
-          stream_options: { include_usage: true },
-          stream: true,
-          ...(opts.signal ? { signal: opts.signal } : {}),
-        });
+        // 429 retry wrapper around the initial `create()` only. `maxRetries: 0`
+        // disables the SDK's own silent retries so every backoff below is the
+        // one signalled via `rate_limited` (the SDK would otherwise retry
+        // 429s invisibly before yog ever sees them). The body still carries
+        // `signal` for fakes/older SDKs that read options from the body; the
+        // second argument is the canonical RequestOptions location.
+        const createStream = async () => {
+          let attempt = 0;
+          for (;;) {
+            checkAbort();
+            try {
+              return await client.chat.completions.create(
+                {
+                  model: modelId,
+                  messages,
+                  tools: tools.definitions,
+                  stream_options: { include_usage: true },
+                  stream: true,
+                  ...(opts.signal ? { signal: opts.signal } : {}),
+                },
+                { maxRetries: 0, ...(opts.signal ? { signal: opts.signal } : {}) },
+              );
+            } catch (err) {
+              if (!isRateLimitError(err)) throw err;
+              attempt += 1;
+              if (attempt >= rateLimitPolicy.maxAttempts) throw err;
+              const hints = rateLimitHints(err);
+              const delayMs = rateLimitDelayMs(err, attempt, rateLimitPolicy);
+              rateLimitRetries += 1;
+              logger.warn(
+                { round, attempt, maxAttempts: rateLimitPolicy.maxAttempts, delayMs, ...hints },
+                `[rate-limit] provider 429 on round ${round} (attempt ${attempt}/${rateLimitPolicy.maxAttempts}); backing off ${delayMs}ms`,
+              );
+              await emit("rate_limited", {
+                attempt,
+                maxAttempts: rateLimitPolicy.maxAttempts,
+                delayMs,
+                ...(hints.retryAfterMs !== undefined ? { retryAfterMs: hints.retryAfterMs } : {}),
+                ...(hints.resetMs !== undefined ? { resetMs: hints.resetMs } : {}),
+                round,
+                status: 429,
+                ...(err instanceof Error && err.message ? { providerMessage: err.message } : {}),
+              });
+              await sleepBackoff(delayMs, checkAbort, rateLimitPolicy.sleep);
+              // Loop: resubmit the *identical* `messages` array. Nothing was
+              // appended by the failed call, so no synthetic message and no
+              // tool re-execution are needed (or correct).
+            }
+          }
+        };
+        const stream = await createStream();
 
         const toolCalls = new Map<number, { id: string; name: string; args: string }>();
         // Accumulate this round's assistant text. It is only ever appended to
@@ -270,6 +594,7 @@ export class TurnEngine {
             ...(usage !== undefined
               ? { usage: { ...usage, context_window: opts.contextWindow } }
               : {}),
+            ...(rateLimitRetries > 0 ? { rateLimitRetries } : {}),
           });
           return;
         }
@@ -425,6 +750,7 @@ export class TurnEngine {
         durationMs: Date.now() - turnStartedAt,
         ...(usage !== undefined ? { usage } : {}),
         stopReason: "max_rounds",
+        ...(rateLimitRetries > 0 ? { rateLimitRetries } : {}),
       });
     } catch (err) {
       // Heal first, unconditionally (any unwind mid-tool-loop): every
@@ -480,7 +806,7 @@ export class TurnEngine {
       // Terminal error: emit first (so transports see it), then rethrow so the
       // composition root keeps its existing exit-code handling.
       await emit("error", {
-        code: "provider_error",
+        code: isRateLimitError(err) ? "rate_limited" : "provider_error",
         message: err instanceof Error ? err.message : String(err),
         ...(err instanceof Error ? { details: { name: err.name, stack: err.stack } } : {}),
       });
