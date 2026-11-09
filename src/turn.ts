@@ -163,6 +163,9 @@ export class TurnEngine {
         data,
       } as TurnEvent<T>);
 
+    // Declared outside `try` so the unwind/heal path in `catch` can
+    // reconstruct assistant rows for calls announced before the unwind.
+    const announcedCalls = new Map<string, { id: string; name: string; args: string }>();
     try {
       await emit("turn.started", { turnId, model: modelId, ts: Date.now() });
 
@@ -170,7 +173,7 @@ export class TurnEngine {
       // mid-tool-call or mid-stream still unwinds the turn deterministically.
       const abortErr = () => makeAbortError(opts.abortReason ?? "turn aborted");
       const checkAbort = (): void => {
-        if (opts.isAborted?.() === true) throw abortErr();
+        if (opts.signal?.aborted === true || opts.isAborted?.() === true) throw abortErr();
       };
       checkAbort();
 
@@ -244,8 +247,11 @@ export class TurnEngine {
             // Track announced calls as they stream: a mid-stream abort
             // unwinds before the assistant row is pushed, and the heal path
             // reconstructs the call from this tracker entry.
-            if (entry.id && entry.name && opts.sessionId !== undefined) {
-              activeToolCalls.set(opts.sessionId, { ...entry });
+            if (entry.id && entry.name) {
+              announcedCalls.set(entry.id, { ...entry });
+              if (opts.sessionId !== undefined) {
+                activeToolCalls.set(opts.sessionId, { ...entry });
+              }
             }
           }
         }
@@ -319,6 +325,7 @@ export class TurnEngine {
 
           // Track the in-flight call so an abort can kill it and stub any
           // calls in this round that never produced a result.
+          announcedCalls.set(tcId, { id: tcId, name: tc.name, args: tc.args });
           if (opts.sessionId !== undefined) {
             activeToolCalls.set(opts.sessionId, { id: tcId, name: tc.name, args: tc.args });
           }
@@ -326,6 +333,7 @@ export class TurnEngine {
           const startedAt = Date.now();
           const result = await tools.execute(tc.name, tc.args, {
             ...(opts.signal ? { signal: opts.signal } : {}),
+            ...(opts.isAborted ? { isAborted: opts.isAborted } : {}),
             ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
             onStart: (call: ToolCall) =>
               void activeToolCalls.set(opts.sessionId ?? "", {
@@ -339,6 +347,12 @@ export class TurnEngine {
               }
             },
           });
+          // Belt-and-braces: validation failures return before the registry
+          // fires onEnd (the tool never started), so clear the in-flight
+          // entry here too — a settled call must never look active.
+          if (opts.sessionId !== undefined && activeToolCalls.get(opts.sessionId)?.id === tcId) {
+            activeToolCalls.delete(opts.sessionId);
+          }
           const completedAt = Date.now();
           const outcome =
             result === undefined
@@ -418,25 +432,31 @@ export class TurnEngine {
       // the persisted transcript stays hydratable — the next turn replays a
       // definite answer instead of a dangling call (providers reject that).
       // A mid-stream abort can leave the announced tool calls in the
-      // tracker without their assistant row in `messages` (the row is only
-      // pushed after the stream completes). Reconstruct it so the healed
-      // transcript keeps the call the model actually made.
-      const tracked =
-        opts.sessionId !== undefined ? activeToolCalls.get(opts.sessionId) : undefined;
-      if (
-        tracked &&
-        !messages.some((m) =>
-          (m as { tool_calls?: { id?: string }[] }).tool_calls?.some((tc) => tc.id === tracked.id),
-        )
-      ) {
+      // ledger without their assistant row in `messages` (the row is only
+      // pushed after the stream completes). Reconstruct every missing
+      // call — not just the latest in-flight entry — so the healed
+      // transcript keeps each call the model actually made.
+      const announcedInMessages = new Set<string>();
+      for (const m of messages) {
+        const calls = (m as { tool_calls?: Array<{ id?: string }> }).tool_calls;
+        if (Array.isArray(calls)) {
+          for (const tc of calls) {
+            if (typeof tc?.id === "string") announcedInMessages.add(tc.id);
+          }
+        }
+      }
+      const missingCalls = [...announcedCalls.values()].filter(
+        (call) => !announcedInMessages.has(call.id),
+      );
+      if (missingCalls.length > 0) {
         messages.push(
-          assistantToolCallMessage([
-            {
-              id: tracked.id,
-              type: "function",
-              function: { name: tracked.name, arguments: tracked.args },
-            },
-          ]),
+          assistantToolCallMessage(
+            missingCalls.map((call) => ({
+              id: call.id,
+              type: "function" as const,
+              function: { name: call.name, arguments: call.args },
+            })),
+          ),
         );
       }
 

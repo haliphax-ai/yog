@@ -242,3 +242,93 @@ describe("registry fallback cap (capToolResult)", () => {
     }
   });
 });
+
+describe("registry abort of an active tool call (issue #35)", () => {
+  const fastTool: ToolSpec<{ text: string }> = {
+    name: "echo",
+    description: "Echo text back.",
+    schema: z.object({ text: z.string() }).strict(),
+    failure: (error) => ({ error }),
+    run: async (args) => ({ echo: args["text"], exitCode: 0, runtimeMs: 1 }),
+  };
+  const hangingTool: ToolSpec<{ text: string }> = {
+    name: "hang",
+    description: "Never settles.",
+    schema: z.object({ text: z.string() }).strict(),
+    failure: (error) => ({ error }),
+    run: async () => new Promise<Record<string, unknown>>(() => undefined),
+  };
+
+  it("fires onStart/onEnd for a normal call with a signal (no stale in-flight entry)", async () => {
+    const local = new ToolRegistry([fastTool]);
+    const events: string[] = [];
+    const ac = new AbortController();
+    const result = await local.execute("echo", '{"text":"hi"}', {
+      signal: ac.signal,
+      onStart: (call) => void events.push(`start:${call.name}`),
+      onEnd: (call) => void events.push(`end:${call.name}`),
+    });
+    expect(result).toMatchObject({ echo: "hi" });
+    expect(events).toEqual(["start:echo", "end:echo"]);
+  });
+
+  it("fires onEnd when the call is aborted mid-run via signal", async () => {
+    const local = new ToolRegistry([hangingTool]);
+    const events: string[] = [];
+    const ac = new AbortController();
+    const run = local.execute("hang", '{"text":"hi"}', {
+      signal: ac.signal,
+      onStart: () => void events.push("start"),
+      onEnd: () => void events.push("end"),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    ac.abort(new Error("tool call aborted"));
+    await expect(run).rejects.toMatchObject({ name: "AbortError" });
+    expect(events).toEqual(["start", "end"]);
+  });
+
+  it("rejects with AbortError when the signal is already aborted (does not run the tool)", async () => {
+    let ran = false;
+    const spyTool: ToolSpec<{ text: string }> = {
+      ...fastTool,
+      run: async (args) => {
+        ran = true;
+        return fastTool.run(args);
+      },
+    };
+    const local = new ToolRegistry([spyTool]);
+    const ac = new AbortController();
+    ac.abort(new Error("tool call aborted"));
+    await expect(
+      local.execute("echo", '{"text":"hi"}', { signal: ac.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(ran).toBe(false);
+  });
+
+  it("rejects with AbortError when isAborted flips mid-run (predicate-only abort)", async () => {
+    const local = new ToolRegistry([hangingTool]);
+    let aborted = false;
+    const run = local.execute("hang", '{"text":"hi"}', {
+      isAborted: () => aborted,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    aborted = true;
+    await expect(run).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("converts a throwing tool run into a failure result even with a signal", async () => {
+    const throwingTool: ToolSpec<{ text: string }> = {
+      name: "echo",
+      description: "Always throws.",
+      schema: z.object({ text: z.string() }).strict(),
+      failure: (error) => ({ error }),
+      run: async () => {
+        throw new Error("tool blew up");
+      },
+    };
+    const local = new ToolRegistry([throwingTool]);
+    const ac = new AbortController();
+    const result = await local.execute("echo", '{"text":"hi"}', { signal: ac.signal });
+    expect(result).toMatchObject({ error: "tool blew up" });
+  });
+});
