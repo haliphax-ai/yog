@@ -100,6 +100,28 @@ describe("WorkerClient", () => {
     }
   });
 
+  it("isolates shell state between different state dirs (per-session dirs)", async () => {
+    const dirA = mkdtempSync(join(tmpdir(), "yog-worker-sess-a-"));
+    const dirB = mkdtempSync(join(tmpdir(), "yog-worker-sess-b-"));
+    const client = await startWorker();
+    try {
+      const rA = await client.runBash("export WHO=a && cd /tmp", dirA);
+      expectOk(rA);
+      const rB = await client.runBash("export WHO=b && cd /", dirB);
+      expectOk(rB);
+      // Each dir replays only its own snapshot: no cross-session bleed.
+      const rA2 = await client.runBash('printf "%s|%s" "$PWD" "$WHO"', dirA);
+      expectOk(rA2);
+      expect(rA2.stdout).toBe("/tmp|a");
+      const rB2 = await client.runBash('printf "%s|%s" "$PWD" "$WHO"', dirB);
+      expectOk(rB2);
+      expect(rB2.stdout).toBe("/|b");
+    } finally {
+      rmSync(dirA, { recursive: true, force: true });
+      rmSync(dirB, { recursive: true, force: true });
+    }
+  });
+
   it("correlates concurrent responses by id", async () => {
     const client = await startWorker();
     const jobs = Array.from({ length: 8 }, (_, i) => client.runBash(`echo job-${i}`));

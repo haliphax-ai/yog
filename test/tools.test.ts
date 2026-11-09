@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   bashTool,
   setBashExecutor,
+  setShellStateProvider,
   setToolOutputBudgets,
   toFunctionTool,
   ToolRegistry,
@@ -159,6 +160,48 @@ describe("bash shell state persistence", () => {
       expect(r2?.["stdout"]).toBe("/tmp|bar|fn-ok\n");
     } finally {
       rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("shell snapshot provider keying", () => {
+  it("loads and saves the snapshot under the call's session id", async () => {
+    const loads: string[] = [];
+    const saves: string[] = [];
+    setShellStateProvider({
+      async load(sessionId) {
+        loads.push(sessionId);
+        return { cwd: "/tmp", env: "export RESTORED=1\n", functions: "" };
+      },
+      async save(sessionId) {
+        saves.push(sessionId);
+      },
+    });
+    setBashExecutor(async (_script, opts) => {
+      expect(opts?.restore).toEqual({ cwd: "/tmp", env: "export RESTORED=1\n", functions: "" });
+      return {
+        ok: true,
+        stdout: "hi\n",
+        stderr: "",
+        exitCode: 0,
+        state: { cwd: "/tmp", env: "export RESTORED=1\n", functions: "" },
+      };
+    });
+    try {
+      const result = await registry.execute("bash", JSON.stringify({ command: "echo hi" }), {
+        sessionId: "sess-xyz",
+      });
+      expect(result?.error).toBeUndefined();
+      expect(loads).toEqual(["sess-xyz"]);
+      expect(saves).toEqual(["sess-xyz"]);
+    } finally {
+      setShellStateProvider(undefined);
+      if (worker) {
+        const w = worker;
+        setBashExecutor((script, opts) => w.runBash(script, opts?.stateDir, opts?.restore));
+      } else {
+        setBashExecutor(undefined);
+      }
     }
   });
 });

@@ -21,8 +21,15 @@ export HOME=/home/yog
 # The state volume (/var/lib/yog) may have been created root-owned by Docker
 # (fresh named volume) — ensure the daemon can write it no matter its origin,
 # without touching the host-owned config file.
-mkdir -p /var/lib/yog/agentfs
+mkdir -p /var/lib/yog/agentfs /var/lib/yog/harness
 chown -R yog:yog /var/lib/yog/agentfs
+# Per-session shell state is written by the agent user (bash workers) and
+# pruned by the daemon at start-up: the harness root is agent-owned,
+# setgid group-writable (the daemon is in the agent group — see the
+# Dockerfile), and per-session dirs inherit that group. Re-assert the
+# root's ownership/mode on every start so a fresh volume is usable.
+chown agent:agent /var/lib/yog/harness
+chmod 2775 /var/lib/yog/harness
 
 # Default command: start the HTTP/SSE daemon (`yog serve`), bound to all
 # interfaces so the published port is reachable from the host. Explicit args

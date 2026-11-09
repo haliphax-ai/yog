@@ -27,8 +27,9 @@ export interface ToolContext {
   sessionId?: string;
   /**
    * Directory for the tool's persistent state (bash shell snapshots).
-   * Injected from the runtime configuration by the caller; the tool itself
-   * never reads configuration.
+   * An explicit override for tests/direct callers; the daemon path
+   * derives it per session and leaves this unset (the tool itself
+   * never reads configuration).
    */
   stateDir?: string;
 }

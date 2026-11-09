@@ -29,25 +29,28 @@ RUN groupadd --system --gid 900 yog && \
   useradd --system --uid 900 --gid yog --shell /usr/sbin/nologin yog && \
   groupadd --gid 1100 agent && \
   useradd --uid 1100 --gid agent --shell /usr/sbin/nologin agent && \
-  mkdir -p /home/agent /home/yog /yog /var/lib/yog/agentfs && \
+  usermod -aG agent yog && \
+  mkdir -p /home/agent /home/yog /yog /var/lib/yog/agentfs /var/lib/yog/harness && \
   chown yog:yog /home/yog /yog /var/lib/yog && \
-  chown agent:agent /home/agent && \
+  chown agent:agent /home/agent /var/lib/yog/harness && \
+  chmod 2775 /var/lib/yog/harness && \
   echo "user_allow_other" > /etc/fuse.conf
 
 # Daemon/agent split: the harness runs as the `yog` daemon user; its bash
 # worker drops to the `agent` user (needs CAP_SETUID/SETGID in the launcher).
 # /yog is the FUSE mount root, served to the agent user with allow_other. The
-# persistent shell state lives in the agent's home, and the harness's state db
-# lives in the daemon's home.
+# persistent shell state lives under the state root at
+# `/var/lib/yog/harness/<sessionId>` (per-session, never in the agent's
+# home), and the harness's state db lives in the daemon's state root.
+# The daemon user is in the `agent` group so it can prune the agent-written
+# per-session dirs at start-up; the harness root is setgid group-writable
+# (2775) and per-session dirs are created group-writable (0775).
 # Server bind: the container must be reachable from outside its netns, so the
 # daemon listens on all interfaces (loopback remains the local default).
 # All daemon runtime configuration comes from /var/lib/yog/config.json,
 # mounted by the compose manifest (see README → Configuration). When no
 # config file is mounted, entrypoint.sh writes container defaults (bind
-# 0.0.0.0, agent split, allow_other). The only env kept here is bash-worker
-# child plumbing: the agent shell state dir consumed by the worker's env
-# builder (the config `agentStateDir` is the daemon-side source).
-ENV HARNESS_STATE_DIR=/home/agent/.harness
+# 0.0.0.0, agent split, allow_other).
 COPY . /app
 # better-sqlite3 v13 ships its native binding as a prebuild:
 #   node_modules/better-sqlite3/prebuilds/linux-x64.node

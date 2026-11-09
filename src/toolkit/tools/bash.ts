@@ -14,8 +14,8 @@ export interface BashArgs extends Record<string, unknown> {
 
 /** Structural view of the persistent-shell snapshot (mirrors the worker's). */
 export interface ShellStateProvider {
-  load(): Promise<{ cwd?: string; env?: string; functions?: string } | undefined>;
-  save(state: { cwd: string; env: string; functions: string }): Promise<void>;
+  load(sessionId: string): Promise<{ cwd?: string; env?: string; functions?: string } | undefined>;
+  save(sessionId: string, state: { cwd: string; env: string; functions: string }): Promise<void>;
 }
 
 /** /shake truncation budgets (chars). */
@@ -56,7 +56,12 @@ export interface BashRequestOpts {
    * fall back to the daemon-wide key.
    */
   scriptId?: string;
-  /** Directory for the persistent shell-state snapshot. */
+  /**
+   * Directory for the persistent shell-state snapshot. Omitted in the
+   * daemon path: the executor derives it per session
+   * (`<stateRoot>/harness/<sessionId>`); an explicit value wins (tests,
+   * direct callers).
+   */
   stateDir?: string;
   /** Prior snapshot to restore before running. */
   restore?: { cwd?: string; env?: string; functions?: string };
@@ -153,10 +158,13 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
       }
 
       // Restore the prior shell snapshot from the agentfs-backed home (if a
-      // provider is wired) so state survives across daemon restarts.
+      // provider is wired) so state survives across daemon restarts. The
+      // snapshot is keyed by session: sessions must not restore each
+      // other's shell.
+      const sessionKey = ctx?.sessionId ?? "daemon";
       let restore: BashRequestOpts["restore"];
       try {
-        restore = await shellProvider?.load();
+        restore = await shellProvider?.load(sessionKey);
       } catch {
         restore = undefined;
       }
@@ -170,7 +178,7 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
 
       if (resp.ok && resp.state && shellProvider) {
         try {
-          await shellProvider.save(resp.state);
+          await shellProvider.save(sessionKey, resp.state);
         } catch {
           // A home write failure must not fail the tool call.
         }

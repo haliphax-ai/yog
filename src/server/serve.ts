@@ -10,7 +10,13 @@ import { type SseEnvelope } from "./sse.ts";
 import { SessionStore } from "./store/sessions.ts";
 import { WorkerPool } from "./workpool.ts";
 import { SessionOrchestrator } from "./orchestrator.ts";
-import { AgentFSState, DEFAULT_AGENT_ID } from "../state/index.ts";
+import {
+  AgentFSState,
+  DEFAULT_AGENT_ID,
+  harnessStateDir,
+  harnessStateRoot,
+  pruneStaleHarnessState,
+} from "../state/index.ts";
 import { mountSys, unmountSys } from "../mount.ts";
 import { TurnEngine, type TurnOptions } from "../turn.ts";
 import type { TurnSink, TurnEvent, TurnUsage } from "../turn/sink.ts";
@@ -114,10 +120,31 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     let store: SessionStore | undefined;
     try {
       await mkdir(config.stateRoot, { recursive: true });
+      await mkdir(harnessStateRoot(config.stateRoot), { recursive: true });
       store = await SessionStore.open(join(config.stateRoot, "sessions.db"));
     } catch (err) {
       logger.warn(
         `[yog] warning: session store unavailable (${(err as Error).message}); continuing`,
+      );
+    }
+
+    // --- per-session harness (shell) state retention (best effort) ---
+    // Startup sweep only (no scheduled task): harness directories and
+    // their agentfs snapshot mirrors older than 7 days are deleted, so
+    // a pruned session's shell cannot be resurrected from the mirror.
+    // The kv sweep needs the agentfs state handle, so it runs just
+    // below once that is open; the filesystem sweep runs here, before
+    // any worker can create fresh state.
+    try {
+      const pruned = await pruneStaleHarnessState(config.stateRoot);
+      if (pruned.length > 0) {
+        logger.info(
+          `[yog] pruned ${pruned.length} stale harness state dir(s): ${pruned.join(", ")}`,
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        `[yog] warning: harness state prune failed (${(err as Error).message}); continuing`,
       );
     }
 
@@ -146,6 +173,13 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       });
     } catch (err) {
       logger.warn(`[yog] warning: agent state unavailable (${(err as Error).message}); continuing`);
+    }
+    try {
+      await state?.pruneStaleShellSnapshots();
+    } catch (err) {
+      logger.warn(
+        `[yog] warning: shell snapshot prune failed (${(err as Error).message}); continuing`,
+      );
     }
 
     // --- agent-user split: inject spawn opts BEFORE the pool exists ---
@@ -176,7 +210,8 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       setBashExecutor(async (script, opts) => {
         try {
           const resp = await p.run(opts?.scriptId ?? "daemon", script, {
-            stateDir: opts?.stateDir ?? config.agentStateDir,
+            stateDir:
+              opts?.stateDir ?? harnessStateDir(opts?.scriptId ?? "daemon", config.stateRoot),
             ...(opts?.restore !== undefined ? { restore: opts.restore } : {}),
           });
           if (resp.ok) {
@@ -197,16 +232,16 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       if (state) {
         const st = state;
         setShellStateProvider({
-          async load() {
+          async load(sessionId) {
             try {
-              return await st.loadShellSnapshot("daemon");
+              return await st.loadShellSnapshot(sessionId);
             } catch {
               return undefined;
             }
           },
-          async save(s) {
+          async save(sessionId, s) {
             try {
-              await st.saveShellSnapshot("daemon", s);
+              await st.saveShellSnapshot(sessionId, s);
             } catch {
               // best effort: a home write failure must not fail the tool call
             }

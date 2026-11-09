@@ -175,7 +175,7 @@ injection (`createDaemon({ config })`, used by tests).
 | `port`                  | int     | `8111`                              | HTTP/SSE port                                                                                                                                                                                                                                          |
 | `apiToken`              | string? | _(unset)_                           | require `Authorization: Bearer …` on the contract                                                                                                                                                                                                      |
 | `dbSlowMs`              | int     | `50`                                | log a warning when a store query exceeds this (log-only tripwire)                                                                                                                                                                                      |
-| `stateRoot`             | string  | `/var/lib/yog`                      | state root (`sessions.db`, `agentfs/<agentId>.db`)                                                                                                                                                                                                     |
+| `stateRoot`             | string  | `/var/lib/yog`                      | state root (`sessions.db`, `agentfs/<agentId>.db`, `harness/<sessionId>`)                                                                                                                                                                              |
 | `statePath`             | string? | _(derived)_                         | full-path override for the agent state db                                                                                                                                                                                                              |
 | `workers`               | int?    | `max(1, cpus - 1)`                  | worker pool size for parallel tool execution                                                                                                                                                                                                           |
 | `model`                 | string  | `gpt-4o-mini`                       | model id advertised by capabilities and used for turns                                                                                                                                                                                                 |
@@ -188,7 +188,6 @@ injection (`createDaemon({ config })`, used by tests).
 | `toolOutputGrace`       | int?    | _(unset → toolkit default: 1,000)_  | chars allowed beyond `toolOutputLimit` before the fallback cap engages (headroom for the result JSON structure: keys, braces, numbers)                                                                                                                 |
 | `agentUid` / `agentGid` | int     | `1100`                              | daemon/agent split: spawn bash workers as this uid/gid (the documented scheme: the `yog` daemon is uid 900, agents start at 1100 — model-executed code never runs as the daemon). Equal to the current process = no drop.                              |
 | `agentHome`             | string  | `/home/agent`                       | HOME **and cwd** for agent-spawned workers                                                                                                                                                                                                             |
-| `agentStateDir`         | string? | _(unset → `<agentHome>/.harness`)_  | persistent shell snapshot directory for the bash tool; relative values resolve against the agent's HOME (never the script's cwd, which changes with the script's own `cd`)                                                                             |
 
 Example `config.json`:
 
@@ -238,12 +237,13 @@ Customize the base image and runtime with override files:
   node version, extra packages) and reference it from the override via
   `build: { context: ., dockerfile: Dockerfile.local }`.
 
-The daemon's state databases live under the configured `stateRoot`
+The daemon's state lives under the configured `stateRoot`
 (default `/var/lib/yog`):
-`sessions.db` (sessions/turns/events) and `agentfs/<agentId>.db` (audit +
-shell state). Mount that path from the host so state persists across runs
-and turso/libsql's file locking works (it misbehaves on Docker's overlay
-filesystem).
+`sessions.db` (sessions/turns/events), `agentfs/<agentId>.db` (audit +
+shell-state mirror), and `harness/<sessionId>` (the per-session persistent
+shell state: `cwd`/`env`/`functions`). Mount that path from the host so
+state persists across runs and turso/libsql's file locking works (it
+misbehaves on Docker's overlay filesystem).
 
 ## Layout
 
@@ -372,10 +372,13 @@ a persistent shell **and the harness's descriptors**:
   Each call starts in the agent's HOME (`agentHome`), re-applies the prior
   snapshot (the prior cwd is `cd`ed into before the command runs), and the
   resulting state is snapshotted (`export -p` + `declare -f` + `pwd -P`)
-  into the configured state dir (`agentStateDir`, resolved against the
-  agent's HOME — never the command's own cwd) after every call. The agent rc
+  into the session's harness dir under the state root
+  (`<stateRoot>/harness/<sessionId>` — keyed by session, never the agent's
+  HOME and never a single shared dir) after every call. The agent rc
   (`BASH_ENV`, falling back to `~/.bashrc`) is sourced before each command
-  as the home baseline.
+  as the home baseline. Harness dirs (and their agentfs snapshot mirrors)
+  older than 7 days are deleted at daemon start-up — there is no
+  scheduled reaper.
 
   **Host env is hidden from the tool**: children are spawned with a minimal
   env - `HOME`, a fixed `PATH`, `TERM`, `TZ`, plus `BASH_ENV` and
@@ -430,7 +433,8 @@ The harness opens an AgentFS database (per agent id under the configured
   queryable in SQL.
 - The persistent bash shell state (cwd/env/functions) is mirrored into the
   database per session (`session:<id>:shell`), making the harness home
-  rewindable.
+  rewindable. Both the `harness/<sessionId>` directories and these mirror
+  rows are pruned at daemon start-up once untouched for 7 days.
 - Snapshot state with `cp .agentfs/yog.db snapshot.db` (the SDK checkpoints
   WAL on `snapshotTo`); restore by pointing `statePath` at the copy.
 - Opening/recording failures are non-fatal: the harness logs and continues.
@@ -471,10 +475,13 @@ The `fuse-native` addon needs a FUSE device and mount privileges:
   mounted `config.json` always wins.
 - `tini` is the container init (PID 1): it reaps zombies and forwards signals
   to the daemon; the entrypoint script runs as its child.
-- The daemon's state databases are daemon-owned runtime data — they live
+- The daemon's state is daemon-owned runtime data — it lives
   under a dedicated root, `/var/lib/yog` (the configured `stateRoot`):
-  `sessions.db` (sessions/turns/events) and `agentfs/<agentId>.db` (audit +
-  shell state). Agent identity is a runtime value (currently the default
+  `sessions.db` (sessions/turns/events), `agentfs/<agentId>.db` (audit +
+  shell-state mirror), and `harness/<sessionId>` (per-session shell state,
+  written by the agent user; the harness root is agent-owned, setgid
+  group-writable, and the daemon user is in the `agent` group so it can
+  prune those dirs at start-up). Agent identity is a runtime value
   `agent`), never a config field — multi-agent orchestration opens one
   database per agent id. Set `statePath` for a full path override. The `/yog`
   mountpoint must exist and be readable/searchable by

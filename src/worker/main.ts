@@ -9,7 +9,7 @@
  * child so teardown never leaves a shell behind.
  */
 import { createInterface } from "node:readline";
-import { mkdir, readFile, spawn, writeFile } from "../host.ts";
+import { chmod, mkdir, readFile, spawn, writeFile } from "../host.ts";
 import type { WorkerAbortResponse } from "./protocol.ts";
 import { decodeFrame, encodeFrame, type WorkerResponse, type WorkerRequest } from "./protocol.ts";
 import { buildToolEnv, resolveStateDir, WRAPPER } from "./wrapper.ts";
@@ -46,11 +46,12 @@ function abortCurrentChild(): WorkerAbortResponse {
 
 /**
  * Run one script through the persistent-shell wrapper. `stateDir` is
- * resolved here (worker side) against the agent's HOME before spawning:
- * the capture trap inherits the shell's *final* cwd, so a relative dir
- * would follow the script's own `cd` and scatter state across whatever
- * directories the script visited — the snapshot must live at a fixed,
- * absolute path.
+ * resolved here (worker side) before spawning: the daemon supplies the
+ * absolute per-session directory, while a relative value is resolved
+ * against the agent's HOME — the capture trap inherits the shell's
+ * *final* cwd, so a relative dir would follow the script's own `cd` and
+ * scatter state across whatever directories the script visited. The
+ * snapshot must live at a fixed, absolute path.
  */
 async function runBash(
   script: string,
@@ -112,7 +113,11 @@ async function hydrateState(
   stateDir: string,
   restore: Partial<import("./protocol.ts").ShellSnapshot>,
 ): Promise<void> {
-  await mkdir(stateDir, { recursive: true });
+  await mkdir(stateDir, { recursive: true, mode: 0o775 });
+  // mkdir's mode is masked by umask; chmod makes the per-session dir
+  // group-writable so the daemon (same group in the container image)
+  // can prune it at the next start-up.
+  await chmod(stateDir, 0o775).catch(() => {});
   if (restore.cwd !== undefined) await writeFile(`${stateDir}/cwd`, restore.cwd);
   if (restore.env !== undefined) await writeFile(`${stateDir}/env`, restore.env);
   if (restore.functions !== undefined) await writeFile(`${stateDir}/functions`, restore.functions);

@@ -149,6 +149,27 @@ export class AgentFSState {
     return this.#agent.kv.get(`session:${sessionId}:shell`);
   }
 
+  /**
+   * Delete shell snapshots last written more than `retentionDays` days
+   * ago (the kv rows behind {@link loadShellSnapshot}). The filesystem
+   * sweep (`pruneStaleHarnessState`) and this sweep are two halves of
+   * the same retention: without deleting the kv record, the next bash
+   * call for that session would resurrect the pruned shell state from
+   * the snapshot mirror. `kv_store.updated_at` is `unixepoch()` seconds,
+   * refreshed on every `set`. Only `session:<id>:shell` keys are
+   * touched; other kv entries are not harness records. Runs at daemon
+   * start-up only, alongside the filesystem sweep.
+   */
+  async pruneStaleShellSnapshots(
+    opts: { now?: number; retentionDays?: number } = {},
+  ): Promise<void> {
+    const retentionDays = opts.retentionDays ?? 7;
+    const cutoffSec = Math.floor((opts.now ?? Date.now()) / 1000) - retentionDays * 24 * 60 * 60;
+    await this.getDatabase()
+      .prepare(`DELETE FROM kv_store WHERE key LIKE 'session:%:shell' AND updated_at < ?`)
+      .run(cutoffSec);
+  }
+
   /** Close the underlying database connection. */
   async close(): Promise<void> {
     await this.#agent.close();
