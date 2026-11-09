@@ -17,20 +17,37 @@ The daemon is reached by clients at its origin (default
 [yog-client-tui](https://github.com/haliphax-ai/yog-client-tui)
 application, which speaks the v1 HTTP/SSE contract directly.
 
-### Contract endpoints (v1)
+### Contract (v1)
 
-| Method | Path                               | Purpose                                                                                                                                                                                                                              |
-| ------ | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| GET    | `/v1/capabilities`                 | Advertise server: contract version, models, tools, `features` (`["sse", "transcript", "abort"]`)                                                                                                                                     |
-| POST   | `/v1/sessions`                     | Create a session, optional body `{ title?, system? }` → `{ session: { id, … } }` (201)                                                                                                                                               |
-| GET    | `/v1/sessions/{id}`                | Session status → `{ session }`                                                                                                                                                                                                       |
-| DELETE | `/v1/sessions/{id}`                | **Detach** (advisory, `?purge=true` hard-deletes) → `{ session }`                                                                                                                                                                    |
-| POST   | `/v1/sessions/{id}/turns`          | Run a turn; streams an SSE transcript (a dormant session is implicitly revived). A disconnect detaches the stream by default — the turn keeps running server-side; pass `abortOnDisconnect: true` for the legacy wire-tied behavior. |
-| POST   | `/v1/sessions/{id}/abort`          | **Abort the current turn**: kill the tool call in flight, close the model stream, heal the transcript                                                                                                                                |
-| GET    | `/v1/sessions/{id}/transcript`     | **Rehydration dump**: the session's canonical transcript → `{ session, messages, turns? }` (optional per-turn metrics)                                                                                                               |
-| GET    | `/v1/sessions/{id}/turns/{turnId}` | **Turn-status recovery/replay**: fetch terminal turn state when the SSE stream died                                                                                                                                                  |
+The HTTP surface is four routes only; everything else is a message `type`:
 
-Turn requests are JSON: `{ "prompt": "...", "model": "..." }` (`prompt` is
+| Method | Path                         | Purpose                                                                                                                                                                                                                                                                                           |
+| ------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/v1/capabilities`           | Bootstrap discovery: contract version, models, tools, `features` (`["messages", "stream", …]`), and the `messageTypes` dispatch table                                                                                                                                                             |
+| POST   | `/v1/sessions`               | Bootstrap creation, optional body `{ title?, system? }` → `{ session: { id, … } }` (201)                                                                                                                                                                                                          |
+| GET    | `/v1/sessions/{id}/stream`   | The long-lived SSE event channel (opened once per session). Frames `stream.hello { streamId, sessionId }` on connect, then turn/ask/future events; replays any running turn's persisted events. A stream disconnect detaches, never aborts (unless a turn bound to it via `abortOnDisconnect`).   |
+| POST   | `/v1/sessions/{id}/messages` | Typed dispatch: `{ type, version?, requestId?, data? }` → `{ type, version, requestId?, data }` or `{ error: { code, message } }` (with `requestId` echoed when supplied). Streaming types (`turn.start`) return `202 { accepted: true }` at once; progress/terminal events arrive on the stream. |
+
+Message types (advertised as `messageTypes` on capabilities; unknown `type`
+or `version` → `400 invalid_request`):
+
+| Type               | `data`                                              | Response `data`                                                                                      |
+| ------------------ | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `session.get`      | _(none)_                                            | `{ session }`                                                                                        |
+| `session.detach`   | `{ purge?: boolean }`                               | `{ session }`, or `{ ok, deleted, id }` with `purge: true` (advisory detach; hard-delete with purge) |
+| `transcript.get`   | `{ afterSeq?, limit? }`                             | the rehydration dump `{ session, messages, turns? }`                                                 |
+| `turn.get`         | `{ turnId }`                                        | terminal turn state `{ turn }` (recovery/replay)                                                     |
+| `turn.abort`       | _(none)_                                            | `{ ok, status, aborted: { requested, sessionId, activeToolCall }, session }`                         |
+| `compaction.run`   | `{ kind: "compact" / "handoff", guidance? }`        | `{ ok, kind, summary, model, truncated, sessionId }`                                                 |
+| `transcript.shake` | _(none)_                                            | `{ ok, argsTruncated, resultsTruncated, contextSize, session }`                                      |
+| `turn.start`       | `{ prompt, model?, abortOnDisconnect?, streamId? }` | `202 { accepted: true }`; events on the stream (a dormant session is implicitly revived)             |
+
+Adding a feature means adding a `type` + handler (and advertising it) —
+never a new HTTP route. Each handler lives behind the same injected-deps
+seams as before (`compaction`, `shake`, orchestrator, store, bus); a daemon
+built without an optional boundary answers that type with `500 internal`.
+
+Turn-start data is `{ "prompt": "...", "model": "..." }` (`prompt` is
 required; `model` defaults to the server's model). **Clients never send
 history** — the server owns the transcript: it hydrates prior context before
 each turn and persists everything the turn produced, so a turn request carries
@@ -51,9 +68,9 @@ The SSE stream frames each self-describing envelope
 | `turn.aborted`  | `{ reason, usage? }`                                             | operator aborted the turn; transcript was healed (optional `usage` = totals as of the cut point when the provider reported any)                                                                                                                                                                                               |
 | `error`         | `{ code, message }`                                              | terminal failure (e.g. `provider_error`)                                                                                                                                                                                                                                                                                      |
 
-**Abort.** `POST /v1/sessions/{id}/abort` ends the session's current turn —
-the abort is hard: the SSE stream frames the terminal `turn.aborted`
-immediately and closes; nothing waits for the engine to unwind.
+**Abort.** A `turn.abort` message ends the session's current turn —
+the abort is hard: the session stream frames the terminal `turn.aborted`
+at once; nothing waits for the engine to unwind.
 
 1. The model stream is dropped at once (remaining output is ignored, not
    consumed).
@@ -81,8 +98,7 @@ same optional `usage` when any was captured.
 
 **Deltas are disposable; terminal states are authoritative.** If the SSE
 connection dies mid-turn, the client reads the `turnId` from `turn.started`
-and recovers the terminal state from
-`GET /v1/sessions/{id}/turns/{turnId}` — the recovery endpoint returns the
+and recovers the terminal state from `turn.get` — it returns the
 turn with its stored events, or a 404 `{ error: { code, message } }`
 envelope for an unknown session/turn.
 
@@ -91,17 +107,18 @@ envelope for an unknown session/turn.
 A disconnect detaches the stream, not the turn (yog#31): the engine runs the
 turn to its terminal state (events keep persisting, the turn row settles
 `finished`/`aborted` as usual), and the terminal state stays replayable from
-`GET /v1/sessions/{id}/turns/{turnId}` — rehydrate from the transcript on
-the next connect. This is how a UI quit, crash, or power loss mid-turn keeps
-the turn alive: the server owns the turn, not the socket.
+`turn.get` — rehydrate from the transcript on the next connect. This is how a
+UI quit, crash, or power loss mid-turn keeps the turn alive: the server owns
+the turn, not the socket.
 
 The legacy wire-tied behavior (disconnect aborts the in-flight turn) is
-opt-in: pass `"abortOnDisconnect": true` in the turn body. While attached,
-`POST /v1/sessions/{id}/abort` remains the way to stop a turn.
+opt-in: pass `"abortOnDisconnect": true` together with the `streamId` of the
+stream to bind it to in the `turn.start` data. While attached, `turn.abort`
+remains the way to stop a turn.
 
 ### Transcripts, resume, and session dormancy
 
-`GET /v1/sessions/{id}/transcript` is the rehydration dump: it returns
+`transcript.get` is the rehydration dump: it returns
 `{ session, messages, turns? }` where each message is
 `{ seq, turnId, ts, role, content, toolCallId?, name?, toolCalls?, usage?, promptDelta?, resultTokens? }` —
 monotonic `seq` per session, in conversation order. The optional `turns`
@@ -112,16 +129,16 @@ the round attribution already carried by the live `tool.result` envelope, so
 rehydration renders the same per-result counts; `resultTokens` rides each tool
 row individually. All fields are additive and
 optional — older clients ignore them. It accepts
-`?after=<seq>&limit=<n>` pagination for clients holding partial state, and it
+`afterSeq`/`limit` pagination for clients holding partial state, and it
 serves dormant sessions too: dormancy never blocks reads.
 
-There is no terminal "closed" state short of retention. `DELETE
-/v1/sessions/{id}` **detaches**: status `open` → `dormant`, `detached_at`
+There is no terminal "closed" state short of retention. `session.detach`
+**detaches**: status `open` → `dormant`, `detached_at`
 stamped, nothing forfeited (transcript, turns, events all stay), idempotent.
 A turn on a dormant session implicitly **revives** it — status back to
 `open`, `detached_at` cleared, retention clock reset; there is no reopen
 endpoint, reusing the id _is_ the reopen. A pruned session is the only truly
-terminal state: `?purge=true` deletes immediately, and dormant sessions past
+terminal state: `session.detach` with `purge: true` deletes immediately, and dormant sessions past
 the 30-day retention window are pruned at daemon startup, both followed by
 404 `unknown_session` everywhere.
 

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { sendMessage } from "./messages-helper.ts";
 import type OpenAI from "openai";
 import { createDaemon } from "../src/server/serve.ts";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
@@ -233,7 +234,7 @@ describe("createCompactionRunner", () => {
   });
 });
 
-describe("HTTP compaction routes", () => {
+describe("compaction.run message", () => {
   it("compact/handoff run the boundary, pass guidance, and return the artifact", async () => {
     const compaction = vi.fn(async (id: string, kind: CompactionKind, guidance?: string) => ({
       kind,
@@ -261,16 +262,17 @@ describe("HTTP compaction routes", () => {
       const session = ((await created.json()) as { session: { id: string } }).session;
 
       for (const kind of ["compact", "handoff"] as const) {
-        const res = await fetch(`${daemon.url}/v1/sessions/${session.id}/${kind}`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ guidance: "focus" }),
+        const res = await sendMessage(daemon.url, session.id, "compaction.run", {
+          kind,
+          guidance: "focus",
         });
         expect(res.status).toBe(200);
         const body: any = await res.json();
-        expect(body.ok).toBe(true);
-        expect(body.kind).toBe(kind);
-        expect(body.summary).toBe(`# ${kind} summary for ${session.id} (focus)`);
+        const payload = body.data;
+        expect(body.type).toBe("compaction.run");
+        expect(payload.ok).toBe(true);
+        expect(payload.kind).toBe(kind);
+        expect(payload.summary).toBe(`# ${kind} summary for ${session.id} (focus)`);
         expect(compaction).toHaveBeenCalledWith(session.id, kind, "focus");
       }
     } finally {
@@ -294,7 +296,7 @@ describe("HTTP compaction routes", () => {
       },
     });
     try {
-      const res = await fetch(`${daemon.url}/v1/sessions/nope/compact`, { method: "POST" });
+      const res = await sendMessage(daemon.url, "nope", "compaction.run", { kind: "compact" });
       expect(res.status).toBe(404);
     } finally {
       await daemon.close();

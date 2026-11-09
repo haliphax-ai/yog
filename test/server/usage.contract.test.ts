@@ -3,6 +3,7 @@ import { createDaemon, type Daemon } from "../../src/server/serve.ts";
 import { SessionStore } from "../../src/server/store/sessions.ts";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { runTurnToEnd, sendMessage } from "../messages-helper.ts";
 
 /** `Response.json()` with a loose type: assertions do the checking. */
 async function json(res: Response): Promise<any> {
@@ -14,7 +15,7 @@ const CAPABILITIES = {
   contractVersion: "v1",
   models: ["usage-model"],
   tools: ["bash"],
-  features: ["sse", "transcript"],
+  features: ["messages", "stream", "transcript"],
 };
 
 /** Fake model (fallback path) that emits usage and round usage on tool results. */
@@ -116,13 +117,19 @@ async function newSession(): Promise<string> {
 }
 
 async function runTurn(id: string, prompt: string): Promise<void> {
-  const res = await fetch(`${base}/v1/sessions/${id}/turns`, {
-    method: "POST",
-    headers: JSON_HEADERS,
-    body: JSON.stringify({ prompt }),
-  });
+  const { startRes, abort } = await runTurnToEnd(base, id, { prompt });
+  abort();
+  expect(startRes.status).toBe(202);
+}
+async function transcriptDump(id: string): Promise<any> {
+  const res = await sendMessage(base, id, "transcript.get");
   expect(res.status).toBe(200);
-  await res.text();
+  return (await json(res)).data;
+}
+async function turnGet(id: string, turnId: string): Promise<any> {
+  const res = await sendMessage(base, id, "turn.get", { turnId });
+  expect(res.status).toBe(200);
+  return (await json(res)).data;
 }
 
 describe("conformance: per-turn usage + round usage on the wire", () => {
@@ -130,8 +137,7 @@ describe("conformance: per-turn usage + round usage on the wire", () => {
     const id = await newSession();
     await runTurn(id, "do it");
 
-    const res = await fetch(`${base}/v1/sessions/${id}/transcript`);
-    const body = await json(res);
+    const body = await transcriptDump(id);
     const messages = body.messages as any[];
     const roles = messages.map((m) => m.role);
     expect(roles).toEqual(["user", "assistant", "tool"]);
@@ -161,8 +167,7 @@ describe("conformance: per-turn usage + round usage on the wire", () => {
     const id = await newSession();
     await runTurn(id, "again");
 
-    const res = await fetch(`${base}/v1/sessions/${id}/turns/turn-usage`);
-    const body = await json(res);
+    const body = await turnGet(id, "turn-usage");
     expect(body.turn.status).toBe("finished");
     expect(body.turn.usage).toEqual({ prompt_tokens: 11, completion_tokens: 22, total_tokens: 33 });
     const finishedEvent = body.turn.events.find((e: any) => e.type === "turn.finished");
@@ -175,8 +180,7 @@ describe("conformance: per-turn usage + round usage on the wire", () => {
 
   it("transcript has no turns array when no turn carries usage", async () => {
     const id = await newSession();
-    const res = await fetch(`${base}/v1/sessions/${id}/transcript`);
-    const body = await json(res);
+    const body = await transcriptDump(id);
     expect(body.turns).toBeUndefined();
   });
 
@@ -200,8 +204,7 @@ describe("conformance: per-turn usage + round usage on the wire", () => {
     ]);
     await store.finishTurn(id, turn.id, "finished");
 
-    const res = await fetch(`${base}/v1/sessions/${id}/transcript`);
-    const body = await json(res);
+    const body = await transcriptDump(id);
     const toolRow = (body.messages as any[]).find((m) => m.role === "tool");
     expect(toolRow).toBeDefined();
     expect(toolRow.usage).toBeUndefined();

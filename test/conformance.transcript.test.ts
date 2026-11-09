@@ -3,9 +3,9 @@
  * server-owned transcript contract (PLAN §4.4–§4.6), driven exactly like an
  * external client against an ephemeral daemon:
  *
- *   GET    /v1/sessions/{id}/transcript   rehydration dump (?after=&limit=)
+ *   POST   /v1/sessions/{id}/messages     transcript.get (rehydration dump)
+ *   POST   /v1/sessions/{id}/messages     session.detach (detach / purge)
  *   POST   /v1/sessions        { title?, system? } (system seeds the transcript)
- *   DELETE /v1/sessions/{id}   detach / ?purge=true
  *
  * Boot: `createDaemon` with injected deps + a real `SessionStore` on a tmp
  * sqlite file (same pattern as `test/conformance.test.ts`). The fake model
@@ -18,11 +18,17 @@ import { createDaemon, type Daemon, type DaemonOptions } from "../src/server/ser
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SessionStore } from "../src/server/store/sessions.ts";
+import { runTurnToEnd, sendMessage } from "./messages-helper.ts";
 
 /** `Response.json()` with a loose type: assertions do the checking. */
 async function json(res: Response): Promise<any> {
   return (await res.json()) as any;
 }
+async function msgData(id: string, type: string, data: Record<string, unknown> = {}): Promise<any> {
+  return ((await (await sendMessage(base, id, type, data)).json()) as any).data;
+}
+const msg = (id: string, type: string, data: Record<string, unknown> = {}) =>
+  sendMessage(base, id, type, data);
 
 const JSON_HEADERS = { "content-type": "application/json" };
 
@@ -30,7 +36,7 @@ const CAPABILITIES = {
   contractVersion: "v1",
   models: ["conf-transcript-model"],
   tools: ["bash"],
-  features: ["sse", "transcript"],
+  features: ["messages", "stream", "transcript"],
 };
 
 function optsWith(model: ReturnType<typeof confModel>, store: SessionStore): DaemonOptions {
@@ -125,23 +131,18 @@ async function newSession(body: Record<string, unknown> = {}): Promise<string> {
   return session.id as string;
 }
 
-/** POST one turn and drain the SSE stream (no engine import — plain fetch). */
+/** Run one turn to completion via the stream (no engine import — plain fetch). */
 async function runTurn(id: string, prompt: string): Promise<void> {
-  const res = await fetch(`${base}/v1/sessions/${id}/turns`, {
-    method: "POST",
-    headers: JSON_HEADERS,
-    body: JSON.stringify({ prompt }),
-  });
-  expect(res.status).toBe(200);
-  expect(res.headers.get("content-type")).toContain("text/event-stream");
-  await res.text();
+  const { startRes, abort } = await runTurnToEnd(base, id, { prompt });
+  abort();
+  expect(startRes.status).toBe(202);
 }
 
-/** GET the transcript dump → its messages array (the §4.6 wire shape). */
-async function transcript(id: string, query = ""): Promise<any[]> {
-  const res = await fetch(`${base}/v1/sessions/${id}/transcript${query}`);
+/** transcript.get → its messages array (the §4.6 wire shape). */
+async function transcript(id: string, data: Record<string, unknown> = {}): Promise<any[]> {
+  const res = await msg(id, "transcript.get", data);
   expect(res.status).toBe(200);
-  const { messages } = await json(res);
+  const { messages } = await msgData(id, "transcript.get", data);
   return messages as any[];
 }
 
@@ -182,23 +183,10 @@ describe("conformance: transcript (server-owned conversation)", () => {
 
     // Second client process: plain fetch, body carries only the new prompt —
     // clients never send history outbound (PLAN §1/§4.6).
-    const res = await fetch(`${base}/v1/sessions/${id}/turns`, {
-      method: "POST",
-      headers: JSON_HEADERS,
-      body: JSON.stringify({ prompt: "what word?" }),
-    });
-    expect(res.status).toBe(200);
-    const frames: any[] = [];
-    for (const block of (await res.text()).split("\n\n")) {
-      if (!block.trim()) continue;
-      let event = "";
-      let data = "";
-      for (const line of block.split("\n")) {
-        if (line.startsWith("event:")) event = line.slice(6).trim();
-        else if (line.startsWith("data:")) data += line.slice(5).trim();
-      }
-      if (event) frames.push({ event, data: JSON.parse(data) });
-    }
+    // Second client process: plain fetch, body carries only the new prompt —
+    // clients never send history outbound (PLAN §1/§4.6).
+    const { frames, abort } = await runTurnToEnd(base, id, { prompt: "what word?" });
+    abort();
     expect(frames.some((f) => f.event === "turn.finished")).toBe(true);
 
     // The model demonstrably saw turn 1's context: the second upstream call
@@ -219,23 +207,18 @@ describe("conformance: transcript (server-owned conversation)", () => {
 
     // 1. Detach: status open → dormant, detached_at stamped, 200. Nothing
     //    is forfeited — the transcript stays fully readable while dormant.
-    const del = await fetch(`${base}/v1/sessions/${id}`, { method: "DELETE" });
-    expect(del.status).toBe(200);
-    const detached = (await json(del)).session;
+    const detached = (await msgData(id, "session.detach")).session;
+    expect(detached.status).toBe("dormant");
     expect(detached.status).toBe("dormant");
     expect(detached.detached_at).toBeTruthy();
     expect((await transcript(id)).map((m) => m.role)).toEqual(["user", "assistant"]);
 
     // 2. Revive (implicit): POST turns flips status to open and clears
     //    detached_at; the turn streams (no session_closed 409 — §4.6).
-    const res = await fetch(`${base}/v1/sessions/${id}/turns`, {
-      method: "POST",
-      headers: JSON_HEADERS,
-      body: JSON.stringify({ prompt: "revived" }),
-    });
-    expect(res.status).toBe(200);
-    await res.text();
-    const after = (await json(await fetch(`${base}/v1/sessions/${id}`))).session;
+    // 2. Revive (implicit): turn.start flips status to open and clears
+    //    detached_at (no session_closed 409 — §4.6).
+    await runTurn(id, "revived");
+    const after = (await msgData(id, "session.get")).session;
     expect(after.status).toBe("open");
     expect(after.detached_at).toBeNull();
 
@@ -248,9 +231,8 @@ describe("conformance: transcript (server-owned conversation)", () => {
     //    `detached_at` is already past the 30-day cutoff — the startup prune
     //    must have removed it (cascading to the transcript). Self-contained
     //    store so the shared daemon for the remaining cases is untouched.
-    const del2 = await fetch(`${base}/v1/sessions/${id}`, { method: "DELETE" });
-    expect(del2.status).toBe(200);
-    expect((await json(del2)).session.detached_at).toBeTruthy();
+    const del2 = await msgData(id, "session.detach");
+    expect(del2.session.detached_at).toBeTruthy();
 
     const retentionPath = join(tmpdir(), `yog-conf-retain-${Date.now()}.db`);
     const doomed = await SessionStore.open(retentionPath);
@@ -263,34 +245,29 @@ describe("conformance: transcript (server-owned conversation)", () => {
     reopened.close();
   });
 
-  it("DELETE ?purge=true → 404 unknown_session on every subsequent read/turn", async () => {
+  it("session.detach with purge → 404 unknown_session on every subsequent read/turn", async () => {
     const id = await newSession();
     await runTurn(id, "to be purged");
 
-    const del = await fetch(`${base}/v1/sessions/${id}?purge=true`, { method: "DELETE" });
-    expect(del.status).toBe(200);
-    expect((await json(del)).deleted).toBe(true);
+    const del = await msgData(id, "session.detach", { purge: true });
+    expect(del.deleted).toBe(true);
 
-    // Every surface: GET session, GET transcript, GET turn recovery, POST turn.
-    const got = await fetch(`${base}/v1/sessions/${id}`);
+    // Every surface: session.get, transcript.get, turn.get, turn.start.
+    const got = await msg(id, "session.get");
     expect(got.status).toBe(404);
     expect((await json(got)).error.code).toBe("unknown_session");
-    const tr = await fetch(`${base}/v1/sessions/${id}/transcript`);
+    const tr = await msg(id, "transcript.get");
     expect(tr.status).toBe(404);
     expect((await json(tr)).error.code).toBe("unknown_session");
-    const rec = await fetch(`${base}/v1/sessions/${id}/turns/1`);
+    const rec = await msg(id, "turn.get", { turnId: "1" });
     expect(rec.status).toBe(404);
     expect((await json(rec)).error.code).toBe("unknown_session");
-    const turn = await fetch(`${base}/v1/sessions/${id}/turns`, {
-      method: "POST",
-      headers: JSON_HEADERS,
-      body: JSON.stringify({ prompt: "anyone there?" }),
-    });
+    const turn = await msg(id, "turn.start", { prompt: "anyone there?" });
     expect(turn.status).toBe(404);
     expect((await json(turn)).error.code).toBe("unknown_session");
   });
 
-  it("pagination: ?after=<seq>&limit=<n> slices a multi-turn transcript", async () => {
+  it("pagination: afterSeq/limit slices a multi-turn transcript", async () => {
     const id = await newSession();
     await runTurn(id, "one");
     await runTurn(id, "two");
@@ -299,16 +276,16 @@ describe("conformance: transcript (server-owned conversation)", () => {
     expect((await transcript(id)).map((m) => m.seq)).toEqual([1, 2, 3, 4, 5, 6]);
 
     // limit caps the batch from the start.
-    expect((await transcript(id, "?limit=2")).map((m) => m.seq)).toEqual([1, 2]);
+    expect((await transcript(id, { limit: 2 })).map((m) => m.seq)).toEqual([1, 2]);
 
     // after skips everything up to and including that seq.
-    expect((await transcript(id, "?after=4")).map((m) => m.seq)).toEqual([5, 6]);
+    expect((await transcript(id, { afterSeq: 4 })).map((m) => m.seq)).toEqual([5, 6]);
 
     // Combined: forward paging in one client-side loop.
     const paged: number[] = [];
     let after = 0;
     for (;;) {
-      const batch = await transcript(id, `?after=${after}&limit=2`);
+      const batch = await transcript(id, { afterSeq: after, limit: 2 });
       if (batch.length === 0) break;
       for (const m of batch) {
         paged.push(m.seq);

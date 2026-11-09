@@ -1,5 +1,5 @@
 /**
- * POST /v1/sessions/{id}/abort — operator-driven turn abort, end to end.
+ * turn.abort message — operator-driven turn abort, end to end.
  *
  * Composition under test mirrors the real daemon: store + executeTurn
  * (TurnEngine over a scripted OpenAI client) + SessionOrchestrator, injected
@@ -23,10 +23,15 @@ import { TurnEngine } from "../../src/turn.ts";
 import { tools } from "../../src/register.ts";
 import { setBashExecutor } from "../../src/toolkit/index.ts";
 import type { TurnUsage } from "../../src/turn/sink.ts";
+import { openStream, sendMessage } from "../messages-helper.ts";
 
 /** `Response.json()` with a loose type: assertions do the checking. */
 async function json(res: Response): Promise<any> {
   return (await res.json()) as any;
+}
+/** `data` payload of a messages envelope response. */
+async function dataOf(res: Response): Promise<any> {
+  return (await json(res)).data;
 }
 
 /**
@@ -272,13 +277,14 @@ async function newSession(): Promise<string> {
   return ((await json(res)) as { session: { id: string } }).session.id;
 }
 
-/** POST a turn without draining the stream (the turn runs while we abort). */
-function startTurn(sessionId: string): Promise<Response> {
-  return fetch(`${base}/v1/sessions/${sessionId}/turns`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt: "hang forever" }),
-  });
+/** Start a turn on an open stream; returns the stream handle + start response. */
+async function startTurn(sessionId: string) {
+  const stream = await openStream(base, sessionId);
+  const startRes = await sendMessage(base, sessionId, "turn.start", { prompt: "hang forever" });
+  return { stream, startRes };
+}
+async function abortTurn(sessionId: string): Promise<Response> {
+  return sendMessage(base, sessionId, "turn.abort");
 }
 
 /**
@@ -299,25 +305,26 @@ async function waitForTranscript(
   }
 }
 
-describe("POST /v1/sessions/{id}/abort", () => {
+describe("turn.abort message", () => {
   it("aborts an in-flight turn, heals the transcript, and reports success", async () => {
     const sid = await newSession();
-    const stream = await startTurn(sid);
-    expect(stream.status).toBe(200);
+    const { stream, startRes } = await startTurn(sid);
+    expect(startRes.status).toBe(202);
 
     // Let the turn get into flight (engine streamed the tool call).
     await new Promise((r) => setTimeout(r, 150));
 
-    const res = await fetch(`${base}/v1/sessions/${sid}/abort`, { method: "POST" });
+    const res = await abortTurn(sid);
     expect(res.status).toBe(200);
-    const body = await json(res);
+    const body = await dataOf(res);
     expect(body.ok).toBe(true);
     expect(body.status).toBe("aborted");
     expect(body.aborted.requested).toBe(true);
     expect(body.session.id).toBe(sid);
 
     // The turn stream closes promptly after the abort.
-    await Promise.race([stream.text(), new Promise((r) => setTimeout(r, 3000))]);
+    await stream.collectUntil((fs) => fs.some((f) => f.event === "turn.aborted"), 3_000);
+    stream.abort();
 
     // The transcript healed: assistant row with tool_calls + stub tool row.
     const transcript = await waitForTranscript(sid, (msgs) => msgs.some((m) => m.role === "tool"));
@@ -338,15 +345,15 @@ describe("POST /v1/sessions/{id}/abort", () => {
     expect(events.filter((e: any) => e.type === "turn.aborted")).toHaveLength(1);
 
     // The session is idle now: a second abort is a no-op success.
-    const again = await fetch(`${base}/v1/sessions/${sid}/abort`, { method: "POST" });
-    expect((await json(again)).status).toBe("idle");
+    const again = await abortTurn(sid);
+    expect((await dataOf(again)).status).toBe("idle");
   });
 
   it("is a no-op success when the session is idle", async () => {
     const sid = await newSession();
-    const res = await fetch(`${base}/v1/sessions/${sid}/abort`, { method: "POST" });
+    const res = await abortTurn(sid);
     expect(res.status).toBe(200);
-    const body = await json(res);
+    const body = await dataOf(res);
     expect(body.ok).toBe(true);
     expect(body.status).toBe("idle");
     expect(body.aborted.requested).toBe(false);
@@ -354,7 +361,7 @@ describe("POST /v1/sessions/{id}/abort", () => {
   });
 
   it("404s on an unknown session", async () => {
-    const res = await fetch(`${base}/v1/sessions/nope/abort`, { method: "POST" });
+    const res = await abortTurn("nope");
     expect(res.status).toBe(404);
     expect((await json(res)).error.code).toBe("unknown_session");
   });
@@ -362,52 +369,50 @@ describe("POST /v1/sessions/{id}/abort", () => {
   it("aborts are session-scoped: a parallel session's turn is untouched", async () => {
     const a = await newSession();
     const b = await newSession();
-    const streamA = await startTurn(a);
-    const streamB = await startTurn(b);
+    const aStart = await startTurn(a);
+    expect(aStart.startRes.status).toBe(202);
+    const bStart = await startTurn(b);
+    expect(bStart.startRes.status).toBe(202);
     await new Promise((r) => setTimeout(r, 150));
 
-    await fetch(`${base}/v1/sessions/${a}/abort`, { method: "POST" });
-    await Promise.race([streamA.text(), new Promise((r) => setTimeout(r, 3000))]);
+    await abortTurn(a);
+    await aStart.stream.collectUntil((fs) => fs.some((f) => f.event === "turn.aborted"), 3_000);
+    aStart.stream.abort();
 
     // B still has a live turn of its own to abort.
-    const resB = await fetch(`${base}/v1/sessions/${b}/abort`, { method: "POST" });
-    expect((await json(resB)).status).toBe("aborted");
-    await Promise.race([streamB.text(), new Promise((r) => setTimeout(r, 3000))]);
+    const resB = await abortTurn(b);
+    expect((await dataOf(resB)).status).toBe("aborted");
+    await bStart.stream.collectUntil((fs) => fs.some((f) => f.event === "turn.aborted"), 3_000);
+    bStart.stream.abort();
   });
 
   it("delivers turn.aborted on the wire before the stream ends", async () => {
     const sid = await newSession();
-    const stream = await startTurn(sid);
-    expect(stream.status).toBe(200);
+    const { stream, startRes } = await startTurn(sid);
+    expect(startRes.status).toBe(202);
     await new Promise((r) => setTimeout(r, 150));
 
-    await fetch(`${base}/v1/sessions/${sid}/abort`, { method: "POST" });
+    await abortTurn(sid);
 
-    // Drain the whole stream and collect envelope types off the wire: the
-    // stream must not end bare — the terminal frame is `turn.aborted`.
-    const text = await stream.text();
-    const types = text
-      .split("\n\n")
-      .map((block) => {
-        const line = block.split("\n").find((l) => l.startsWith("data:"));
-        try {
-          return line ? (JSON.parse(line.slice(5).trim()) as { type?: string }).type : undefined;
-        } catch {
-          return undefined;
-        }
-      })
-      .filter((t): t is string => typeof t === "string");
+    // Collect envelope types off the wire: the last turn frame is `turn.aborted`.
+    const frames = await stream.collectUntil(
+      (fs) => fs.some((f) => f.event === "turn.aborted"),
+      5_000,
+    );
+    stream.abort();
+    const types = frames.map((f) => f.event);
     expect(types.at(-1)).toBe("turn.aborted");
   });
 
   it("persists the aborted turn's prompt so a resume sees it", async () => {
     const sid = await newSession();
-    const stream = await startTurn(sid);
-    expect(stream.status).toBe(200);
+    const { stream, startRes } = await startTurn(sid);
+    expect(startRes.status).toBe(202);
     await new Promise((r) => setTimeout(r, 150));
 
-    await fetch(`${base}/v1/sessions/${sid}/abort`, { method: "POST" });
-    await Promise.race([stream.text(), new Promise((r) => setTimeout(r, 3000))]);
+    await abortTurn(sid);
+    await stream.collectUntil((fs) => fs.some((f) => f.event === "turn.aborted"), 3_000);
+    stream.abort();
 
     // The user prompt survived the abort: a resumed client rehydrates it
     // alongside the healed assistant/tool rows.
@@ -420,13 +425,14 @@ describe("POST /v1/sessions/{id}/abort", () => {
     activeClientFactory = proseThenHangClient;
     try {
       const sid = await newSession();
-      const stream = await startTurn(sid);
-      expect(stream.status).toBe(200);
+      const { stream, startRes } = await startTurn(sid);
+      expect(startRes.status).toBe(202);
       await new Promise((r) => setTimeout(r, 150));
 
-      const res = await fetch(`${base}/v1/sessions/${sid}/abort`, { method: "POST" });
-      expect((await json(res)).status).toBe("aborted");
-      await Promise.race([stream.text(), new Promise((r) => setTimeout(r, 3000))]);
+      const res = await abortTurn(sid);
+      expect((await dataOf(res)).status).toBe("aborted");
+      await stream.collectUntil((fs) => fs.some((f) => f.event === "turn.aborted"), 3_000);
+      stream.abort();
 
       // No tool call was announced, so there is nothing to heal — the abort
       // path must still persist the user prompt (the regression behind the
@@ -444,26 +450,19 @@ describe("POST /v1/sessions/{id}/abort", () => {
     activeClientFactory = hangingToolCallWithUsageClient;
     try {
       const sid = await newSession();
-      const stream = await startTurn(sid);
-      expect(stream.status).toBe(200);
+      const { stream, startRes } = await startTurn(sid);
+      expect(startRes.status).toBe(202);
       await new Promise((r) => setTimeout(r, 150));
 
-      const res = await fetch(`${base}/v1/sessions/${sid}/abort`, { method: "POST" });
-      expect((await json(res)).status).toBe("aborted");
-
-      const text = await stream.text();
+      const res = await abortTurn(sid);
+      expect((await dataOf(res)).status).toBe("aborted");
+      const frames = await stream.collectUntil(
+        (fs) => fs.some((f) => f.event === "turn.aborted"),
+        5_000,
+      );
+      stream.abort();
       let abortedData: any;
-      for (const block of text.split("\n\n")) {
-        const line = block.split("\n").find((l) => l.startsWith("data:"));
-        if (!line) continue;
-        let env: any;
-        try {
-          env = JSON.parse(line.slice(5).trim());
-        } catch {
-          continue;
-        }
-        if (env?.type === "turn.aborted") abortedData = env.data;
-      }
+      for (const f of frames) if (f.event === "turn.aborted") abortedData = f.data.data;
       expect(abortedData?.reason).toBeTruthy();
       expect(abortedData?.usage).toEqual({
         prompt_tokens: 10,
