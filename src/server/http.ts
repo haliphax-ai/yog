@@ -5,7 +5,7 @@ import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { encodeEvent, type SseEnvelope } from "./sse.ts";
 import { MESSAGE_TYPES, parseEnvelope, type MessageEnvelope } from "./messages.ts";
-import { activeToolCallFor } from "../turn.ts";
+import { activeToolCallFor, toolStubMessage, unansweredToolCallIds } from "../turn.ts";
 import { logger } from "../log.ts";
 import type { CompactionBoundary, CompactionKind } from "./compaction.ts";
 import type { ShakeOutcome } from "./shake.ts";
@@ -221,11 +221,11 @@ function turnUsageFromRow(row: Record<string, unknown>): Record<string, number> 
   return has ? usage : undefined;
 }
 
-/** Usage embedded in a stored `turn.finished` event payload (recovery fallback). */
+/** Usage embedded in a stored terminal event payload (recovery fallback). */
 function turnUsageFromEvents(events: unknown[]): Record<string, number> | undefined {
   for (const raw of events) {
     const ev = raw as { type?: string; data?: unknown };
-    if (ev.type !== "turn.finished" && ev.type !== "turn.aborted") continue;
+    if (ev.type !== "turn.finished" && ev.type !== "turn.aborted" && ev.type !== "error") continue;
     const data = ev.data as { usage?: unknown } | undefined;
     const u = data?.usage;
     if (u === null || typeof u !== "object" || Array.isArray(u)) continue;
@@ -242,6 +242,19 @@ function turnUsageFromEvents(events: unknown[]): Record<string, number> | undefi
     if (has) return usage;
   }
   return undefined;
+}
+/**
+ * Heal a fallback-path transcript in place: stub every tool call the
+ * messages announce but never answer, so the batch persisted on error
+ * stays hydratable (the engine heals the orchestrator path the same way;
+ * providers reject dangling calls). Prior turns are already answered,
+ * so this only stubs this turn's dangling calls.
+ */
+function healFallbackMessages(messages: ChatCompletionMessageParam[]): void {
+  const heal: ChatCompletionMessageParam[] = [...unansweredToolCallIds(messages)].map(
+    (toolCallId) => toolStubMessage(toolCallId),
+  );
+  if (heal.length > 0) messages.push(...heal);
 }
 
 /**
@@ -729,14 +742,17 @@ export function createHttpServer(deps: HttpDeps): Server {
         }
         // Per-turn metrics (usage/duration) ride alongside the dump so a
         // client can rebuild per-turn summaries without replaying events.
-        // Each row also carries its status — `running` for an in-flight
-        // (typically lingered) turn — so a reconnecting client can tell
-        // the session still has an active turn and behave accordingly
-        // (busy gate, poll-to-settle). A running row has no stored
-        // usage/duration yet (both are stamped at settle time), so the
-        // snapshot from `onUsageFor` fills the usage in: the client's
-        // "last known context total" then stays live instead of showing
-        // the pre-turn figure until the row settles.
+        // Each row also carries its settle status — `running` for an
+        // in-flight (typically lingered) turn, then `finished` /
+        // `aborted` / `error` / `interrupted` — so a reconnecting client
+        // can tell the session still has an active turn and behave
+        // accordingly (busy gate, poll-to-settle), and can mark a
+        // failed (provider-error) turn distinctly from an aborted one
+        // on rehydrate. A running row has no stored usage/duration yet
+        // (both are stamped at settle time), so the snapshot from
+        // `onUsageFor` fills the usage in: the client's "last known
+        // context total" then stays live instead of showing the pre-turn
+        // figure until the row settles.
         let turns: unknown[] = [];
         if (typeof store!.listTurns === "function") {
           const rows = ((await store!.listTurns(id)) ?? []) as Array<Record<string, unknown>>;
@@ -1154,7 +1170,7 @@ export function createHttpServer(deps: HttpDeps): Server {
         }
         if (!isAbort && !sawError) {
           const e = err as { code?: string; message?: string };
-          await emitToStream({
+          const envelope = {
             id: 0,
             type: "error",
             version: 1,
@@ -1165,7 +1181,18 @@ export function createHttpServer(deps: HttpDeps): Server {
               message: e.message ?? String(err),
               ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
             },
-          } as SseEnvelope);
+          } as SseEnvelope;
+          // Persist the synthesized terminal event (like `turn.aborted`)
+          // so `turn.get` replays it even when the engine never emitted.
+          await persistEvent(envelope);
+          await emitToStream(envelope);
+        }
+        if (!isAbort && store !== undefined && store.finishTurn !== undefined) {
+          try {
+            await store.finishTurn(session.id, turnRowId, "error");
+          } catch {
+            // settle-sync is best effort
+          }
         }
       };
       void handle.promise.then(
@@ -1212,6 +1239,11 @@ export function createHttpServer(deps: HttpDeps): Server {
               },
               signal: controller.signal,
             });
+            // A model that emits a terminal `error` but returns normally
+            // (the engine always rethrows instead) still failed: settle
+            // as `error`, not `finished`, so the row never contradicts
+            // its stored terminal event.
+            healFallbackMessages(fallbackMessages);
             if (store?.appendMessages && fallbackMessages.length > fallbackStartLen) {
               try {
                 await store.appendMessages(
@@ -1227,23 +1259,42 @@ export function createHttpServer(deps: HttpDeps): Server {
             // orchestrator nothing else settles this row.
             if (store !== undefined && store.finishTurn !== undefined) {
               try {
-                await store.finishTurn(session.id, turnRowId, "finished");
+                await store.finishTurn(session.id, turnRowId, sawError ? "error" : "finished");
               } catch {
                 // settle-sync is best effort
               }
             }
           } catch (err) {
-            // Failed turn persists nothing (except its event log).
+            // Any failure persists the partial batch exactly like an abort
+            // (yog#42, fallback parity with serve.ts): heal dangling tool
+            // calls, then persist the user prompt and every completed
+            // round so `transcript.get` shows the turn instead of
+            // rewinding. Abort settles as `aborted`, provider failure as
+            // `error`.
+            const isAbort =
+              controller.signal.aborted || (err instanceof Error && err.name === "AbortError");
+            healFallbackMessages(fallbackMessages);
+            if (store?.appendMessages && fallbackMessages.length > fallbackStartLen) {
+              try {
+                await store.appendMessages(
+                  session.id,
+                  fallbackMessages.slice(fallbackStartLen),
+                  turnRowId,
+                );
+              } catch {
+                // persistence is best effort
+              }
+            }
             if (store !== undefined && store.finishTurn !== undefined) {
               try {
-                await store.finishTurn(session.id, turnRowId, "aborted");
+                await store.finishTurn(session.id, turnRowId, isAbort ? "aborted" : "error");
               } catch {
                 // settle-sync is best effort
               }
             }
             if (!sawError && !controller.signal.aborted) {
               const e = err as { code?: string; message?: string };
-              await emitToStream({
+              const envelope = {
                 id: 0,
                 type: "error",
                 version: 1,
@@ -1254,7 +1305,11 @@ export function createHttpServer(deps: HttpDeps): Server {
                   message: e.message ?? String(err),
                   ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
                 },
-              } as SseEnvelope);
+              } as SseEnvelope;
+              // Persist the synthesized terminal event (like `turn.aborted`)
+              // so `turn.get` replays it even when no `error` was emitted.
+              await persistEvent(envelope);
+              await emitToStream(envelope);
             }
             if (controller.signal.aborted && turnStarted) {
               const envelope = {

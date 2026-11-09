@@ -205,14 +205,12 @@ beforeAll(async () => {
         bus.emit(`session:${sessionId}`, ev);
       },
     };
-    const healed: string[] = [];
     try {
       await new TurnEngine(sink).run(activeClientFactory(), "fake", messages, tools, {
         sessionId,
         ...(ctx.signal ? { signal: ctx.signal } : {}),
         isAborted: () => ctx.signal?.aborted === true,
         abortReason: "turn aborted by operator",
-        onHeal: (ids) => void healed.push(...ids),
         onUsage: (u) => usageBySession.set(sessionId, u),
       });
       if (messages.length > startLen) {
@@ -222,16 +220,21 @@ beforeAll(async () => {
         .finishTurn(sessionId, turnRowId, "finished", usageBySession.get(sessionId))
         .catch(() => {});
     } catch (err) {
-      // Mirror serve.ts's failure policy: an operator abort persists the
-      // turn's batch (prompt + any healed stubs) so resume sees it; other
-      // failures persist only when the unwind healed stubs.
+      // Mirror serve.ts's failure policy (yog#42): any failure persists
+      // the partial batch (prompt + healed stubs), abort settling as
+      // `aborted` and provider failure as `error`.
       const isOperatorAbort =
         ctx.signal?.aborted === true || (err instanceof Error && err.name === "AbortError");
-      if ((isOperatorAbort || healed.length > 0) && messages.length > startLen) {
+      if (messages.length > startLen) {
         await store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
       }
       await store
-        .finishTurn(sessionId, turnRowId, "aborted", usageBySession.get(sessionId))
+        .finishTurn(
+          sessionId,
+          turnRowId,
+          isOperatorAbort ? "aborted" : "error",
+          usageBySession.get(sessionId),
+        )
         .catch(() => {});
     }
     return { turnId };

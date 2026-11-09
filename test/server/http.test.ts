@@ -191,28 +191,49 @@ describe("turn on the session stream", () => {
       expect(f.data.type).toBe(f.event);
   });
 
-  it("provider error → error event", async () => {
+  it("provider error → error event, and the failed turn persists marked `error` (yog#42)", async () => {
+    const store = await SessionStore.open(join(tmpdir(), `yog-provider-${Date.now()}.db`));
     const opts: DaemonOptions = {
       host: "127.0.0.1",
       port: 0,
       deps: {
         capabilities: { contractVersion: "v1", models: [], tools: [], features: [] },
         model: fakeModel("provider-error"),
+        store,
       },
     };
     const d = await createDaemon(opts);
     try {
       const { session } = await json(await fetch(`${d.url}/v1/sessions`, { method: "POST" }));
-      const stream = await openStream(d.url, session.id);
-      const res = await sendMessage(d.url, session.id, "turn.start", { prompt: "boom" });
+      const sid = session.id as string;
+      const stream = await openStream(d.url, sid);
+      const res = await sendMessage(d.url, sid, "turn.start", { prompt: "boom" });
       expect(res.status).toBe(202);
       const frames = await stream.collectUntil((fs) => fs.some((f) => f.event === "error"), 10_000);
       stream.abort();
       const err = frames.find((f) => f.event === "error");
       expect(err).toBeDefined();
       expect(err!.data.data.code).toBe("provider_error");
+      // Wait for the background settle, then assert the persisted dump.
+      await new Promise<void>((resolve) => {
+        const deadline = Date.now() + 3000;
+        const tick = async (): Promise<void> => {
+          const turns = await store.listTurns(sid);
+          if (turns.at(-1)?.status !== "running" || Date.now() > deadline) {
+            resolve();
+            return;
+          }
+          setTimeout(() => void tick(), 25);
+        };
+        void tick();
+      });
+      const dump = ((await (await sendMessage(d.url, sid, "transcript.get")).json()) as any).data;
+      expect(dump.messages.map((m: any) => m.role)).toEqual(["user"]);
+      expect(dump.messages[0].content).toBe("boom");
+      expect(dump.turns?.at(-1)?.status).toBe("error");
     } finally {
       await d.close();
+      store.close();
     }
   });
 

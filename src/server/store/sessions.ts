@@ -486,7 +486,7 @@ export class SessionStore {
   /**
    * Per-turn metrics for the transcript dump (§R1.3): ordered by turn id,
    * each entry carries the persisted usage when known — falling back to the
-   * stored `turn.finished` event usage for turns completed before usage
+   * stored terminal event usage for turns completed before usage
    * columns existed (recovery replay) — plus the settled duration when the
    * turn finished. Best-effort: turns with neither usage nor duration are
    * omitted, so old volumes simply show no per-turn metrics.
@@ -495,13 +495,14 @@ export class SessionStore {
     sessionId: string,
   ): Promise<Array<{ turnId: number; usage?: TurnUsage; durationMs?: number }>> {
     const rows = await this.db("turns").where("session_id", sessionId).orderBy("id");
-    // Fallback source: usage embedded in the stored `turn.finished` event
+    // Fallback source: usage embedded in the stored terminal event
     // payloads (pre-column sessions and the model-provider fallback path,
     // which never settles turn rows).
     const events = await this.listEvents(sessionId);
     const eventUsage = new Map<number, TurnUsage>();
     for (const ev of events) {
-      if (ev.type !== "turn.finished" && ev.type !== "turn.aborted") continue;
+      if (ev.type !== "turn.finished" && ev.type !== "turn.aborted" && ev.type !== "error")
+        continue;
       // Event payloads are stored double-encoded (addEvent receives the
       // JSON string of the event data and stringifies it again), so the
       // parsed row payload may itself be a JSON string — unwrap it.

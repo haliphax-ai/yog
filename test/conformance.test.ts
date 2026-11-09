@@ -391,15 +391,16 @@ describe("conformance: error-code mapping", () => {
     }
   });
 
-  it("provider failure surfaces as a terminal SSE error event (provider_error → 502 semantics)", async () => {
+  it("provider failure surfaces as a terminal SSE error event (provider_error → 502 semantics) and persists the failed turn (yog#42)", async () => {
     const providerStore = await SessionStore.open(
       join(tmpdir(), `yog-conf-provider-${Date.now()}.db`),
     );
     const d = await createDaemon(optsWith(fakeModel("provider-error"), providerStore));
     try {
       const created = await json(await fetch(`${d.url}/v1/sessions`, { method: "POST" }));
-      const stream = await openStream(d.url, created.session.id);
-      const res = await sendMessage(d.url, created.session.id, "turn.start", { prompt: "boom" });
+      const sid = created.session.id as string;
+      const stream = await openStream(d.url, sid);
+      const res = await sendMessage(d.url, sid, "turn.start", { prompt: "boom" });
       expect(res.status).toBe(202); // accepted; failure is in-band on the stream
       const frames = await stream.collectUntil((fs) => fs.some((f) => f.event === "error"), 10_000);
       stream.abort();
@@ -407,8 +408,37 @@ describe("conformance: error-code mapping", () => {
       expect(err).toBeDefined();
       expect(err!.data.data.code).toBe("provider_error");
       expect(err!.data.code).toBe("provider_error");
+      // Wait for the background settle (persist + finishTurn) to land.
+      await new Promise<void>((resolve) => {
+        const deadline = Date.now() + 3000;
+        const tick = async (): Promise<void> => {
+          const turns = await providerStore.listTurns(sid);
+          if (turns.at(-1)?.status !== "running" || Date.now() > deadline) {
+            resolve();
+            return;
+          }
+          setTimeout(() => void tick(), 25);
+        };
+        void tick();
+      });
+      // The failed turn is in the rehydration dump, marked `error` — no
+      // rewind to the prior turn on reload.
+      const dump = ((await (await sendMessage(d.url, sid, "transcript.get")).json()) as any).data;
+      expect(dump.messages.map((m: any) => m.role)).toEqual(["user"]);
+      expect(dump.messages[0].content).toBe("boom");
+      expect(dump.turns?.at(-1)?.status).toBe("error");
+      const turns = await providerStore.listTurns(sid);
+      expect(turns.at(-1)?.status).toBe("error");
+      // `turn.get` recovery reports the same failed status and replays
+      // the terminal `error` event.
+      const rec = (
+        (await (await sendMessage(d.url, sid, "turn.get", { turnId: "1" })).json()) as any
+      ).data;
+      expect(rec.turn.status).toBe("error");
+      expect(rec.turn.events.some((e: any) => e.type === "error")).toBe(true);
     } finally {
       await d.close();
+      providerStore.close();
     }
   }, 15_000);
 });
