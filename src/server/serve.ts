@@ -326,12 +326,14 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         }
       }
 
-      // Nothing is persisted up front: the transcript only ever contains
-      // complete turns (§4.4). The success path below persists
-      // `messages.slice(startLen)` — which includes this turn's user prompt —
-      // in one appendMessages call, so a failed turn persists nothing
-      // (its event log is diagnostic and stays) and a successful turn leaves
-      // no duplicated user row behind.
+      // Nothing is persisted up front: the batch (`messages.slice(startLen)`
+      // — this turn's user prompt plus every completed round) is persisted
+      // in one appendMessages call at settle time, whether the turn
+      // succeeded, was aborted, or failed with a provider error. A failed
+      // turn therefore shows up in `transcript.get` up to the failure point
+      // (yog#42: reloads no longer rewind to the prior turn), with any
+      // announced-but-unanswered tool calls already healed by the engine —
+      // and a successful turn leaves no duplicated user row behind.
       let turnId: string | null = null;
       let liveUsage: TurnUsage | undefined;
       usageBySession.set(sessionId, undefined);
@@ -361,9 +363,9 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
           bus.emit(`session:${sessionId}`, envelope);
         },
       };
-      // Tool-call ids the engine stubbed during the unwind (heal path). Only
-      // a turn that healed carries persistable content on failure.
-      const healedIds: string[] = [];
+      // (The engine heals announced-but-unanswered tool calls before
+      // throwing, so the batch persisted in the catch below already
+      // carries the stubs and stays hydratable.)
       const turnOpts: TurnOptions = {
         sessionId,
         ...(state ? { recorder: { record: (rec) => state!.recordToolCall(rec) } } : {}),
@@ -376,18 +378,14 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
           liveUsage = u;
           usageBySession.set(sessionId, u);
         },
-        onHeal: (ids) => void healedIds.push(...ids),
         maxRounds: config.maxRoundsPerTurn,
         ...(modelInfo ? { contextWindow: modelInfo.getContextWindow(model) ?? undefined } : {}),
       };
       try {
         await new TurnEngine(sink).run(client, model, messages, tools, turnOpts);
         // On success, persist everything this turn produced (§4.4): the
-        // transcript only ever contains complete turns — the batch starts at
-        // this turn's user prompt (`startLen` was captured before it, so the
-        // slice includes it). A failed turn persists nothing: the catch is a
-        // no-op for the transcript and a retry replays from the last turn
-        // boundary.
+        // batch starts at this turn's user prompt (`startLen` was captured
+        // before it, so the slice includes it).
         if (store && messages.length > startLen) {
           try {
             await store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
@@ -399,21 +397,31 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         // turn, never a gate on the stream's success.
         await store?.finishTurn?.(sessionId, turnRowId, "finished", liveUsage).catch(() => {});
       } catch (err) {
-        // An operator abort persists that batch so the user prompt and
-        // completed tool calls survive for resume (the turn row still
-        // settles as aborted); other failures stay transient. The signal is
-        // the authoritative abort marker: mid-model-stream the engine
-        // rethrows the provider's raw abort error, not an `AbortError`.
+        // Any failure persists the partial batch exactly like an abort
+        // (yog#42): the user prompt and every completed round — with the
+        // engine's healed stubs for unanswered tool calls — survive for
+        // `transcript.get` and for the next turn's hydrate, instead of
+        // rewinding to the prior turn. The row settles as `aborted` for an
+        // operator abort and as `error` for a provider failure, so
+        // `transcript.get`/`turn.get` consumers can tell them apart. The
+        // signal is the authoritative abort marker: mid-model-stream the
+        // engine rethrows the provider's raw abort error, not an
+        // `AbortError`.
         const isOperatorAbort =
           ctx.signal?.aborted === true || (err instanceof Error && err.name === "AbortError");
-        if ((isOperatorAbort || healedIds.length > 0) && store && messages.length > startLen) {
+        // The batch is persisted unconditionally on failure: `messages`
+        // carries the user prompt, completed rounds, and (via the heal
+        // path) stubs for any dangling tool calls.
+        if (store && messages.length > startLen) {
           try {
             await store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
           } catch {
             // persistence is best effort
           }
         }
-        await store?.finishTurn?.(sessionId, turnRowId, "aborted", liveUsage).catch(() => {});
+        await store
+          ?.finishTurn?.(sessionId, turnRowId, isOperatorAbort ? "aborted" : "error", liveUsage)
+          .catch(() => {});
       }
       return { turnId };
     };

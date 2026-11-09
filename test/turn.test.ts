@@ -285,6 +285,59 @@ describe("TurnEngine failure handling", () => {
     expect(sink.events.some((e) => e.type === "error")).toBe(false);
     expect(sink.events.some((e) => e.type === "turn.aborted")).toBe(false);
   });
+
+  it("heals announced-but-unanswered calls on a provider failure mid-stream (yog#42)", async () => {
+    // A 429 landing mid-stream, after the model announced a tool call
+    // but before the round completed: the heal path reconstructs the
+    // assistant row and stubs the call, so the persisted batch stays
+    // hydratable for the next turn (providers reject dangling calls).
+    const sink = new RecordingSink();
+    const messages = userMessages();
+    const midStream429: OpenAI = {
+      chat: {
+        completions: {
+          create: async () =>
+            (async function* () {
+              yield {
+                choices: [
+                  {
+                    delta: {
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: "call_429mid",
+                          function: { name: "echo", arguments: '{"text":"hi"}' },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              };
+              throw new Error("429 rate limited");
+            })(),
+        },
+      },
+    } as unknown as OpenAI;
+    const healed: string[] = [];
+    await expect(
+      new TurnEngine(sink).run(midStream429, "test-model", messages, registry, {
+        sessionId: "provider-mid-stream",
+        onHeal: (ids) => void healed.push(...ids),
+      }),
+    ).rejects.toThrow("429 rate limited");
+    expect(sink.events.map((e) => e.type)).toEqual(["turn.started", "error"]);
+    if (sink.events[1]?.type === "error") {
+      expect(sink.events[1].data.code).toBe("provider_error");
+    }
+    // Reconstructed assistant row + healed stub, no dangling calls.
+    expect(messages.map((m) => m.role)).toEqual(["user", "assistant", "tool"]);
+    expect(healed).toEqual(["call_429mid"]);
+    const assistant = messages[1] as { tool_calls?: Array<{ id?: string }> };
+    expect(assistant.tool_calls?.[0]?.id).toBe("call_429mid");
+    const stub = messages[2] as { tool_call_id?: string; content?: string };
+    expect(stub.tool_call_id).toBe("call_429mid");
+    expect(stub.content).toContain('"error"');
+  });
 });
 
 describe("TurnEngine maxRounds cap", () => {

@@ -96,6 +96,18 @@ When the model reported usage before the cut, the aborted envelope carries it
 row persists it too for recovery/replay. Terminal `error` envelopes include the
 same optional `usage` when any was captured.
 
+**Provider failure.** A provider error mid-turn (a 429, a timeout, or any
+other non-abort failure) persists the partial batch exactly like an abort
+(yog#42): the user prompt and every completed round — with any
+announced-but-unanswered tool calls healed to stub `tool` messages — land
+in `transcript.get`, so quitting and reopening no longer rewinds to the
+prior turn. The turn row settles as `error` (not `aborted`), and that same
+status rides the `turns[]` entries of `transcript.get` and `turn.get`'s
+`turn.status`, so a client rehydrating from the dump can mark the failed
+turn distinctly from an operator abort. Persisting the partial output
+does not resume execution: the next turn is a fresh turn that hydrates
+the healed transcript.
+
 **Deltas are disposable; terminal states are authoritative.** If the SSE
 connection dies mid-turn, the client reads the `turnId` from `turn.started`
 and recovers the terminal state from `turn.get` — it returns the
@@ -106,7 +118,7 @@ envelope for an unknown session/turn.
 
 A disconnect detaches the stream, not the turn (yog#31): the engine runs the
 turn to its terminal state (events keep persisting, the turn row settles
-`finished`/`aborted` as usual), and the terminal state stays replayable from
+`finished`/`aborted`/`error` as usual), and the terminal state stays replayable from
 `turn.get` — rehydrate from the transcript on the next connect. This is how a
 UI quit, crash, or power loss mid-turn keeps the turn alive: the server owns
 the turn, not the socket.
@@ -122,8 +134,10 @@ remains the way to stop a turn.
 `{ session, messages, turns? }` where each message is
 `{ seq, turnId, ts, role, content, toolCallId?, name?, toolCalls?, usage?, promptDelta?, resultTokens? }` —
 monotonic `seq` per session, in conversation order. The optional `turns`
-array carries per-turn metrics `{ turnId, usage?, durationMs? }` (usage only
-when the provider reported it), so a client can rebuild per-turn token
+array carries per-turn metrics `{ turnId, status, usage?, durationMs? }` (usage only
+when the provider reported it; `status` is the settle status — `finished`,
+`aborted`, `error`, or `interrupted`, plus `running` for an in-flight turn),
+so a client can rebuild per-turn token
 summaries without replaying events; a tool row's `usage` / `promptDelta` are
 the round attribution already carried by the live `tool.result` envelope, so
 rehydration renders the same per-result counts; `resultTokens` rides each tool

@@ -6,7 +6,7 @@ import { createDaemon, type DaemonOptions } from "../../src/server/serve.ts";
 import type { Daemon } from "../../src/server/serve.ts";
 import { SessionStore } from "../../src/server/store/sessions.ts";
 import { newSessionId } from "../../src/state/index.ts";
-import { runTurnToEnd, sendMessage } from "../messages-helper.ts";
+import { openStream, runTurnToEnd, sendMessage } from "../messages-helper.ts";
 
 /** Fake model that captures the `messages` argument it receives. */
 function capturingModel() {
@@ -147,7 +147,7 @@ describe("executeTurn (http fallback hydrate/persist path — model dep, no orch
     expect(tb.some((m: any) => m.content === "alpha")).toBe(false);
   });
 
-  it("persists nothing on a failed turn", async () => {
+  it("persists the failed turn's rows on a provider failure (yog#42: no rewind)", async () => {
     const sessionRes = await fetch(`${base}/v1/sessions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -158,11 +158,31 @@ describe("executeTurn (http fallback hydrate/persist path — model dep, no orch
     const before = await store.getTranscript(sid);
     expect(before).toHaveLength(0);
 
+    // A realistic 429 mid-turn: promise rejection, no terminal emit first
+    // (the synthesized `error` envelope is the adapter's job).
     const failModel = {
-      captured: [] as any[],
-      async runTurn() {
-        this.captured.push({ messages: [], prompt: "fail", model: "fake" });
-        throw new Error("boom");
+      async runTurn(_sessionId: string, req: any, ctx: { emit: (ev: any) => Promise<void> }) {
+        await ctx.emit({
+          id: 1,
+          type: "turn.started",
+          version: 1,
+          ts: Date.now(),
+          data: { turnId: "t-fail-1", model: "fake", ts: Date.now() },
+        });
+        // Simulate a partial tool round landing in the transcript before
+        // the failure: an assistant row announcing a call that never
+        // gets its `tool` answer (the heal path must stub it).
+        const messages = Array.isArray(req?.messages) ? req.messages : [];
+        messages.push({
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "call_fail", type: "function", function: { name: "bash", arguments: "{}" } },
+          ],
+        });
+        const err = new Error("429 rate limited") as Error & { code?: string };
+        err.code = "rate_limited";
+        throw err;
       },
     };
     const failDaemon = await createDaemon({
@@ -180,14 +200,44 @@ describe("executeTurn (http fallback hydrate/persist path — model dep, no orch
       },
     });
     try {
+      const stream = await openStream(failDaemon.url, sid);
       const r = await sendMessage(failDaemon.url, sid, "turn.start", { prompt: "fail" });
       expect(r.status).toBe(202);
       await r.json();
+      const frames = await stream.collectUntil((fs) => fs.some((f) => f.event === "error"), 10_000);
+      stream.abort();
+      const errFrame = frames.find((f) => f.event === "error");
+      expect(errFrame).toBeDefined();
+      expect(errFrame!.data.data.code).toBe("rate_limited");
+      // Wait for the terminal settle (persist + finishTurn) to land before
+      // asserting — the turn runs in the background (202 at once).
+      await new Promise<void>((resolve) => {
+        const deadline = Date.now() + 3000;
+        const tick = async (): Promise<void> => {
+          const turns = await store.listTurns(sid);
+          if (turns.at(-1)?.status !== "running" || Date.now() > deadline) {
+            resolve();
+            return;
+          }
+          setTimeout(() => void tick(), 25);
+        };
+        void tick();
+      });
     } finally {
       await failDaemon.close();
     }
 
+    const turns = await store.listTurns(sid);
+    expect(turns.at(-1)?.status).toBe("error");
+    expect(turns.at(-1)?.finished_at).not.toBeNull();
     const after = await store.getTranscript(sid);
-    expect(after).toHaveLength(0);
+    // The failed turn no longer rewinds: prompt + assistant announcement +
+    // healed stub all survive (`transcript.get` returns only persisted
+    // rows, so this is exactly the rehydrate dump's content).
+    expect(after.map((m: any) => m.role)).toEqual(["user", "assistant", "tool"]);
+    expect(after[0]?.content).toBe("fail");
+    expect(after[1]?.tool_calls?.[0]?.id).toBe("call_fail");
+    expect(after[2]?.tool_call_id).toBe("call_fail");
+    expect(JSON.parse(after[2]?.content ?? "{}")).toMatchObject({ error: expect.any(String) });
   });
 });

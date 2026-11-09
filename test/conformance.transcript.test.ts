@@ -295,4 +295,134 @@ describe("conformance: transcript (server-owned conversation)", () => {
     }
     expect(paged).toEqual([1, 2, 3, 4, 5, 6]);
   });
+
+  it("failed turn stays in the dump, marked `error`, with healed stubs — reloads do not rewind (yog#42)", async () => {
+    // Own daemon + store: the scripted model succeeds on turn 1, then
+    // 429s mid-turn on turn 2 after announcing a tool call it never
+    // answers (the heal path must stub it), and succeeds again on
+    // turn 3 (proving the failed turn hydrates cleanly).
+    const seen: any[][] = [];
+    let calls = 0;
+    const flakyModel = {
+      async runTurn(_sessionId: string, req: any, ctx: { emit: (ev: any) => Promise<void> }) {
+        calls += 1;
+        const messages = Array.isArray(req?.messages) ? req.messages : [];
+        seen.push(messages);
+        const turnId = `turn-flaky-${calls}`;
+        await ctx.emit({
+          id: 1,
+          type: "turn.started",
+          version: 1,
+          ts: Date.now(),
+          data: { turnId, model: "conf-transcript-model", ts: Date.now() },
+        });
+        if (calls === 2) {
+          messages.push({
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              { id: "call_429", type: "function", function: { name: "bash", arguments: "{}" } },
+            ],
+          });
+          const err = new Error("429 rate limited") as Error & { code?: string };
+          err.code = "rate_limited";
+          throw err;
+        }
+        const text = `answer ${calls}`;
+        await ctx.emit({
+          id: 2,
+          type: "message.delta",
+          version: 1,
+          ts: Date.now(),
+          data: { text },
+        });
+        await ctx.emit({
+          id: 3,
+          type: "turn.finished",
+          version: 1,
+          ts: Date.now(),
+          data: { turnId, durationMs: 1 },
+        });
+        messages.push({ role: "assistant", content: text });
+      },
+    };
+    const flakyStore = await SessionStore.open(join(tmpdir(), `yog-conf-flaky-${Date.now()}.db`));
+    const flaky = await createDaemon({
+      host: "127.0.0.1",
+      port: 0,
+      deps: { capabilities: CAPABILITIES, model: flakyModel as any, store: flakyStore },
+    });
+    try {
+      const created = await fetch(`${flaky.url}/v1/sessions`, { method: "POST" });
+      const { session } = await json(created);
+      const sid = session.id as string;
+      const run = async (prompt: string): Promise<void> => {
+        const { startRes, abort } = await runTurnToEnd(flaky.url, sid, { prompt });
+        abort();
+        expect(startRes.status).toBe(202);
+      };
+      // Turn 1 succeeds; turn 2 429s mid-turn; turn 3 succeeds again.
+      await run("first");
+      await run("second");
+      // Wait for the failed turn's settle before dumping.
+      await new Promise<void>((resolve) => {
+        const deadline = Date.now() + 3000;
+        const tick = async (): Promise<void> => {
+          const turns = await flakyStore.listTurns(sid);
+          if (turns.length >= 2 && turns.at(-1)?.status !== "running") {
+            resolve();
+            return;
+          }
+          if (Date.now() > deadline) {
+            resolve();
+            return;
+          }
+          setTimeout(() => void tick(), 25);
+        };
+        void tick();
+      });
+      const dumpRes = await sendMessage(flaky.url, sid, "transcript.get");
+      expect(dumpRes.status).toBe(200);
+      const dump = ((await json(dumpRes)) as any).data;
+      // Turn 1 (user, assistant) + failed turn 2 (user, assistant with
+      // tool_calls, healed tool stub) — the dump does not rewind.
+      expect(dump.messages.map((m: any) => m.role)).toEqual([
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "tool",
+      ]);
+      expect(dump.messages[0].content).toBe("first");
+      expect(dump.messages[1].content).toBe("answer 1");
+      expect(dump.messages[2].content).toBe("second");
+      expect(dump.messages[3].toolCalls?.[0]?.id).toBe("call_429");
+      expect(dump.messages[4].toolCallId).toBe("call_429");
+      expect(dump.messages[4].content).toContain("error");
+      expect(dump.turns?.map((t: any) => t.status)).toEqual(["finished", "error"]);
+      // Turn 3: the next hydrate replays the failed turn's rows (stub
+      // included) — providers never see a dangling tool call.
+      await run("third");
+      expect(seen.length).toBe(3);
+      const thirdHydrate = seen[2]!;
+      expect(
+        thirdHydrate.some((m: any) => m.role === "tool" && m.tool_call_id === "call_429"),
+      ).toBe(true);
+      const afterRes = await sendMessage(flaky.url, sid, "transcript.get");
+      const after = ((await json(afterRes)) as any).data;
+      expect(after.messages.map((m: any) => m.role)).toEqual([
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "tool",
+        "user",
+        "assistant",
+      ]);
+      expect(after.turns?.map((t: any) => t.status)).toEqual(["finished", "error", "finished"]);
+    } finally {
+      await flaky.close();
+      flakyStore.close();
+    }
+  }, 15_000);
 });
