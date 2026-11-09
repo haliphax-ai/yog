@@ -52,7 +52,7 @@ export const YogConfigSchema = z
     apiToken: z.string().min(1).optional(),
     /** Store queries slower than this (ms) are logged (log-only tripwire). */
     dbSlowMs: z.number().int().min(0).default(50),
-    /** State root: `sessions.db` + `agentfs/<agentId>.db`. */
+    /** State root: `sessions.db` + `agentfs/<agentId>.db` + `harness/<sessionId>`. */
     stateRoot: z.string().min(1).default("/var/lib/yog"),
     /** Full-path override for the agent state db (wins over `stateRoot`). */
     statePath: z.string().min(1).optional(),
@@ -103,14 +103,6 @@ export const YogConfigSchema = z
     agentUid: z.number().int().min(1).default(DEFAULT_AGENT_UID),
     agentGid: z.number().int().min(1).default(DEFAULT_AGENT_GID),
     agentHome: z.string().min(1).default("/home/agent"),
-    /**
-     * Persistent shell snapshot directory handed to the bash tool. May be
-     * relative — the worker resolves it against the agent's HOME (see
-     * `resolveStateDir` in the worker layer), never against the script's
-     * cwd: the shell-state capture trap runs at the shell's final directory
-     * (after the script's own `cd`), so a relative dir must not ride on it.
-     */
-    agentStateDir: z.string().min(1).optional(),
   })
   .strict();
 

@@ -140,7 +140,8 @@ export class WorkerClient {
   /**
    * Run a script in the worker's persistent shell. `stateDir` selects where
    * the shell-state snapshot lives (and therefore whether cwd/export/function
-   * changes persist into later calls).
+   * changes persist into later calls). The daemon supplies the per-session
+   * directory (`<stateRoot>/harness/<sessionId>`).
    */
   runBash(
     script: string,

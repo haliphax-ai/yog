@@ -51,7 +51,7 @@ export interface ToolExecuteContext {
   isAborted?: () => boolean;
   /** Owning session id — forwarded to the tool as the abort key. */
   sessionId?: string;
-  /** Persistent-state directory handed to the tool (bash shell snapshots). */
+  /** Explicit persistent-state override (bash shell snapshots); the daemon path derives it per session. */
   stateDir?: string;
   /** Fired just before the tool runs. */
   onStart?: (call: ToolCall) => void;

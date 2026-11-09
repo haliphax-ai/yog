@@ -1,8 +1,16 @@
 import { afterAll, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentFSState, newSessionId, stateDbPath } from "../src/state/index.ts";
+import {
+  AgentFSState,
+  HARNESS_STATE_RETENTION_DAYS,
+  harnessStateDir,
+  harnessStateRoot,
+  newSessionId,
+  pruneStaleHarnessState,
+  stateDbPath,
+} from "../src/state/index.ts";
 
 const dirs: string[] = [];
 
@@ -173,5 +181,88 @@ describe("AgentFSState", () => {
     });
     await expect(reopened.loadShellSnapshot("nope")).resolves.toBeUndefined();
     await reopened.close();
+  });
+});
+
+describe("per-session harness state", () => {
+  it("derives the harness dir under the state root, keyed by session", () => {
+    expect(harnessStateRoot("/srv/yog")).toBe("/srv/yog/harness");
+    expect(harnessStateRoot()).toBe("/var/lib/yog/harness");
+    expect(harnessStateDir("sess-1", "/srv/yog")).toBe("/srv/yog/harness/sess-1");
+    expect(harnessStateDir("daemon")).toBe("/var/lib/yog/harness/daemon");
+    expect(harnessStateDir("a", "/srv/yog")).not.toBe(harnessStateDir("b", "/srv/yog"));
+    expect(HARNESS_STATE_RETENTION_DAYS).toBe(7);
+  });
+
+  it("rejects session ids that would escape the harness root", () => {
+    for (const bad of ["", ".", "..", "../evil", "a/b", "a\\b", "a\0b"]) {
+      expect(() => harnessStateDir(bad, "/srv/yog")).toThrow(/invalid session id/);
+    }
+  });
+
+  it("prunes only directories untouched for over 7 days", async () => {
+    const root = await tempDir();
+    const harnessRoot = harnessStateRoot(root);
+    const oldDir = harnessStateDir("old-session", root);
+    const freshDir = harnessStateDir("fresh-session", root);
+    const activeDir = harnessStateDir("active-session", root);
+    await mkdir(oldDir, { recursive: true });
+    await mkdir(freshDir, { recursive: true });
+    await mkdir(activeDir, { recursive: true });
+    await writeFile(join(oldDir, "env"), "export OLD=1\n");
+    await writeFile(join(freshDir, "env"), "export FRESH=1\n");
+    await writeFile(join(activeDir, "env"), "export ACTIVE=1\n");
+    // A stray file in the harness root is not a harness record.
+    await writeFile(join(harnessRoot, "stray.txt"), "keep me");
+
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+    await utimes(oldDir, eightDaysAgo, eightDaysAgo);
+    await utimes(join(oldDir, "env"), eightDaysAgo, eightDaysAgo);
+    // Fresh dir's dir mtime is old, but its env file was touched now:
+    // the newest file wins, so it survives (wrapper rewrites env per call).
+    await utimes(freshDir, eightDaysAgo, eightDaysAgo);
+
+    const pruned = await pruneStaleHarnessState(root);
+    expect(pruned).toEqual(["old-session"]);
+    await expect(pruneStaleHarnessState(root)).resolves.toEqual([]);
+  });
+
+  it("treats a missing harness root as nothing to prune", async () => {
+    const root = await tempDir();
+    await expect(pruneStaleHarnessState(root)).resolves.toEqual([]);
+  });
+
+  it("prunes stale shell-snapshot mirrors but keeps fresh and non-shell rows", async () => {
+    const dir = await tempDir();
+    const state = await AgentFSState.open({ path: join(dir, "home.db") });
+    await state.saveShellSnapshot("old", { cwd: "/tmp", env: "old", functions: "" });
+    await state.saveShellSnapshot("fresh", { cwd: "/tmp", env: "fresh", functions: "" });
+    // Backdate the old row past the 7-day cutoff (kv updated_at is
+    // unixepoch seconds, refreshed on set).
+    const oldSec = Math.floor(Date.now() / 1000) - 8 * 24 * 60 * 60;
+    await state
+      .getDatabase()
+      .prepare("UPDATE kv_store SET updated_at = ? WHERE key = 'session:old:shell'")
+      .run(oldSec);
+    // A non-shell kv row must survive even when stale.
+    await state
+      .getDatabase()
+      .prepare("INSERT INTO kv_store (key, value, updated_at) VALUES ('other', '\"x\"', ?)")
+      .run(oldSec);
+
+    await state.pruneStaleShellSnapshots();
+
+    await expect(state.loadShellSnapshot("old")).resolves.toBeUndefined();
+    await expect(state.loadShellSnapshot("fresh")).resolves.toEqual({
+      cwd: "/tmp",
+      env: "fresh",
+      functions: "",
+    });
+    const other = (await state
+      .getDatabase()
+      .prepare("SELECT value FROM kv_store WHERE key = 'other'")
+      .get()) as { value?: unknown } | undefined;
+    expect(other).toBeDefined();
+    await state.close();
   });
 });

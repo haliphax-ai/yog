@@ -23,7 +23,9 @@ export interface BashRunRequest {
   readonly script: string;
   /**
    * Directory where the persistent shell state (cwd + env + functions) is
-   * snapshotted. Omitted to use the worker's default (`.harness`).
+   * snapshotted. The daemon always supplies the per-session directory
+   * (`<stateRoot>/harness/<sessionId>`); omitted only for direct worker
+   * callers (tests), which fall back to the worker's `<HOME>/.harness`.
    */
   readonly stateDir?: string;
   /**

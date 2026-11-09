@@ -20,7 +20,11 @@ export interface WorkerPoolOptions {
 }
 
 export interface WorkerPoolRunOptions {
-  /** Directory where the session's persistent shell state is snapshotted. */
+  /**
+   * Directory where the session's persistent shell state is snapshotted.
+   * The daemon supplies the per-session directory
+   * (`<stateRoot>/harness/<sessionId>`); omitted only by direct callers.
+   */
   readonly stateDir?: string;
   /** Prior snapshot to restore into the state dir before running. */
   readonly restore?: Partial<ShellSnapshot>;

@@ -22,6 +22,7 @@ fi
 
 __h_capture() {
   mkdir -p "$HARNESS_STATE_DIR"
+  chmod 0775 "$HARNESS_STATE_DIR" 2>/dev/null
   pwd -P > "$HARNESS_STATE_DIR/cwd.tmp" 2>/dev/null && mv -f "$HARNESS_STATE_DIR/cwd.tmp" "$HARNESS_STATE_DIR/cwd" 2>/dev/null
   {
     # No filtering here: the spawn env was already minimal, so this snapshot
@@ -69,12 +70,14 @@ eval "$1"
 `;
 
 /**
- * Resolve the shell-state directory to a fixed absolute path under the
- * agent's HOME. Relative values (e.g. the bare `.harness` default) must not
- * ride on the wrapper's cwd: the capture trap runs at the shell's *final*
- * cwd — after the script's own `cd` — so a relative dir would scatter the
- * snapshot across every directory the script visited. Absolute values pass
- * through untouched.
+ * Resolve the shell-state directory to a fixed absolute path. The daemon
+ * always supplies the absolute per-session directory
+ * (`<stateRoot>/harness/<sessionId>`), which passes through untouched.
+ * Relative values (e.g. the bare `.harness` fallback for direct worker
+ * callers) resolve against the agent's HOME and must not ride on the
+ * wrapper's cwd: the capture trap runs at the shell's *final* cwd —
+ * after the script's own `cd` — so a relative dir would scatter the
+ * snapshot across every directory the script visited.
  */
 export function resolveStateDir(stateDir: string | undefined, agentHome: string): string {
   const raw = stateDir ?? ".harness";

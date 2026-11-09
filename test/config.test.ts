@@ -32,6 +32,9 @@ describe("YogConfigSchema", () => {
 
   it("rejects unknown fields and out-of-range values", () => {
     expect(YogConfigSchema.safeParse({ nope: true }).success).toBe(false);
+    // `agentStateDir` was removed: the harness dir is derived per session
+    // under `stateRoot` (`harness/<sessionId>`) and is not configurable.
+    expect(YogConfigSchema.safeParse({ agentStateDir: "/tmp/x" }).success).toBe(false);
     expect(YogConfigSchema.safeParse({ port: 70000 }).success).toBe(false);
     expect(YogConfigSchema.safeParse({ port: "8111" }).success).toBe(false);
     expect(YogConfigSchema.safeParse({ maxRoundsPerTurn: 0 }).success).toBe(false);
