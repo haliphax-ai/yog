@@ -9,3 +9,5 @@ export { SessionOrchestrator } from "./orchestrator.ts";
 export type { SessionOrchestratorDeps, TurnHandle, TurnRequest } from "./orchestrator.ts";
 export { createDaemon } from "./serve.ts";
 export type { Daemon, DaemonOptions } from "./serve.ts";
+export { MESSAGE_TYPES, MESSAGE_VERSION, parseEnvelope } from "./messages.ts";
+export type { MessageEnvelope, MessageType } from "./messages.ts";

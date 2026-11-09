@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { bashTool, ToolRegistry, middleTruncate } from "../src/toolkit/index.ts";
 import { createDaemon } from "../src/server/serve.ts";
 import { TRUNCATION_IDENTIFIER, createShakeRunner } from "../src/server/shake.ts";
+import { sendMessage } from "./messages-helper.ts";
 
 const registry = new ToolRegistry([bashTool]);
 
@@ -208,7 +209,7 @@ describe("generic fallback without per-tool truncators", () => {
   });
 });
 
-describe("HTTP /shake route", () => {
+describe("transcript.shake message", () => {
   it("returns truncation counts from the boundary", async () => {
     const shake = vi.fn(async () => ({ argsTruncated: 2, resultsTruncated: 1, contextSize: 1234 }));
     const daemon = await createDaemon({
@@ -228,13 +229,11 @@ describe("HTTP /shake route", () => {
       const created = await fetch(daemon.url + "/v1/sessions", { method: "POST" });
       expect(created.status).toBe(201);
       const session = ((await created.json()) as { session: { id: string } }).session;
-      const res = await fetch(daemon.url + "/v1/sessions/" + session.id + "/shake", {
-        method: "POST",
-      });
+      const res = await sendMessage(daemon.url, session.id, "transcript.shake");
       expect(res.status).toBe(200);
       const body: any = await res.json();
-      expect(body).toMatchObject({
-        ok: true,
+      expect(body.type).toBe("transcript.shake");
+      expect(body.data).toMatchObject({
         argsTruncated: 2,
         resultsTruncated: 1,
         contextSize: 1234,

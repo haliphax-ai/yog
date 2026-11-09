@@ -6,6 +6,7 @@ import { createDaemon, type DaemonOptions } from "../../src/server/serve.ts";
 import type { Daemon } from "../../src/server/serve.ts";
 import { SessionStore } from "../../src/server/store/sessions.ts";
 import { newSessionId } from "../../src/state/index.ts";
+import { runTurnToEnd, sendMessage } from "../messages-helper.ts";
 
 /** Fake model that captures the `messages` argument it receives. */
 function capturingModel() {
@@ -73,7 +74,7 @@ beforeAll(async () => {
         contractVersion: "v1",
         models: ["fake-model"],
         tools: ["bash"],
-        features: ["sse"],
+        features: ["messages", "stream"],
       },
       store: store as any,
       model: model as any,
@@ -99,19 +100,13 @@ describe("executeTurn (http fallback hydrate/persist path — model dep, no orch
     const session = (await sessionRes.json()) as { session: { id: string } };
     const sid = session.session.id;
 
-    const r1 = await fetch(`${base}/v1/sessions/${sid}/turns`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: "hello" }),
-    });
-    await r1.text();
+    const r1 = await runTurnToEnd(base, sid, { prompt: "hello" });
+    r1.abort();
+    expect(r1.startRes.status).toBe(202);
 
-    const r2 = await fetch(`${base}/v1/sessions/${sid}/turns`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: "world" }),
-    });
-    await r2.text();
+    const r2 = await runTurnToEnd(base, sid, { prompt: "world" });
+    r2.abort();
+    expect(r2.startRes.status).toBe(202);
 
     const captured = model.captured as {
       messages: any[];
@@ -141,20 +136,10 @@ describe("executeTurn (http fallback hydrate/persist path — model dep, no orch
     const a = await mk();
     const b = await mk();
 
-    await (
-      await fetch(`${base}/v1/sessions/${a}/turns`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: "alpha" }),
-      })
-    ).text();
-    await (
-      await fetch(`${base}/v1/sessions/${b}/turns`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: "beta" }),
-      })
-    ).text();
+    const ra = await runTurnToEnd(base, a, { prompt: "alpha" });
+    ra.abort();
+    const rb = await runTurnToEnd(base, b, { prompt: "beta" });
+    rb.abort();
 
     const ta = await store.getTranscript(a);
     const tb = await store.getTranscript(b);
@@ -188,19 +173,16 @@ describe("executeTurn (http fallback hydrate/persist path — model dep, no orch
           contractVersion: "v1",
           models: ["fake-model"],
           tools: ["bash"],
-          features: ["sse"],
+          features: ["messages", "stream"],
         },
         store: store as any,
         model: failModel as any,
       },
     });
     try {
-      const r = await fetch(`${failDaemon.url}/v1/sessions/${sid}/turns`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: "fail" }),
-      });
-      await r.text();
+      const r = await sendMessage(failDaemon.url, sid, "turn.start", { prompt: "fail" });
+      expect(r.status).toBe(202);
+      await r.json();
     } finally {
       await failDaemon.close();
     }

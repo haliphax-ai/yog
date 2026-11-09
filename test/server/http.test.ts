@@ -6,27 +6,8 @@ import { createHttpServer } from "../../src/server/http.ts";
 import { SessionStore } from "../../src/server/store/sessions.ts";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { openStream, sendMessage } from "../messages-helper.ts";
 
-/** Minimal SSE frame parser: splits `event:`/`data:` blocks. */
-interface Frame {
-  event: string;
-  data: any;
-}
-
-function parseSse(text: string): Frame[] {
-  const frames: Frame[] = [];
-  for (const block of text.split("\n\n")) {
-    if (!block.trim()) continue;
-    let event = "";
-    let data = "";
-    for (const line of block.split("\n")) {
-      if (line.startsWith("event:")) event = line.slice(6).trim();
-      else if (line.startsWith("data:")) data += line.slice(5).trim();
-    }
-    if (event) frames.push({ event, data: JSON.parse(data) });
-  }
-  return frames;
-}
 /** `Response.json()` with a loose type: assertions do the checking. */
 async function json(res: Response): Promise<any> {
   return (await res.json()) as any;
@@ -119,7 +100,7 @@ beforeAll(async () => {
         contractVersion: "v1",
         models: ["fake-model"],
         tools: ["bash"],
-        features: ["sse"],
+        features: ["messages", "stream"],
       },
       contextWindowFor: (model: string) => (model === "fake-model" ? 64000 : undefined),
       model: fakeModel("happy"),
@@ -158,39 +139,43 @@ describe("session lifecycle", () => {
     const { session } = await json(created);
     expect(session.id).toBeTruthy();
 
-    const got = await fetch(`${base}/v1/sessions/${session.id}`);
+    const got = await sendMessage(base, session.id, "session.get");
     expect(got.status).toBe(200);
-    const statusBody = await json(got);
+    const statusBody = (await json(got)).data;
     expect(statusBody.session.status).toBe("open");
 
-    const del = await fetch(`${base}/v1/sessions/${session.id}`, { method: "DELETE" });
+    const del = await sendMessage(base, session.id, "session.detach");
     expect(del.status).toBe(200);
-    const after = await json(await fetch(`${base}/v1/sessions/${session.id}`));
+    const after = (await json(await sendMessage(base, session.id, "session.get"))).data;
+    // session.detach is a detach (§4.5): advisory dormant, revivable — no terminal closed state.
     // DELETE is a detach (§4.5): advisory dormant, revivable — no terminal closed state.
     expect(after.session.status).toBe("dormant");
     expect(after.session.detached_at).toBeTruthy();
   });
 
   it("unknown session → 404 with code unknown_session", async () => {
-    const res = await fetch(`${base}/v1/sessions/nope-does-not-exist`);
+    const res = await sendMessage(base, "nope-does-not-exist", "session.get");
     expect(res.status).toBe(404);
     const body = await json(res);
     expect(body.error.code).toBe("unknown_session");
   });
 });
 
-describe("turn streaming", () => {
-  it("POST /v1/sessions/{id}/turns streams SSE transcript frames", async () => {
+describe("turn on the session stream", () => {
+  it("turn.start streams SSE transcript frames on the session stream", async () => {
     const { session } = await json(await fetch(`${base}/v1/sessions`, { method: "POST" }));
-    const res = await fetch(`${base}/v1/sessions/${session.id}/turns`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "fake-model", prompt: "hi" }),
+    const stream = await openStream(base, session.id);
+    expect(stream.res.headers.get("content-type")).toContain("text/event-stream");
+    const res = await sendMessage(base, session.id, "turn.start", {
+      model: "fake-model",
+      prompt: "hi",
     });
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toContain("text/event-stream");
-    const text = await res.text();
-    const frames = parseSse(text);
+    expect(res.status).toBe(202);
+    const frames = await stream.collectUntil(
+      (fs) => fs.some((f) => f.event === "turn.finished"),
+      10_000,
+    );
+    stream.abort();
     const types = frames.map((f) => f.event);
     for (const expected of [
       "turn.started",
@@ -201,8 +186,9 @@ describe("turn streaming", () => {
     ]) {
       expect(types).toContain(expected);
     }
-    // envelopes are self-describing
-    for (const f of frames) expect(f.data.type).toBe(f.event);
+    // envelopes are self-describing (the stream hello is transport framing)
+    for (const f of frames.filter((f) => f.event !== "stream.hello"))
+      expect(f.data.type).toBe(f.event);
   });
 
   it("provider error → error event", async () => {
@@ -217,36 +203,33 @@ describe("turn streaming", () => {
     const d = await createDaemon(opts);
     try {
       const { session } = await json(await fetch(`${d.url}/v1/sessions`, { method: "POST" }));
-      const res = await fetch(`${d.url}/v1/sessions/${session.id}/turns`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: "boom" }),
-      });
-      const text = await res.text();
-      const frames = parseSse(text);
+      const stream = await openStream(d.url, session.id);
+      const res = await sendMessage(d.url, session.id, "turn.start", { prompt: "boom" });
+      expect(res.status).toBe(202);
+      const frames = await stream.collectUntil((fs) => fs.some((f) => f.event === "error"), 10_000);
+      stream.abort();
       const err = frames.find((f) => f.event === "error");
       expect(err).toBeDefined();
-      expect(err!.data.code).toBe("provider_error");
+      expect(err!.data.data.code).toBe("provider_error");
     } finally {
       await d.close();
     }
   });
 
-  it("closing the connection aborts the in-flight turn (abortOnDisconnect opt-in)", async () => {
+  it("closing the bound stream aborts the in-flight turn (abortOnDisconnect opt-in)", async () => {
     const { session } = await json(await fetch(`${base}/v1/sessions`, { method: "POST" }));
-    const controller = new AbortController();
-    const res = await fetch(`${base}/v1/sessions/${session.id}/turns`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: "long", abortOnDisconnect: true }),
-      signal: controller.signal,
+    const stream = await openStream(base, session.id);
+    const res = await sendMessage(base, session.id, "turn.start", {
+      prompt: "long",
+      abortOnDisconnect: true,
+      streamId: stream.streamId,
     });
-    const reader = res.body!.getReader();
-    // read first frame so the turn is genuinely in flight, then hang up
-    await reader.read();
-    controller.abort();
-    // if the daemon failed to propagate the abort, close() below would hang;
-    // assert the daemon notices the disconnect within a short window
+    expect(res.status).toBe(202);
+    // Hang up the bound stream while the turn is in flight.
+    stream.abort();
+    // The turn was bound to that stream, so the daemon aborts it; assert
+    // the daemon notices the disconnect within a short window, then that
+    // a fresh stream replays the persisted terminal state.
     const raced = await Promise.race([
       new Promise<"closed">((r) => setTimeout(() => r("closed"), 2000)),
       new Promise<"hung-up">((r) => setTimeout(() => r("hung-up"), 50)),
@@ -256,10 +239,9 @@ describe("turn streaming", () => {
 
   it("non-boolean abortOnDisconnect in the turn body → 400 invalid_request", async () => {
     const { session } = await json(await fetch(`${base}/v1/sessions`, { method: "POST" }));
-    const res = await fetch(`${base}/v1/sessions/${session.id}/turns`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: "hi", abortOnDisconnect: "yes" }),
+    const res = await sendMessage(base, session.id, "turn.start", {
+      prompt: "hi",
+      abortOnDisconnect: "yes",
     });
     expect(res.status).toBe(400);
     const body = await json(res);
@@ -267,7 +249,7 @@ describe("turn streaming", () => {
     expect(body.error.message).toContain("abortOnDisconnect");
   });
 
-  it("closing the connection lets the turn finish and recover (default linger)", async () => {
+  it("closing the stream lets the turn finish and recover (default linger)", async () => {
     // Own sqlite store: the recovery endpoint is store-backed, and this
     // daemon has none injected by default.
     const store = await SessionStore.open(join(tmpdir(), `yog-linger-${Date.now()}.db`));
@@ -282,40 +264,18 @@ describe("turn streaming", () => {
     });
     try {
       const { session } = await json(await fetch(`${d.url}/v1/sessions`, { method: "POST" }));
-      const controller = new AbortController();
-      const res = await fetch(`${d.url}/v1/sessions/${session.id}/turns`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: "long" }),
-        signal: controller.signal,
-      });
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
-      // Accumulate until the first complete SSE block (blank-line
-      // terminated) — reader chunks may coalesce multiple frames.
-      let text = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        text += decoder.decode(value, { stream: true });
-        if (text.includes("\n\n")) break;
-      }
-      const dataLine = text
-        .split("\n\n")[0]!
-        .split("\n")
-        .find((l) => l.startsWith("data:"));
-      expect(dataLine).toBeDefined();
-      const started = JSON.parse(dataLine!.slice(5).trim());
-      const turnId = String(started.data.turnId);
+      const stream = await openStream(d.url, session.id);
+      const res = await sendMessage(d.url, session.id, "turn.start", { prompt: "long" });
+      expect(res.status).toBe(202);
       // Detach: hang up while the turn is still in flight (the fake model
       // drains for 40ms before finishing).
-      controller.abort();
+      stream.abort();
       // Give the daemon a moment to notice the close and the engine to run
-      // to its terminal state, then probe the turn-status endpoint.
+      // to its terminal state, then probe turn.get.
       await new Promise((r) => setTimeout(r, 300));
-      const got = await fetch(`${d.url}/v1/sessions/${session.id}/turns/${turnId}`);
+      const got = await sendMessage(d.url, session.id, "turn.get", { turnId: "any" });
       expect(got.status).toBe(200);
-      const { turn } = await json(got);
+      const { turn } = (await json(got)).data;
       expect(turn.status).toBe("finished");
       const types = turn.events.map((e: any) => e.type);
       expect(types).toContain("turn.started");
@@ -368,7 +328,12 @@ describe("orchestrator-path streaming (bus delivery)", () => {
       },
     };
     const server = createHttpServer({
-      capabilities: { contractVersion: "v1", models: [], tools: [], features: ["sse"] },
+      capabilities: {
+        contractVersion: "v1",
+        models: [],
+        tools: [],
+        features: ["messages", "stream"],
+      },
       store,
       orchestrator,
       bus,
@@ -378,12 +343,16 @@ describe("orchestrator-path streaming (bus delivery)", () => {
       const port = (server.address() as { port: number }).port;
       const created = await fetch(`http://127.0.0.1:${port}/v1/sessions`, { method: "POST" });
       const { session } = (await created.json()) as { session: { id: string } };
-      const res = await fetch(`http://127.0.0.1:${port}/v1/sessions/${session.id}/turns`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: "hi" }),
+      const stream = await openStream(`http://127.0.0.1:${port}`, session.id);
+      const res = await sendMessage(`http://127.0.0.1:${port}`, session.id, "turn.start", {
+        prompt: "hi",
       });
-      const frames = parseSse(await res.text());
+      expect(res.status).toBe(202);
+      const frames = await stream.collectUntil(
+        (fs) => fs.some((f) => f.event === "turn.finished"),
+        10_000,
+      );
+      stream.abort();
       const types = frames.map((f) => f.event);
       for (const expected of [
         "turn.started",
@@ -475,7 +444,7 @@ describe("transcript dump for in-flight (running) turns", () => {
         contractVersion: "v1",
         models: [],
         tools: [],
-        features: ["sse", "transcript"],
+        features: ["messages", "stream", "transcript"],
       },
       store,
       orchestrator,
@@ -490,30 +459,16 @@ describe("transcript dump for in-flight (running) turns", () => {
         await fetch(`${base}/v1/sessions`, { method: "POST" })
       ).json()) as any;
       const sid = session.id;
-      const ac = new AbortController();
-      const res = await fetch(`${base}/v1/sessions/${sid}/turns`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: "inflight q" }),
-        signal: ac.signal,
-      });
-      const reader = res.body!.getReader();
-      const dec = new TextDecoder();
-      let txt = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        txt += dec.decode(value, { stream: true });
-        if (txt.includes("\n\n")) break;
-      }
-      ac.abort(); // disconnect mid-turn (linger)
+      const stream = await openStream(base, sid);
+      const res = await sendMessage(base, sid, "turn.start", { prompt: "inflight q" });
+      expect(res.status).toBe(202);
+      stream.abort(); // disconnect mid-turn (linger)
       await new Promise((r) => setTimeout(r, 100));
-      // While running: transcript dump must carry the in-flight turn
+      // While running: transcript.get must carry the in-flight turn
       // (user prompt + completed tool round + partial prose), not just
       // the previous turn — with no usage gate on the client side.
-      const runningDump = (await (
-        await fetch(`${base}/v1/sessions/${sid}/transcript`)
-      ).json()) as any;
+      const runningDump = ((await (await sendMessage(base, sid, "transcript.get")).json()) as any)
+        .data as any;
       expect(runningDump.turns?.some((t: any) => t.status === "running")).toBe(true);
       const runningMessages = runningDump.messages.map((m: any) => `${m.role}:${m.content ?? ""}`);
       expect(runningMessages).toContain("user:inflight q");
@@ -526,9 +481,8 @@ describe("transcript dump for in-flight (running) turns", () => {
       // Settle it.
       releaseTurn();
       await new Promise((r) => setTimeout(r, 200));
-      const settledDump = (await (
-        await fetch(`${base}/v1/sessions/${sid}/transcript`)
-      ).json()) as any;
+      const settledDump = ((await (await sendMessage(base, sid, "transcript.get")).json()) as any)
+        .data as any;
       expect(settledDump.turns?.some((t: any) => t.status === "running")).toBe(false);
       // Exactly one user + one assistant from the real persisted rows —
       // no synthetic duplicates remain.

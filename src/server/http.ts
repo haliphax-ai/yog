@@ -1,8 +1,10 @@
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import { createServer } from "node:http";
+import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { encodeEvent, type SseEnvelope } from "./sse.ts";
+import { MESSAGE_TYPES, parseEnvelope, type MessageEnvelope } from "./messages.ts";
 import { activeToolCallFor } from "../turn.ts";
 import { logger } from "../log.ts";
 import type { CompactionBoundary, CompactionKind } from "./compaction.ts";
@@ -14,6 +16,7 @@ export interface Capabilities {
   models: string[];
   tools: string[];
   features: string[];
+  messageTypes?: string[];
   [key: string]: unknown;
 }
 
@@ -110,7 +113,7 @@ export interface HttpDeps {
   apiToken?: string;
   /** Compaction/handoff runner (see `compaction.ts`). */
   compaction?: CompactionBoundary;
-  /** `/shake` transcript rewrite runner (see `shake.ts`). */
+  /** Transcript shake runner (see `shake.ts`). */
   shake?: (sessionId: string) => Promise<ShakeOutcome>;
   [key: string]: unknown;
 }
@@ -135,6 +138,19 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 
 function sendError(res: ServerResponse, code: string, message: string): void {
   sendJson(res, ERROR_STATUS[code] ?? 500, { error: { code, message } });
+}
+
+function sendErrorWithRequestId(
+  res: ServerResponse,
+  code: string,
+  message: string,
+  requestId: string | undefined,
+): void {
+  const status = ERROR_STATUS[code] ?? 500;
+  sendJson(res, status, {
+    ...(requestId !== undefined ? { requestId } : {}),
+    error: { code, message },
+  });
 }
 
 async function readBody(req: IncomingMessage, limit = 1_000_000): Promise<string> {
@@ -229,9 +245,15 @@ function turnUsageFromEvents(events: unknown[]): Record<string, number> | undefi
 }
 
 /**
- * Create the v1 HTTP/SSE adapter (PLAN §5.2–§5.5). All boundaries are
+ * Create the v1 messages/stream adapter (PLAN §5.2–§5.5). All boundaries are
  * injected so tests can fake the store, orchestrator, event bus, model
  * provider and turn-engine factory.
+ *
+ * HTTP surface (four routes only — everything else is a message `type`):
+ *   GET  /v1/capabilities               bootstrap discovery
+ *   POST /v1/sessions                   bootstrap session creation
+ *   GET  /v1/sessions/{id}/stream       long-lived SSE event channel
+ *   POST /v1/sessions/{id}/messages     typed message dispatch
  */
 export function createHttpServer(deps: HttpDeps): Server {
   // Per-daemon configuration injection (see `config.ts`): the bearer token
@@ -245,22 +267,50 @@ export function createHttpServer(deps: HttpDeps): Server {
     const header = req.headers.authorization ?? "";
     return header === `Bearer ${apiToken}`;
   };
-  // Last-resort advertisement (injected capabilities win). The adapter
-  // implements SSE streaming and the transcript rehydration dump, so the
-  // default advertises both (§4.6); the composition root (serve.ts) passes
-  // the same set explicitly.
-  const capabilities: Capabilities = deps.capabilities ?? {
+  // Injected capabilities (models/tools) win, but the transport contract
+  // (`messages` + `stream` features and the `messageTypes` list) is owned
+  // here — it is always advertised so clients can discover the dispatch
+  // table. The composition root (serve.ts) passes the same set explicitly.
+  const baseCapabilities: Capabilities = deps.capabilities ?? {
     contractVersion: "v1",
     models: [],
     tools: [],
-    features: ["sse", "transcript"],
+    features: [],
   };
+  const features = [...new Set(["messages", "stream", ...baseCapabilities.features])];
+  const messageTypes = [...new Set([...MESSAGE_TYPES, ...(baseCapabilities.messageTypes ?? [])])];
+  const capabilities: Capabilities = { ...baseCapabilities, features, messageTypes };
   const sessions = new Map<string, SessionRecord>();
   const store = deps.store as StoreBoundary | undefined;
   const orchestrator = deps.orchestrator as OrchestratorBoundary | undefined;
-  const bus = deps.bus as EventBusBoundary | undefined;
+  // Fall back to a local bus when none is injected (store-less fakes):
+  // the fallback turn path publishes here and streams subscribe here, so
+  // delivery works without serve.ts's composed bus.
+  const bus =
+    (deps.bus as EventBusBoundary | undefined) ??
+    ((): EventEmitter => {
+      const ee = new EventEmitter();
+      ee.setMaxListeners(0);
+      return ee;
+    })();
   const hasStore = !!store && typeof store.createSession === "function";
   const hasOrchestrator = !!orchestrator && typeof orchestrator.runTurn === "function";
+
+  /** Turns started with `abortOnDisconnect: true`, keyed by stream id. */
+  const turnsByStream = new Map<
+    string,
+    Array<{ handle?: TurnHandleLike; controller?: AbortController }>
+  >();
+  const channelFor = (id: string): string => `session:${id}`;
+  const publish = (sessionId: string, ev: SseEnvelope): void => {
+    // The bus boundary only exposes on/off; EventEmitter-style emit is used
+    // when the injected bus is an EventEmitter (serve.ts/tests). No bus
+    // (store-less fakes) means no stream delivery — turns still settle.
+    (bus as unknown as { emit?: (ch: string, ev: SseEnvelope) => void } | undefined)?.emit?.(
+      channelFor(sessionId),
+      ev,
+    );
+  };
 
   return createServer((req: IncomingMessage, res: ServerResponse) => {
     void handle(req, res).catch((err: unknown) => {
@@ -277,6 +327,21 @@ export function createHttpServer(deps: HttpDeps): Server {
     return sessions.get(id) ?? null;
   }
 
+  function sendMessage(
+    res: ServerResponse,
+    status: number,
+    type: string,
+    data: unknown,
+    requestId: string | undefined,
+  ): void {
+    sendJson(res, status, {
+      type,
+      version: 1,
+      ...(requestId !== undefined ? { requestId } : {}),
+      data,
+    });
+  }
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method ?? "GET";
     const segs = segments(req.url ?? "/");
@@ -286,28 +351,25 @@ export function createHttpServer(deps: HttpDeps): Server {
       return;
     }
 
-    // GET /v1/capabilities
-    if (method === "GET" && segs[0] === "v1" && segs[1] === "capabilities") {
-      if (method === "GET" && segs[0] === "v1" && segs[1] === "capabilities") {
-        // The client names the model it will use (`?model=`); the server
-        // resolves that model's context window from the models.dev cache. A
-        // request without `?model=` gets the plain advertisement.
-        const model = new URL(req.url ?? "", "http://localhost").searchParams.get("model");
-        if (
-          typeof model === "string" &&
-          model !== "" &&
-          typeof deps.contextWindowFor === "function"
-        ) {
-          const cw = deps.contextWindowFor(model);
-          sendJson(res, 200, {
-            ...capabilities,
-            contextWindowSizes: cw === undefined ? {} : { [model]: cw },
-          });
-          return;
-        }
-        sendJson(res, 200, capabilities);
+    // GET /v1/capabilities — bootstrap discovery (unchanged).
+    if (method === "GET" && segs[0] === "v1" && segs[1] === "capabilities" && segs.length === 2) {
+      // The client names the model it will use (`?model=`); the server
+      // resolves that model's context window from the models.dev cache. A
+      // request without `?model=` gets the plain advertisement.
+      const model = new URL(req.url ?? "", "http://localhost").searchParams.get("model");
+      if (
+        typeof model === "string" &&
+        model !== "" &&
+        typeof deps.contextWindowFor === "function"
+      ) {
+        const cw = deps.contextWindowFor(model);
+        sendJson(res, 200, {
+          ...capabilities,
+          contextWindowSizes: cw === undefined ? {} : { [model]: cw },
+        });
         return;
       }
+      sendJson(res, 200, capabilities);
       return;
     }
 
@@ -316,7 +378,7 @@ export function createHttpServer(deps: HttpDeps): Server {
       return;
     }
 
-    // POST /v1/sessions
+    // POST /v1/sessions — bootstrap creation (unchanged).
     if (method === "POST" && segs.length === 2 && segs[1] === "sessions") {
       // Body is optional: `{ title?, system? }` (§4.6). `system` seeds the
       // first transcript message (role `system`) so it is part of every
@@ -366,191 +428,257 @@ export function createHttpServer(deps: HttpDeps): Server {
       return;
     }
 
-    // /v1/sessions/{id}[/turns...|transcript...]
-    if (segs[1] === "sessions" && segs.length >= 3) {
+    // /v1/sessions/{id}/stream | /messages
+    if (segs[1] === "sessions" && segs.length === 4) {
       const id = segs[2] as string;
-      let session = await lookupSession(id);
-
-      if (segs.length === 3) {
-        if (method === "GET") {
-          if (!session) {
-            sendError(res, "unknown_session", `session ${id} not found`);
-            return;
-          }
-          sendJson(res, 200, { session });
-          return;
-        }
-        if (method === "DELETE") {
-          if (!session) {
-            sendError(res, "unknown_session", `session ${id} not found`);
-            return;
-          }
-          const purge =
-            new URL(req.url ?? "", "http://localhost").searchParams.get("purge") === "true";
-          if (purge) {
-            // Immediate irreversible delete (§4.5). After this the session
-            // row is gone: subsequent GET session/transcript/POST turn all
-            // hit the 404 unknown_session path.
-            if (hasStore && typeof store!.purgeSession === "function") {
-              const deleted = await store!.purgeSession(id);
-              if (deleted === 0) {
-                sendError(res, "unknown_session", `session ${id} not found`);
-                return;
-              }
-              sendJson(res, 200, { ok: true, deleted: true, id });
-              return;
-            }
-            // In-memory fallback: purge is a hard delete.
-            sessions.delete(id);
-            sendJson(res, 200, { ok: true, deleted: true, id });
-            return;
-          }
-          // Detach (§4.5): status open → dormant, detached_at stamped,
-          // nothing forfeited. Idempotent — a second DELETE on an already
-          // dormant session is a no-op and still returns 200.
-          if (session.status === "open") {
-            if (hasStore && typeof store!.detachSession === "function") {
-              await store!.detachSession(id, Date.now());
-              const detached = await lookupSession(id);
-              sendJson(res, 200, { session: detached ?? { ...session, status: "dormant" } });
-              return;
-            }
-            session.status = "dormant";
-            session.detached_at = Date.now();
-            session.updated_at = session.detached_at;
-          }
-          sendJson(res, 200, { session });
-          return;
-        }
+      const leaf = segs[3] as string;
+      if (leaf === "stream" && method === "GET") {
+        await streamSession(req, res, id);
+        return;
       }
+      if (leaf === "messages" && method === "POST") {
+        await dispatchMessage(req, res, id);
+        return;
+      }
+      sendError(res, "invalid_request", `unknown route: ${method} ${req.url ?? ""}`);
+      return;
+    }
 
-      // GET /v1/sessions/{id}/transcript — the rehydration dump (§4.6).
-      // Readable while the row exists, including dormant sessions within the
-      // 30-day retention window; dormancy never blocks reads.
-      if (method === "GET" && segs.length === 4 && segs[3] === "transcript") {
-        if (!session) {
-          sendError(res, "unknown_session", `session ${id} not found`);
+    sendError(res, "invalid_request", `unknown route: ${method} ${req.url ?? ""}`);
+  }
+
+  /** POST /v1/sessions/{id}/messages — typed dispatch. */
+  async function dispatchMessage(
+    req: IncomingMessage,
+    res: ServerResponse,
+    id: string,
+  ): Promise<void> {
+    const session0 = await lookupSession(id);
+    if (!session0) {
+      sendError(res, "unknown_session", `session ${id} not found`);
+      return;
+    }
+    let envelope: MessageEnvelope;
+    try {
+      const raw = await readBody(req);
+      const parsed = parseEnvelope(raw);
+      if ("error" in parsed) {
+        sendError(res, parsed.error.code, parsed.error.message);
+        return;
+      }
+      envelope = parsed.envelope;
+    } catch {
+      sendError(res, "invalid_request", "request body must be a JSON object");
+      return;
+    }
+    const { type, requestId } = envelope;
+    const data = envelope.data ?? {};
+    // Handlers below mirror the former per-feature routes. `session` is a
+    // `let` so turn.start's implicit revive can refresh it.
+    let session = session0;
+    const reply = (status: number, payload: unknown): void =>
+      sendMessage(res, status, type, payload, requestId);
+    const fail = (code: string, message: string): void =>
+      sendErrorWithRequestId(res, code, message, requestId);
+
+    if (type === "session.get") {
+      reply(200, { session });
+      return;
+    }
+
+    if (type === "session.detach") {
+      if (data.purge !== undefined && typeof data.purge !== "boolean") {
+        fail("invalid_request", "purge must be a boolean");
+        return;
+      }
+      const purge = data.purge === true;
+      if (purge) {
+        // Immediate irreversible delete (§4.5). After this the session
+        // row is gone: subsequent messages all hit 404 unknown_session.
+        if (hasStore && typeof store!.purgeSession === "function") {
+          const deleted = await store!.purgeSession(id);
+          if (deleted === 0) {
+            fail("unknown_session", `session ${id} not found`);
+            return;
+          }
+          reply(200, { ok: true, deleted: true, id });
           return;
         }
-        if (hasStore && typeof store!.getTranscript === "function") {
-          const params = new URL(req.url ?? "", "http://localhost").searchParams;
-          const afterSeq = params.get("after") ? Number(params.get("after")) : undefined;
-          const limit = params.get("limit") ? Number(params.get("limit")) : undefined;
-          // Round attribution for tool result rows comes from the turns'
-          // persisted tool.result events (the live envelope data), so the
-          // dump carries the same usage/promptDelta the stream did. One
-          // attribution round per turn: all results of a round share it.
-          // Per-call resultTokens are keyed by tool call id instead — each
-          // result's own estimate rides its own row.
-          const attribution = new Map<number, { usage?: unknown; promptDelta?: number }>();
-          const resultTokensByCall = new Map<string, number>();
-          if (typeof store!.listEvents === "function") {
-            for (const ev of ((await store!.listEvents(id)) ?? []) as Array<
-              Record<string, unknown>
-            >) {
-              if (ev.type !== "tool.result") continue;
-              const turnId = Number(ev.turn_id);
-              let data: any = ev.payload;
-              if (typeof data === "string") {
-                try {
-                  data = JSON.parse(data);
-                } catch {
-                  continue; // skip unparseable rows
-                }
-              }
-              if (data === null || typeof data !== "object" || Array.isArray(data)) continue;
-              const usage = (data as any).usage;
-              const promptDelta = (data as any).promptDelta;
-              const resultTokens = (data as any).resultTokens;
-              const round: { usage?: unknown; promptDelta?: number } = {};
-              if (usage !== undefined) round.usage = usage;
-              if (typeof promptDelta === "number" && Number.isFinite(promptDelta)) {
-                round.promptDelta = promptDelta;
-              }
-              if (Object.keys(round).length > 0) attribution.set(turnId, round);
-              if (
-                typeof resultTokens === "number" &&
-                Number.isFinite(resultTokens) &&
-                resultTokens > 0
-              ) {
-                resultTokensByCall.set(String(data.id), resultTokens);
+        // In-memory fallback: purge is a hard delete.
+        sessions.delete(id);
+        reply(200, { ok: true, deleted: true, id });
+        return;
+      }
+      // Detach (§4.5): status open → dormant, detached_at stamped,
+      // nothing forfeited. Idempotent — a second detach on an already
+      // dormant session is a no-op and still returns success.
+      if (session.status === "open") {
+        if (hasStore && typeof store!.detachSession === "function") {
+          await store!.detachSession(id, Date.now());
+          const detached = await lookupSession(id);
+          reply(200, { session: detached ?? { ...session, status: "dormant" } });
+          return;
+        }
+        session.status = "dormant";
+        session.detached_at = Date.now();
+        session.updated_at = session.detached_at;
+      }
+      reply(200, { session });
+      return;
+    }
+
+    if (type === "transcript.get") {
+      // transcript.get — the rehydration dump (§4.6). Readable while the
+      // row exists, including dormant sessions within the 30-day
+      // retention window; dormancy never blocks reads.
+      if (hasStore && typeof store!.getTranscript === "function") {
+        const afterRaw = (data.afterSeq ?? data.after) as unknown;
+        const limitRaw = data.limit as unknown;
+        const afterSeq = afterRaw !== undefined ? Number(afterRaw) : undefined;
+        const limit = limitRaw !== undefined ? Number(limitRaw) : undefined;
+        // Round attribution for tool result rows comes from the turns'
+        // persisted tool.result events (the live envelope data), so the
+        // dump carries the same usage/promptDelta the stream did. One
+        // attribution round per turn: all results of a round share it.
+        // Per-call resultTokens are keyed by tool call id instead — each
+        // result's own estimate rides its own row.
+        const attribution = new Map<number, { usage?: unknown; promptDelta?: number }>();
+        const resultTokensByCall = new Map<string, number>();
+        if (typeof store!.listEvents === "function") {
+          for (const ev of ((await store!.listEvents(id)) ?? []) as Array<
+            Record<string, unknown>
+          >) {
+            if (ev.type !== "tool.result") continue;
+            const turnId = Number(ev.turn_id);
+            let data: any = ev.payload;
+            if (typeof data === "string") {
+              try {
+                data = JSON.parse(data);
+              } catch {
+                continue; // skip unparseable rows
               }
             }
+            if (data === null || typeof data !== "object" || Array.isArray(data)) continue;
+            const usage = (data as any).usage;
+            const promptDelta = (data as any).promptDelta;
+            const resultTokens = (data as any).resultTokens;
+            const round: { usage?: unknown; promptDelta?: number } = {};
+            if (usage !== undefined) round.usage = usage;
+            if (typeof promptDelta === "number" && Number.isFinite(promptDelta)) {
+              round.promptDelta = promptDelta;
+            }
+            if (Object.keys(round).length > 0) attribution.set(turnId, round);
+            if (
+              typeof resultTokens === "number" &&
+              Number.isFinite(resultTokens) &&
+              resultTokens > 0
+            ) {
+              resultTokensByCall.set(String(data.id), resultTokens);
+            }
           }
-          const messages = (
-            await store!.getTranscript(id, {
-              ...(afterSeq !== undefined && Number.isFinite(afterSeq)
-                ? { afterSeq: afterSeq }
-                : {}),
-              ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
-              ...(attribution.size > 0 ? { roundAttribution: attribution } : {}),
-              ...(resultTokensByCall.size > 0 ? { resultTokensByCall } : {}),
-            })
-          ).map(toWireMessage);
-          // In-flight (running) turns have no canonical transcript rows yet:
-          // serve.ts only appends `messages.slice(startLen)` at settle time.
-          // A reconnecting client polling this dump would therefore see only
-          // the previous turn while the in-flight turn generates, and the
-          // poll gate on usage meant nothing landed even after settle for
-          // the duplicate adapter row. Reconstruct the running turn's
-          // completed rounds from its persisted `turn_events` (the sink
-          // records every event incrementally) and append them as synthetic
-          // transcript rows so a poll rehydrates the in-flight turn
-          // progressively. Settled turns use the real rows above and get
-          // no synthetic duplicates.
-          if (typeof store!.listTurns === "function") {
-            const rowsForSynthetic = ((await store!.listTurns(id)) ?? []) as Array<
+        }
+        const messages = (
+          await store!.getTranscript(id, {
+            ...(afterSeq !== undefined && Number.isFinite(afterSeq) ? { afterSeq: afterSeq } : {}),
+            ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
+            ...(attribution.size > 0 ? { roundAttribution: attribution } : {}),
+            ...(resultTokensByCall.size > 0 ? { resultTokensByCall } : {}),
+          })
+        ).map(toWireMessage);
+        // In-flight (running) turns have no canonical transcript rows yet:
+        // serve.ts only appends `messages.slice(startLen)` at settle time.
+        // A reconnecting client polling this dump would therefore see only
+        // the previous turn while the in-flight turn generates, and the
+        // poll gate on usage meant nothing landed even after settle for
+        // the duplicate adapter row. Reconstruct the running turn's
+        // completed rounds from its persisted `turn_events` (the sink
+        // records every event incrementally) and append them as synthetic
+        // transcript rows so a poll rehydrates the in-flight turn
+        // progressively. Settled turns use the real rows above and get
+        // no synthetic duplicates.
+        if (typeof store!.listTurns === "function") {
+          const rowsForSynthetic = ((await store!.listTurns(id)) ?? []) as Array<
+            Record<string, unknown>
+          >;
+          const runningRows = rowsForSynthetic.filter((r) => r.status === "running");
+          if (runningRows.length > 0 && typeof store!.listEvents === "function") {
+            const allEvents = ((await store!.listEvents(id)) ?? []) as Array<
               Record<string, unknown>
             >;
-            const runningRows = rowsForSynthetic.filter((r) => r.status === "running");
-            if (runningRows.length > 0 && typeof store!.listEvents === "function") {
-              const allEvents = ((await store!.listEvents(id)) ?? []) as Array<
-                Record<string, unknown>
-              >;
-              const eventsByTurn = new Map<number, Array<Record<string, unknown>>>();
-              for (const ev of allEvents) {
-                const tid = Number(ev.turn_id);
-                if (!Number.isFinite(tid)) continue;
-                const list = eventsByTurn.get(tid) ?? [];
-                list.push(ev);
-                eventsByTurn.set(tid, list);
-              }
-              let nextSeq =
-                messages.reduce(
-                  (max, m) => Math.max(max, typeof m.seq === "number" ? m.seq : 0),
-                  0,
-                ) + 1;
-              for (const r of runningRows) {
-                const turnId = Number(r.id);
-                const evs = eventsByTurn.get(turnId) ?? [];
-                if (evs.length === 0) continue;
-                const synth: Array<Record<string, unknown>> = [];
-                const parsePayload = (ev: Record<string, unknown>): Record<string, unknown> => {
-                  let data: unknown = ev.payload;
-                  if (typeof data === "string") {
-                    try {
-                      data = JSON.parse(data);
-                    } catch {
-                      return {};
-                    }
+            const eventsByTurn = new Map<number, Array<Record<string, unknown>>>();
+            for (const ev of allEvents) {
+              const tid = Number(ev.turn_id);
+              if (!Number.isFinite(tid)) continue;
+              const list = eventsByTurn.get(tid) ?? [];
+              list.push(ev);
+              eventsByTurn.set(tid, list);
+            }
+            let nextSeq =
+              messages.reduce((max, m) => Math.max(max, typeof m.seq === "number" ? m.seq : 0), 0) +
+              1;
+            for (const r of runningRows) {
+              const turnId = Number(r.id);
+              const evs = eventsByTurn.get(turnId) ?? [];
+              if (evs.length === 0) continue;
+              const synth: Array<Record<string, unknown>> = [];
+              const parsePayload = (ev: Record<string, unknown>): Record<string, unknown> => {
+                let data: unknown = ev.payload;
+                if (typeof data === "string") {
+                  try {
+                    data = JSON.parse(data);
+                  } catch {
+                    return {};
                   }
-                  return data !== null && typeof data === "object" && !Array.isArray(data)
-                    ? (data as Record<string, unknown>)
-                    : {};
-                };
-                // User prompt from the turn row itself.
-                const promptText =
-                  typeof r.prompt === "string"
-                    ? r.prompt
-                    : typeof (r.request as any)?.prompt === "string"
-                      ? (r.request as any).prompt
-                      : "";
-                if (promptText) {
-                  synth.push({ seq: nextSeq++, turnId, role: "user", content: promptText });
                 }
-                let assistantText = "";
-                let pendingCalls: Array<{ id: string; name: string; arguments: string }> = [];
-                const flushAssistant = (): void => {
+                return data !== null && typeof data === "object" && !Array.isArray(data)
+                  ? (data as Record<string, unknown>)
+                  : {};
+              };
+              // User prompt from the turn row itself.
+              const promptText =
+                typeof r.prompt === "string"
+                  ? r.prompt
+                  : typeof (r.request as any)?.prompt === "string"
+                    ? (r.request as any).prompt
+                    : "";
+              if (promptText) {
+                synth.push({ seq: nextSeq++, turnId, role: "user", content: promptText });
+              }
+              let assistantText = "";
+              let pendingCalls: Array<{ id: string; name: string; arguments: string }> = [];
+              const flushAssistant = (): void => {
+                if (assistantText) {
+                  synth.push({
+                    seq: nextSeq++,
+                    turnId,
+                    role: "assistant",
+                    content: assistantText,
+                  });
+                  assistantText = "";
+                }
+                if (pendingCalls.length > 0) {
+                  synth.push({
+                    seq: nextSeq++,
+                    turnId,
+                    role: "assistant",
+                    content: null,
+                    toolCalls: pendingCalls.map((c) => ({
+                      id: c.id,
+                      type: "function",
+                      function: { name: c.name, arguments: c.arguments },
+                    })),
+                  });
+                  pendingCalls = [];
+                }
+              };
+              for (const ev of evs) {
+                const data = parsePayload(ev);
+                if (ev.type === "message.delta" && typeof data.text === "string") {
+                  assistantText += data.text;
+                } else if (ev.type === "tool.call") {
+                  // A tool call closes the open prose segment (mirrors the
+                  // engine: text streamed in a tool round is discarded, but
+                  // completed prose before the call is part of the turn).
                   if (assistantText) {
                     synth.push({
                       seq: nextSeq++,
@@ -560,486 +688,425 @@ export function createHttpServer(deps: HttpDeps): Server {
                     });
                     assistantText = "";
                   }
-                  if (pendingCalls.length > 0) {
-                    synth.push({
-                      seq: nextSeq++,
-                      turnId,
-                      role: "assistant",
-                      content: null,
-                      toolCalls: pendingCalls.map((c) => ({
-                        id: c.id,
-                        type: "function",
-                        function: { name: c.name, arguments: c.arguments },
-                      })),
-                    });
-                    pendingCalls = [];
-                  }
-                };
-                for (const ev of evs) {
-                  const data = parsePayload(ev);
-                  if (ev.type === "message.delta" && typeof data.text === "string") {
-                    assistantText += data.text;
-                  } else if (ev.type === "tool.call") {
-                    // A tool call closes the open prose segment (mirrors the
-                    // engine: text streamed in a tool round is discarded, but
-                    // completed prose before the call is part of the turn).
-                    if (assistantText) {
-                      synth.push({
-                        seq: nextSeq++,
-                        turnId,
-                        role: "assistant",
-                        content: assistantText,
-                      });
-                      assistantText = "";
-                    }
-                    pendingCalls.push({
-                      id: typeof data.id === "string" ? data.id : "",
-                      name: typeof data.name === "string" ? data.name : "",
-                      arguments:
-                        typeof data.args === "string" ? data.args : JSON.stringify(data.args ?? {}),
-                    });
-                  } else if (ev.type === "tool.result") {
-                    flushAssistant();
-                    const resultPayload =
-                      data.result !== undefined
-                        ? data.result
-                        : data.error
-                          ? { error: data.error }
-                          : null;
-                    synth.push({
-                      seq: nextSeq++,
-                      turnId,
-                      role: "tool",
-                      content:
-                        typeof resultPayload === "string"
-                          ? resultPayload
-                          : JSON.stringify(resultPayload ?? null),
-                      toolCallId: typeof data.id === "string" ? data.id : undefined,
-                      name: typeof data.name === "string" ? data.name : undefined,
-                      ...(typeof data.resultTokens === "number"
-                        ? { resultTokens: data.resultTokens }
-                        : {}),
-                      ...(data.usage !== undefined ? { usage: data.usage } : {}),
-                      ...(typeof data.promptDelta === "number"
-                        ? { promptDelta: data.promptDelta }
-                        : {}),
-                    } as Record<string, unknown>);
-                  }
+                  pendingCalls.push({
+                    id: typeof data.id === "string" ? data.id : "",
+                    name: typeof data.name === "string" ? data.name : "",
+                    arguments:
+                      typeof data.args === "string" ? data.args : JSON.stringify(data.args ?? {}),
+                  });
+                } else if (ev.type === "tool.result") {
+                  flushAssistant();
+                  const resultPayload =
+                    data.result !== undefined
+                      ? data.result
+                      : data.error
+                        ? { error: data.error }
+                        : null;
+                  synth.push({
+                    seq: nextSeq++,
+                    turnId,
+                    role: "tool",
+                    content:
+                      typeof resultPayload === "string"
+                        ? resultPayload
+                        : JSON.stringify(resultPayload ?? null),
+                    toolCallId: typeof data.id === "string" ? data.id : undefined,
+                    name: typeof data.name === "string" ? data.name : undefined,
+                    ...(typeof data.resultTokens === "number"
+                      ? { resultTokens: data.resultTokens }
+                      : {}),
+                    ...(data.usage !== undefined ? { usage: data.usage } : {}),
+                    ...(typeof data.promptDelta === "number"
+                      ? { promptDelta: data.promptDelta }
+                      : {}),
+                  } as Record<string, unknown>);
                 }
-                flushAssistant();
-                messages.push(...synth);
               }
+              flushAssistant();
+              messages.push(...synth);
             }
           }
-          // Per-turn metrics (usage/duration) ride alongside the dump so a
-          // client can rebuild per-turn summaries without replaying events.
-          // Each row also carries its status — `running` for an in-flight
-          // (typically lingered) turn — so a reconnecting client can tell
-          // the session still has an active turn and behave accordingly
-          // (busy gate, poll-to-settle). A running row has no stored
-          // usage/duration yet (both are stamped at settle time), so the
-          // snapshot from `onUsageFor` fills the usage in: the client's
-          // "last known context total" then stays live instead of showing
-          // the pre-turn figure until the row settles.
-          let turns: unknown[] = [];
-          if (typeof store!.listTurns === "function") {
-            const rows = ((await store!.listTurns(id)) ?? []) as Array<Record<string, unknown>>;
-            const usageById = new Map<number, { usage?: unknown; durationMs?: number }>();
-            if (typeof store!.listTurnUsages === "function") {
-              for (const m of ((await store!.listTurnUsages(id)) ?? []) as Array<{
-                turnId: number;
-                usage?: unknown;
-                durationMs?: number;
-              }>) {
-                usageById.set(m.turnId, {
-                  ...(m.usage !== undefined ? { usage: m.usage } : {}),
-                  ...(m.durationMs !== undefined ? { durationMs: m.durationMs } : {}),
-                });
-              }
-            }
-            const liveUsage = deps.onUsageFor?.(id);
-            turns = rows.map((r) => {
-              const turnId = Number(r.id);
-              const status = typeof r.status === "string" ? r.status : "finished";
-              const stored = usageById.get(turnId) ?? {};
-              const running = status === "running";
-              return {
-                turnId,
-                status,
-                ...(running && liveUsage !== undefined ? { usage: liveUsage } : stored),
-                ...(typeof r.duration_ms === "number" ? { durationMs: r.duration_ms } : {}),
-              };
-            });
-          }
-          sendJson(res, 200, {
-            session,
-            messages,
-            ...(turns.length > 0 ? { turns } : {}),
-          });
-          return;
         }
-        // Store-less fallback (test mode): documented minimal response — an
-        // empty transcript rather than a crash (§4.8).
-        sendJson(res, 200, { session, messages: [] });
+        // Per-turn metrics (usage/duration) ride alongside the dump so a
+        // client can rebuild per-turn summaries without replaying events.
+        // Each row also carries its status — `running` for an in-flight
+        // (typically lingered) turn — so a reconnecting client can tell
+        // the session still has an active turn and behave accordingly
+        // (busy gate, poll-to-settle). A running row has no stored
+        // usage/duration yet (both are stamped at settle time), so the
+        // snapshot from `onUsageFor` fills the usage in: the client's
+        // "last known context total" then stays live instead of showing
+        // the pre-turn figure until the row settles.
+        let turns: unknown[] = [];
+        if (typeof store!.listTurns === "function") {
+          const rows = ((await store!.listTurns(id)) ?? []) as Array<Record<string, unknown>>;
+          const usageById = new Map<number, { usage?: unknown; durationMs?: number }>();
+          if (typeof store!.listTurnUsages === "function") {
+            for (const m of ((await store!.listTurnUsages(id)) ?? []) as Array<{
+              turnId: number;
+              usage?: unknown;
+              durationMs?: number;
+            }>) {
+              usageById.set(m.turnId, {
+                ...(m.usage !== undefined ? { usage: m.usage } : {}),
+                ...(m.durationMs !== undefined ? { durationMs: m.durationMs } : {}),
+              });
+            }
+          }
+          const liveUsage = deps.onUsageFor?.(id);
+          turns = rows.map((r) => {
+            const turnId = Number(r.id);
+            const status = typeof r.status === "string" ? r.status : "finished";
+            const stored = usageById.get(turnId) ?? {};
+            const running = status === "running";
+            return {
+              turnId,
+              status,
+              ...(running && liveUsage !== undefined ? { usage: liveUsage } : stored),
+              ...(typeof r.duration_ms === "number" ? { durationMs: r.duration_ms } : {}),
+            };
+          });
+        }
+        reply(200, {
+          session,
+          messages,
+          ...(turns.length > 0 ? { turns } : {}),
+        });
         return;
       }
+      // Store-less fallback (test mode): documented minimal response — an
+      // empty transcript rather than a crash (§4.8).
+      reply(200, { session, messages: [] });
 
-      // GET /v1/sessions/{id}/turns/{turnId} — terminal turn state.
-      if (method === "GET" && segs.length === 5 && segs[3] === "turns") {
-        if (!session) {
-          sendError(res, "unknown_session", `session ${id} not found`);
-          return;
+      return;
+    }
+
+    if (type === "turn.get") {
+      const turnId = typeof data.turnId === "string" ? data.turnId : String(data.turnId ?? "");
+      if (turnId === "") {
+        fail("invalid_request", "turnId must be a non-empty string");
+        return;
+      }
+      if (hasStore && typeof store!.listTurns === "function") {
+        // Recovery contract: rebuild the turn from sqlite. The wire turnId
+        // (string, from turn.started) usually differs from the row id, so
+        // match numerically and fall back to the session's latest turn.
+        const rows = ((await store!.listTurns(id)) ?? []) as Array<Record<string, unknown>>;
+        // Match the wire turnId (string from turn.started) to a row: numeric
+        // row id first, then the turn.started payload's turnId, then the
+        // latest turn (recovery fallback).
+        let wantedRow: Record<string, unknown> | undefined;
+        const wanted = Number(turnId);
+        if (Number.isFinite(wanted)) {
+          wantedRow = rows.find((r) => Number(r.id) === wanted);
         }
-        const turnId = segs[4] as string;
-        if (hasStore && typeof store!.listTurns === "function") {
-          // Recovery contract: rebuild the turn from sqlite. The wire turnId
-          // (string, from turn.started) usually differs from the row id, so
-          // match numerically and fall back to the session's latest turn.
-          const rows = ((await store!.listTurns(id)) ?? []) as Array<Record<string, unknown>>;
-          const wanted = Number(turnId);
-          const row =
-            (Number.isFinite(wanted) ? rows.find((r) => Number(r.id) === wanted) : undefined) ??
-            rows[rows.length - 1] ??
-            undefined;
-          if (!row) {
-            sendJson(res, 404, {
-              error: { code: "invalid_request", message: `turn ${turnId} not found` },
-            });
-            return;
-          }
-          const events: unknown[] = [];
-          if (typeof store!.listEvents === "function") {
-            for (const ev of ((await store!.listEvents(id)) ?? []) as Array<
-              Record<string, unknown>
-            >) {
-              // Only this turn's events: listEvents returns every turn's
-              // events for the session, and replaying all of them would
-              // re-render prior turns as if they were this one.
-              if (Number(ev.turn_id) !== Number(row.id)) continue;
-              const payload = ev.payload;
-              let data: unknown;
-              if (typeof payload === "string") {
-                try {
-                  data = JSON.parse(payload);
-                } catch {
-                  continue; // skip unparseable rows
-                }
-              } else if (payload !== null && typeof payload === "object") {
-                data = payload; // store returns parsed payloads
-              } else {
+        if (!wantedRow && typeof store!.listEvents === "function") {
+          for (const ev of ((await store!.listEvents(id)) ?? []) as Array<
+            Record<string, unknown>
+          >) {
+            if (ev.type !== "turn.started") continue;
+            let payload: unknown = ev.payload;
+            if (typeof payload === "string") {
+              try {
+                payload = JSON.parse(payload);
+              } catch {
                 continue;
               }
-              events.push({ id: ev.seq, type: ev.type, version: ev.version, ts: ev.ts, data });
+            }
+            if (
+              payload !== null &&
+              typeof payload === "object" &&
+              !Array.isArray(payload) &&
+              (payload as { turnId?: unknown }).turnId === turnId
+            ) {
+              wantedRow = rows.find((r) => Number(r.id) === Number(ev.turn_id));
+              if (wantedRow) break;
             }
           }
-          const usage = turnUsageFromRow(row) ?? turnUsageFromEvents(events);
-          sendJson(res, 200, {
-            turn: {
-              id: turnId,
-              status: events.some((e) => (e as { type?: string }).type === "turn.finished")
-                ? "finished"
-                : row.status,
-              model: row.model,
-              created_at: row.created_at,
-              finished_at: row.finished_at ?? null,
-              duration_ms: row.duration_ms ?? null,
-              ...(usage !== undefined ? { usage } : {}),
-              events,
-            },
+        }
+        const row = wantedRow ?? rows[rows.length - 1] ?? undefined;
+        if (!row) {
+          sendJson(res, 404, {
+            ...(requestId !== undefined ? { requestId } : {}),
+            error: { code: "invalid_request", message: `turn ${turnId} not found` },
           });
           return;
         }
-        sendJson(res, 404, {
-          error: { code: "invalid_request", message: `turn ${turnId} not found` },
+        const events: unknown[] = [];
+        if (typeof store!.listEvents === "function") {
+          for (const ev of ((await store!.listEvents(id)) ?? []) as Array<
+            Record<string, unknown>
+          >) {
+            // Only this turn's events: listEvents returns every turn's
+            // events for the session, and replaying all of them would
+            // re-render prior turns as if they were this one.
+            if (Number(ev.turn_id) !== Number(row.id)) continue;
+            const payload = ev.payload;
+            let data: unknown;
+            if (typeof payload === "string") {
+              try {
+                data = JSON.parse(payload);
+              } catch {
+                continue; // skip unparseable rows
+              }
+            } else if (payload !== null && typeof payload === "object") {
+              data = payload; // store returns parsed payloads
+            } else {
+              continue;
+            }
+            events.push({ id: ev.seq, type: ev.type, version: ev.version, ts: ev.ts, data });
+          }
+        }
+        const usage = turnUsageFromRow(row) ?? turnUsageFromEvents(events);
+        reply(200, {
+          turn: {
+            id: turnId,
+            status: events.some((e) => (e as { type?: string }).type === "turn.finished")
+              ? "finished"
+              : row.status,
+            model: row.model,
+            created_at: row.created_at,
+            finished_at: row.finished_at ?? null,
+            duration_ms: row.duration_ms ?? null,
+            ...(usage !== undefined ? { usage } : {}),
+            events,
+          },
         });
         return;
       }
+      sendJson(res, 404, {
+        ...(requestId !== undefined ? { requestId } : {}),
+        error: { code: "invalid_request", message: `turn ${turnId} not found` },
+      });
 
-      // POST /v1/sessions/{id}/abort — operator-driven turn abort (§"abort").
-      // Kills the tool call in flight, closes the model stream, and heals the
-      // transcript (stub tool messages) so the session can be resumed.
-      if (method === "POST" && segs.length === 4 && segs[3] === "abort") {
-        if (!session) {
-          sendError(res, "unknown_session", `session ${id} not found`);
-          return;
-        }
-        if (hasOrchestrator && typeof orchestrator!.abortTurn === "function") {
-          const kill = deps.onAbortKillTool as
-            | ((sessionId: string) => Promise<boolean> | boolean)
-            | undefined;
-          // Capture the in-flight call before unwinding: the tracker clears
-          // as the turn settles, and the response reports what *was* killed.
-          const inFlight = activeToolCallFor(id) ?? null;
-          const aborted = await orchestrator!.abortTurn(id, (sid) => (kill ? kill(sid) : false));
-          const after = await lookupSession(id);
-          sendJson(res, 200, {
-            ok: true,
-            status: aborted ? "aborted" : "idle",
-            aborted: {
-              requested: aborted,
-              sessionId: id,
-              activeToolCall: inFlight,
-            },
-            session: after ?? session,
-          });
-          return;
-        }
-        // No orchestrator (model-provider fallback): the SSE stream's
-        // request-close handler owns cancellation and there is no turn
-        // identity to heal server-side — nothing to abort.
-        sendJson(res, 200, {
-          ok: true,
-          status: "idle",
-          aborted: { requested: false, sessionId: id, activeToolCall: null },
-          session,
-        });
-        return;
-      }
-
-      // POST /v1/sessions/{id}/compact | /handoff — run a throwaway summary
-      // turn and start a fresh transcript with the produced artifact. Both
-      // accept an optional `guidance` field for the summarization model.
-      if (
-        method === "POST" &&
-        segs.length === 4 &&
-        (segs[3] === "compact" || segs[3] === "handoff")
-      ) {
-        if (!session) {
-          sendError(res, "unknown_session", `session ${id} not found`);
-          return;
-        }
-        const compaction = deps.compaction;
-        if (typeof compaction !== "function") {
-          sendError(res, "internal", "compaction is not configured on this server");
-          return;
-        }
-        let guidance: string | undefined;
-        try {
-          const raw = await readBody(req);
-          const parsed: unknown = raw ? JSON.parse(raw) : {};
-          if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-            throw new Error("not an object");
-          }
-          const body = parsed as Record<string, unknown>;
-          if (body.guidance !== undefined && typeof body.guidance !== "string") {
-            sendError(res, "invalid_request", "guidance must be a string");
-            return;
-          }
-          guidance = typeof body.guidance === "string" ? body.guidance : undefined;
-        } catch (err) {
-          if ((err as Error).message === "not an object") {
-            sendError(res, "invalid_request", "request body must be a JSON object");
-            return;
-          }
-          // malformed JSON body — treat as empty body
-        }
-        const kind: CompactionKind = segs[3] === "compact" ? "compact" : "handoff";
-        try {
-          const result = await compaction(id, kind, guidance);
-          const targetId = typeof result.sessionId === "string" ? result.sessionId : id;
-          sendJson(res, 200, {
-            ok: true,
-            kind,
-            summary: result.summary,
-            model: result.model,
-            truncated: result.truncated === true,
-            sessionId: targetId,
-          });
-        } catch (err) {
-          const code =
-            (err as { code?: string }).code === "unknown_session"
-              ? "unknown_session"
-              : "provider_error";
-          sendError(res, code, err instanceof Error ? err.message : String(err));
-        }
-        return;
-      }
-
-      // POST /v1/sessions/{id}/shake — truncate tool args/results in place.
-      if (method === "POST" && segs.length === 4 && segs[3] === "shake") {
-        if (!session) {
-          sendError(res, "unknown_session", `session ${id} not found`);
-          return;
-        }
-        const shake = deps.shake;
-        if (typeof shake !== "function") {
-          sendError(res, "internal", "shake is not configured on this server");
-          return;
-        }
-        try {
-          const outcome = await shake(id);
-          const after = await lookupSession(id);
-          sendJson(res, 200, {
-            ok: true,
-            ...outcome,
-            session: after ?? session,
-          });
-        } catch (err) {
-          sendError(res, "internal", err instanceof Error ? err.message : String(err));
-        }
-        return;
-      }
-
-      // POST /v1/sessions/{id}/turns — stream SSE.
-      if (method === "POST" && segs.length === 4 && segs[3] === "turns") {
-        if (!session) {
-          sendError(res, "unknown_session", `session ${id} not found`);
-          return;
-        }
-        // Revive (§4.5): a turn on a dormant session implicitly reopens it —
-        // status → open, detached_at cleared, retention clock reset. The
-        // session_closed (409) error code is gone: nothing about dormancy
-        // rejects a turn. The mutation is best-effort; the stream still runs
-        // if the store write fails.
-        if (session.status === "dormant") {
-          if (hasStore && typeof store!.reviveSession === "function") {
-            try {
-              await store!.reviveSession(id);
-              const revived = await lookupSession(id);
-              if (revived) session = revived;
-            } catch {
-              // revival is best effort; proceed with the turn
-            }
-          } else {
-            session.status = "open";
-            session.detached_at = null;
-          }
-        }
-        await streamTurn(req, res, session);
-        return;
-      }
+      return;
     }
 
-    sendError(res, "invalid_request", `unknown route: ${method} ${req.url ?? ""}`);
+    if (type === "turn.abort") {
+      if (hasOrchestrator && typeof orchestrator!.abortTurn === "function") {
+        const kill = deps.onAbortKillTool as
+          | ((sessionId: string) => Promise<boolean> | boolean)
+          | undefined;
+        // Capture the in-flight call before unwinding: the tracker clears
+        // as the turn settles, and the response reports what *was* killed.
+        const inFlight = activeToolCallFor(id) ?? null;
+        const aborted = await orchestrator!.abortTurn(id, (sid) => (kill ? kill(sid) : false));
+        const after = await lookupSession(id);
+        reply(200, {
+          ok: true,
+          status: aborted ? "aborted" : "idle",
+          aborted: {
+            requested: aborted,
+            sessionId: id,
+            activeToolCall: inFlight,
+          },
+          session: after ?? session,
+        });
+        return;
+      }
+      // No orchestrator (model-provider fallback): there is no live
+      // turn handle to heal — nothing to abort.
+      reply(200, {
+        ok: true,
+        status: "idle",
+        aborted: { requested: false, sessionId: id, activeToolCall: null },
+        session,
+      });
+
+      return;
+    }
+
+    if (type === "compaction.run") {
+      const compaction = deps.compaction;
+      if (typeof compaction !== "function") {
+        fail("internal", "compaction is not configured on this server");
+        return;
+      }
+      if (data.kind !== "compact" && data.kind !== "handoff") {
+        fail("invalid_request", 'kind must be "compact" or "handoff"');
+        return;
+      }
+      if (data.guidance !== undefined && typeof data.guidance !== "string") {
+        fail("invalid_request", "guidance must be a string");
+        return;
+      }
+      const kind = data.kind as CompactionKind;
+      const guidance = typeof data.guidance === "string" ? data.guidance : undefined;
+      try {
+        const result = await compaction(id, kind, guidance);
+        const targetId = typeof result.sessionId === "string" ? result.sessionId : id;
+        reply(200, {
+          ok: true,
+          kind,
+          summary: result.summary,
+          model: result.model,
+          truncated: result.truncated === true,
+          sessionId: targetId,
+        });
+      } catch (err) {
+        const code =
+          (err as { code?: string }).code === "unknown_session"
+            ? "unknown_session"
+            : "provider_error";
+        fail(code, err instanceof Error ? err.message : String(err));
+      }
+
+      return;
+    }
+
+    if (type === "transcript.shake") {
+      const shake = deps.shake;
+      if (typeof shake !== "function") {
+        fail("internal", "shake is not configured on this server");
+        return;
+      }
+      try {
+        const outcome = await shake(id);
+        const after = await lookupSession(id);
+        reply(200, {
+          ok: true,
+          ...outcome,
+          session: after ?? session,
+        });
+      } catch (err) {
+        fail("internal", err instanceof Error ? err.message : String(err));
+      }
+
+      return;
+    }
+
+    if (type === "turn.start") {
+      await startTurn(res, session, data, requestId);
+      return;
+    }
+
+    fail("invalid_request", `unsupported message type: ${type}`);
+    return;
   }
 
-  async function streamTurn(
-    req: IncomingMessage,
+  /**
+   * Start a turn in the background: the messages POST returns 202 at once
+   * and progress/terminal events arrive on the session stream. The server
+   * owns the turn — a stream disconnect detaches, never aborts, unless the
+   * turn opted into `abortOnDisconnect` bound to a specific `streamId`
+   * (the `stream.hello` id emitted on that stream).
+   */
+  async function startTurn(
     res: ServerResponse,
     session: SessionRecord,
+    data: Record<string, unknown>,
+    requestId: string | undefined,
   ): Promise<void> {
+    // Revive (§4.5): a turn on a dormant session implicitly reopens it.
+    if (session.status === "dormant") {
+      if (hasStore && typeof store!.reviveSession === "function") {
+        try {
+          await store!.reviveSession(session.id);
+          const revived = await lookupSession(session.id);
+          if (revived) session = revived;
+        } catch {
+          // revival is best effort; proceed with the turn
+        }
+      } else {
+        session.status = "open";
+        session.detached_at = null;
+      }
+    }
     // The caller revives dormant sessions before reaching here, so the only
-    // non-open status left is a genuine internal inconsistency. The
-    // `session_closed` (409) error code is gone (§4.6): nothing about
-    // dormancy rejects a turn.
+    // non-open status left is a genuine internal inconsistency.
     if (session.status !== "open") {
-      sendError(res, "internal", `session ${session.id} is not open (status=${session.status})`);
+      sendErrorWithRequestId(
+        res,
+        "internal",
+        `session ${session.id} is not open (status=${session.status})`,
+        requestId,
+      );
       return;
     }
-
-    let body: Record<string, unknown>;
-    try {
-      const raw = await readBody(req);
-      const parsed: unknown = raw ? JSON.parse(raw) : {};
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
-        throw new Error("not an object");
-      body = parsed as Record<string, unknown>;
-    } catch {
-      sendError(res, "invalid_request", "request body must be a JSON object");
+    if (typeof data.prompt !== "string" || data.prompt.length === 0) {
+      sendErrorWithRequestId(
+        res,
+        "invalid_request",
+        "prompt must be a non-empty string",
+        requestId,
+      );
       return;
     }
-
-    if (typeof body.prompt !== "string" || body.prompt.length === 0) {
-      sendError(res, "invalid_request", "prompt must be a non-empty string");
+    if (data.model !== undefined && typeof data.model !== "string") {
+      sendErrorWithRequestId(res, "invalid_request", "model must be a string", requestId);
       return;
     }
-    if (body.model !== undefined && typeof body.model !== "string") {
-      sendError(res, "invalid_request", "model must be a string");
+    if (data.abortOnDisconnect !== undefined && typeof data.abortOnDisconnect !== "boolean") {
+      sendErrorWithRequestId(
+        res,
+        "invalid_request",
+        "abortOnDisconnect must be a boolean",
+        requestId,
+      );
       return;
     }
-    if (body.abortOnDisconnect !== undefined && typeof body.abortOnDisconnect !== "boolean") {
-      sendError(res, "invalid_request", "abortOnDisconnect must be a boolean");
+    if (data.streamId !== undefined && typeof data.streamId !== "string") {
+      sendErrorWithRequestId(res, "invalid_request", "streamId must be a string", requestId);
       return;
     }
 
     const model = deps.model;
     if (!hasOrchestrator && (!model || typeof model.runTurn !== "function")) {
-      sendError(res, "internal", "no model provider configured");
+      sendErrorWithRequestId(res, "internal", "no model provider configured", requestId);
       return;
     }
 
-    res.statusCode = 200;
-    res.setHeader("content-type", "text/event-stream");
-    res.setHeader("cache-control", "no-cache");
-    res.setHeader("connection", "keep-alive");
-    res.flushHeaders?.();
-
-    const controller = new AbortController();
-    let closed = false;
-    let handle: TurnHandleLike | undefined;
     // Usage as of a terminal cut (abort/error), when the model reported any.
     const cutUsage = (): unknown => {
       const f = deps.onUsageFor;
       return typeof f === "function" ? f(session.id) : undefined;
     };
-    // Disconnect policy (yog#31): linger is the DEFAULT — a dropped
-    // connection only detaches the stream; the engine runs the turn to its
-    // terminal state, which persists as usual and stays replayable from
-    // the turn-status endpoint. A client that wants the legacy behavior
-    // (abort the turn when the wire goes away) must ask for it with
-    // `abortOnDisconnect: true` — the abort endpoint (`POST /abort` or
-    // Esc in the TUI) remains the way to stop a turn while attached.
-    const linger = body.abortOnDisconnect !== true;
-    const onClose = (): void => {
-      if (closed) return;
-      closed = true;
-      if (linger) return;
-      controller.abort(new Error("client disconnected"));
-      // Fan the abort out to the orchestrator (queued turns are dropped,
-      // in-flight turns get their handle promise rejected) — but only after
-      // the current turn stack unwinds: `handle.abort()` rejects the turn
-      // promise synchronously, and aborting mid-`await handle.promise` would
-      // re-enter this handler (double close), skip the terminal-abort grace
-      // window, and race the engine's `turn.aborted` publication.
-      setTimeout(() => {
-        try {
-          handle?.abort(new Error("client disconnected"));
-        } catch {
-          // abort is best effort
-        }
-      }, 0);
-    };
-    req.on("close", onClose);
-    res.on("close", onClose);
-
-    let sawError = false;
-    /** True once the engine announced `turn.started` on this stream's turn. */
-    let turnStarted = false;
     const turnLog = logger.child({ sessionId: session.id });
-    const emit = async (ev: SseEnvelope): Promise<void> => {
-      if (closed || res.writableEnded || res.destroyed) return;
-      if (ev.type === "error") sawError = true;
-      turnLog.debug({ event: ev }, "turn event");
-      res.write(encodeEvent(ev));
+    const persistEvent = async (ev: SseEnvelope): Promise<void> => {
+      if (!store?.addEvent) return;
+      try {
+        const payload = (ev as { data?: unknown }).data;
+        await store.addEvent(session.id, {
+          type: ev.type,
+          payload: JSON.stringify(payload),
+          version: typeof ev.version === "number" ? ev.version : 1,
+        });
+      } catch {
+        // persistence is best effort
+      }
     };
-    // Linger mode (the default): after the client hangs up, the bus listener
-    // keeps consuming envelopes so the stream's own bookkeeping stays
-    // correct — `turnStarted`/`sawError` still track the engine's progress
-    // (terminal framing depends on them), while `emit`'s `closed` guard
-    // makes the wire writes no-ops. Persistence is NOT done here: the
-    // engine's sink in serve.ts already recorded every event, so a
-    // persist-only path would double-write `turn_events` (§4.8 dedup).
-    const onBusEventLingering = (ev: SseEnvelope): void => {
+    // Track turn.started/error for the terminal synthesis below: on the
+    // orchestrator path the engine emits no terminal event on abort, so
+    // the adapter frames `turn.aborted` itself (and persists it — the row
+    // turn.get replays for an aborted turn).
+    let turnStarted = false;
+    let sawError = false;
+    const track = (ev: SseEnvelope): void => {
       if (ev.type === "turn.started") turnStarted = true;
-      sawError = sawError || ev.type === "error";
+      if (ev.type === "error") sawError = true;
+    };
+    const channel = channelFor(session.id);
+    bus?.on(channel, track);
+    const untrack = (): void => {
+      bus?.off(channel, track);
+    };
+    const emitToStream = async (ev: SseEnvelope): Promise<void> => {
+      turnLog.debug({ event: ev }, "turn event");
+      publish(session.id, ev);
     };
 
-    // Record the turn row up front on the fallback path only (best effort:
-    // persistence never fails the stream). On the orchestrator path the
-    // composed executeTurn in serve.ts owns the turn row — creating a
-    // second adapter row here would leave a duplicate `running` row with
-    // no usage, events, or transcript rows stamped on it, and a
-    // reconnecting client polling for that row would never see the
-    // settled turn's usage or messages land. The row id is stamped on
-    // the transcript rows this turn produces (§4.8).
+    // Record the turn row up front on the fallback path only (best effort).
+    // On the orchestrator path the composed executeTurn in serve.ts owns the
+    // turn row — creating a second adapter row here would leave a duplicate
+    // `running` row (see the former streamTurn comment).
     let turnRowId: number | null = null;
     if (store?.addTurn && !hasOrchestrator) {
       try {
         const row = await store.addTurn(session.id, {
           role: "user",
-          content: typeof body.prompt === "string" ? body.prompt : "",
+          content: typeof data.prompt === "string" ? data.prompt : "",
           status: "running",
-          ...(typeof body.model === "string" ? { model: body.model } : {}),
+          ...(typeof data.model === "string" ? { model: data.model } : {}),
         });
         turnRowId =
           row && typeof (row as { id?: number }).id === "number"
@@ -1049,164 +1116,33 @@ export function createHttpServer(deps: HttpDeps): Server {
         // persistence is best effort
       }
     }
-    const persistEvent = async (ev: SseEnvelope): Promise<void> => {
-      if (!store?.addEvent) return;
-      try {
-        const data = (ev as { data?: unknown }).data;
-        await store.addEvent(session.id, {
-          type: ev.type,
-          payload: JSON.stringify(data),
-          version: typeof ev.version === "number" ? ev.version : 1,
-        });
-      } catch {
-        // persistence is best effort
-      }
-    };
 
-    const channel = `session:${session.id}`;
-    // Event-persistence dedup (§4.8): on the orchestrator path, the composed
-    // `executeTurn` in serve.ts publishes each envelope to the bus *and*
-    // persists it through its own sink (`store.addEvent`). The bus
-    // subscriber's only job here is to deliver the envelope to SSE — it
-    // must NOT persist again, or every event lands in `turn_events`
-    // twice. On the fallback path (no orchestrator) there is no sink, so
-    // `persistEvent` is the sole writer and stays.
-    const onBusEvent = (ev: SseEnvelope): void => {
-      if (ev.type === "turn.started") turnStarted = true;
-      void emit(ev);
-    };
-    // Linger mode: the wire listener below is subscribed unconditionally —
-    // before the disconnect `emit` frames envelopes as usual; after it, the
-    // `closed` guard turns those writes into no-ops while bookkeeping keeps
-    // running. Nothing is persisted from either bus listener (§4.8 dedup).
-    const subscribeBus = (fn: (ev: SseEnvelope) => void): void => {
-      bus?.on(channel, fn);
-      if (linger) bus?.on(channel, onBusEventLingering);
-    };
-    const unsubscribeBus = (fn: (ev: SseEnvelope) => void): void => {
-      bus?.off(channel, fn);
-      if (linger) bus?.off(channel, onBusEventLingering);
-    };
-    try {
-      if (hasOrchestrator) {
-        subscribeBus(onBusEvent);
-        // Orchestrator path: the composed executeTurn publishes envelopes to
-        // the per-daemon bus; we subscribe for this session and frame them.
-        handle = orchestrator!.runTurn(session.id, body);
-        controller.signal.addEventListener("abort", () => handle?.abort(), { once: true });
-        try {
-          await handle.promise;
-          // Settle-sync the adapter's turn row (best effort): the
-          // orchestrator path settles its own executeTurn row; this one is
-          // what the transcript dump reads, so it must not stay `running`
-          // after a successful turn.
-          if (store !== undefined && store.finishTurn !== undefined) {
-            try {
-              await store.finishTurn(session.id, turnRowId, "finished");
-            } catch {
-              // settle-sync is best effort
-            }
-          }
-        } catch (err) {
-          // An operator abort rejects the handle immediately — the abort is
-          // hard: the adapter frames the terminal `turn.aborted` itself and
-          // ends the stream NOW. The engine keeps unwinding in the
-          // background (kill tool, heal transcript, persist); it does not
-          // emit a terminal event, so the adapter both frames it on the
-          // wire and persists it — this is the row turn-status recovery
-          // replays for an aborted turn.
-          const isAbort = (err as Error | undefined)?.name === "AbortError";
-          // The engine emits no terminal event on abort, so the adapter
-          // frames `turn.aborted` itself: persist it (the sole writer of
-          // this event — turn-status recovery replays it), frame it on the
-          // wire while the client is still attached (a lingered/disconnected
-          // stream drops the write inside `emit`), and settle the adapter's
-          // turn row so the transcript dump does not show `running` forever.
-          if (isAbort && turnStarted) {
-            const envelope = {
-              id: 0,
-              type: "turn.aborted",
-              version: 1,
-              ts: Date.now(),
-              data: {
-                reason: (err as Error).message || "turn aborted",
-                ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
-              },
-            } as SseEnvelope;
-            await persistEvent(envelope);
-            await emit(envelope);
-            if (store !== undefined && store.finishTurn !== undefined) {
-              try {
-                await store.finishTurn(session.id, turnRowId, "aborted");
-              } catch {
-                // settle-sync is best effort
-              }
-            }
-          }
-          if (!isAbort && !sawError && !closed && !res.writableEnded) {
-            const e = err as { code?: string; message?: string };
-            await emit({
-              id: 0,
-              type: "error",
-              version: 1,
-              ts: Date.now(),
-              code: e.code ?? "provider_error",
-              data: {
-                code: e.code ?? "provider_error",
-                message: e.message ?? String(err),
-                ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
-              },
-            } as SseEnvelope);
-          }
-        }
-      } else {
-        // Fallback path (no orchestrator): drive the model provider directly,
-        // persisting each event so terminal state stays recoverable. Hydrate
-        // the prior transcript (§4.4) and pass the full message list to the
-        // model so context carries across turns. On success, append this
-        // turn's messages to the canonical transcript; a failed turn
-        // persists nothing (the catch is a no-op for the transcript).
-        const fallbackPrior = (await (store?.getTranscript
-          ? store.getTranscript(session.id)
-          : [])) as ChatCompletionMessageParam[];
-        const fallbackMessages: ChatCompletionMessageParam[] = [
-          ...fallbackPrior,
-          { role: "user", content: typeof body.prompt === "string" ? body.prompt : "" },
-        ];
-        const fallbackStartLen = fallbackPrior.length;
-        const fallbackReq = { ...body, messages: fallbackMessages };
-        try {
-          await model!.runTurn(session.id, fallbackReq, {
-            emit: async (ev) => {
-              await persistEvent(ev);
-              await emit(ev);
+    const linger = data.abortOnDisconnect !== true;
+    const boundStreamId = !linger && typeof data.streamId === "string" ? data.streamId : undefined;
+
+    if (hasOrchestrator) {
+      const handle = orchestrator!.runTurn(session.id, data);
+      if (boundStreamId !== undefined) {
+        const list = turnsByStream.get(boundStreamId) ?? [];
+        list.push({ handle });
+        turnsByStream.set(boundStreamId, list);
+      }
+      const finishError = async (err: unknown): Promise<void> => {
+        untrack();
+        const isAbort = (err as Error | undefined)?.name === "AbortError";
+        if (isAbort && turnStarted) {
+          const envelope = {
+            id: 0,
+            type: "turn.aborted",
+            version: 1,
+            ts: Date.now(),
+            data: {
+              reason: (err as Error).message || "turn aborted",
+              ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
             },
-            signal: controller.signal,
-          });
-          if (store?.appendMessages && fallbackMessages.length > fallbackStartLen) {
-            try {
-              await store.appendMessages(
-                session.id,
-                fallbackMessages.slice(fallbackStartLen),
-                turnRowId,
-              );
-            } catch {
-              // persistence is best effort
-            }
-          }
-          // Settle-sync the adapter's turn row (best effort): with no
-          // orchestrator (injected-deps / test daemons) nothing else settles
-          // this row — it must not stay `running` after a finished turn.
-          if (store !== undefined && store.finishTurn !== undefined) {
-            try {
-              await store.finishTurn(session.id, turnRowId, "finished");
-            } catch {
-              // settle-sync is best effort
-            }
-          }
-        } catch {
-          // Failed turn persists nothing (except its event log, which is
-          // diagnostic). The transcript stays at the last turn boundary.
+          } as SseEnvelope;
+          await persistEvent(envelope);
+          await emitToStream(envelope);
           if (store !== undefined && store.finishTurn !== undefined) {
             try {
               await store.finishTurn(session.id, turnRowId, "aborted");
@@ -1214,29 +1150,253 @@ export function createHttpServer(deps: HttpDeps): Server {
               // settle-sync is best effort
             }
           }
+          return;
+        }
+        if (!isAbort && !sawError) {
+          const e = err as { code?: string; message?: string };
+          await emitToStream({
+            id: 0,
+            type: "error",
+            version: 1,
+            ts: Date.now(),
+            code: e.code ?? "provider_error",
+            data: {
+              code: e.code ?? "provider_error",
+              message: e.message ?? String(err),
+              ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
+            },
+          } as SseEnvelope);
+        }
+      };
+      void handle.promise.then(
+        async () => {
+          untrack();
+          if (store !== undefined && store.finishTurn !== undefined) {
+            try {
+              await store.finishTurn(session.id, turnRowId, "finished");
+            } catch {
+              // settle-sync is best effort
+            }
+          }
+        },
+        (err: unknown) => void finishError(err),
+      );
+    } else {
+      // Fallback path (no orchestrator): drive the model provider directly
+      // in the background, persisting each event so terminal state stays
+      // recoverable. Hydrate the prior transcript (§4.4) and pass the full
+      // message list to the model so context carries across turns.
+      const controller = new AbortController();
+      if (boundStreamId !== undefined) {
+        const list = turnsByStream.get(boundStreamId) ?? [];
+        list.push({ controller });
+        turnsByStream.set(boundStreamId, list);
+      }
+      void (async (): Promise<void> => {
+        try {
+          const fallbackPrior = (await (store?.getTranscript
+            ? store.getTranscript(session.id)
+            : [])) as ChatCompletionMessageParam[];
+          const fallbackMessages: ChatCompletionMessageParam[] = [
+            ...fallbackPrior,
+            { role: "user", content: typeof data.prompt === "string" ? data.prompt : "" },
+          ];
+          const fallbackStartLen = fallbackPrior.length;
+          const fallbackReq = { ...data, messages: fallbackMessages };
+          try {
+            await model!.runTurn(session.id, fallbackReq, {
+              emit: async (ev) => {
+                track(ev);
+                await persistEvent(ev);
+                await emitToStream(ev);
+              },
+              signal: controller.signal,
+            });
+            if (store?.appendMessages && fallbackMessages.length > fallbackStartLen) {
+              try {
+                await store.appendMessages(
+                  session.id,
+                  fallbackMessages.slice(fallbackStartLen),
+                  turnRowId,
+                );
+              } catch {
+                // persistence is best effort
+              }
+            }
+            // Settle-sync the adapter's turn row (best effort): with no
+            // orchestrator nothing else settles this row.
+            if (store !== undefined && store.finishTurn !== undefined) {
+              try {
+                await store.finishTurn(session.id, turnRowId, "finished");
+              } catch {
+                // settle-sync is best effort
+              }
+            }
+          } catch (err) {
+            // Failed turn persists nothing (except its event log).
+            if (store !== undefined && store.finishTurn !== undefined) {
+              try {
+                await store.finishTurn(session.id, turnRowId, "aborted");
+              } catch {
+                // settle-sync is best effort
+              }
+            }
+            if (!sawError && !controller.signal.aborted) {
+              const e = err as { code?: string; message?: string };
+              await emitToStream({
+                id: 0,
+                type: "error",
+                version: 1,
+                ts: Date.now(),
+                code: e.code ?? "provider_error",
+                data: {
+                  code: e.code ?? "provider_error",
+                  message: e.message ?? String(err),
+                  ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
+                },
+              } as SseEnvelope);
+            }
+            if (controller.signal.aborted && turnStarted) {
+              const envelope = {
+                id: 0,
+                type: "turn.aborted",
+                version: 1,
+                ts: Date.now(),
+                data: {
+                  reason: "client disconnected",
+                  ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
+                },
+              } as SseEnvelope;
+              await persistEvent(envelope);
+              await emitToStream(envelope);
+            }
+          }
+        } finally {
+          untrack();
+        }
+      })();
+    }
+
+    sendMessage(res, 202, "turn.start", { accepted: true }, requestId);
+  }
+
+  /** GET /v1/sessions/{id}/stream — the long-lived SSE event channel. */
+  async function streamSession(
+    req: IncomingMessage,
+    res: ServerResponse,
+    id: string,
+  ): Promise<void> {
+    const session = await lookupSession(id);
+    if (!session) {
+      sendError(res, "unknown_session", `session ${id} not found`);
+      return;
+    }
+    res.statusCode = 200;
+    res.setHeader("content-type", "text/event-stream");
+    res.setHeader("cache-control", "no-cache");
+    res.setHeader("connection", "keep-alive");
+    res.flushHeaders?.();
+
+    const streamId = randomUUID();
+    const channel = channelFor(id);
+    const hello = {
+      id: 0,
+      type: "stream.hello",
+      version: 1,
+      ts: Date.now(),
+      data: { streamId, sessionId: id },
+    } as SseEnvelope;
+    res.write(encodeEvent(hello));
+
+    // Replay any running turn's persisted events so a client that connects
+    // mid-turn sees turn.started + deltas instead of a cold stream.
+    if (
+      hasStore &&
+      typeof store!.listTurns === "function" &&
+      typeof store!.listEvents === "function"
+    ) {
+      try {
+        const rows = ((await store!.listTurns(id)) ?? []) as Array<Record<string, unknown>>;
+        const running = new Set(
+          rows.filter((r) => r.status === "running").map((r) => Number(r.id)),
+        );
+        if (running.size > 0) {
+          const events = ((await store!.listEvents(id)) ?? []) as Array<Record<string, unknown>>;
+          for (const ev of events) {
+            if (!running.has(Number(ev.turn_id))) continue;
+            let payload: unknown = ev.payload;
+            if (typeof payload === "string") {
+              try {
+                payload = JSON.parse(payload);
+              } catch {
+                continue;
+              }
+            }
+            res.write(
+              encodeEvent({
+                id: typeof ev.seq === "number" ? ev.seq : 0,
+                type: String(ev.type),
+                version: typeof ev.version === "number" ? ev.version : 1,
+                ts: typeof ev.ts === "number" ? ev.ts : Date.now(),
+                data: payload,
+              } as SseEnvelope),
+            );
+          }
+        }
+      } catch {
+        // replay is best effort; live events still flow
+      }
+    }
+
+    let closed = false;
+    const onBus = (ev: SseEnvelope): void => {
+      if (closed || res.writableEnded || res.destroyed) return;
+      try {
+        res.write(encodeEvent(ev));
+      } catch {
+        // dead socket; the close handler prunes it
+      }
+    };
+    bus?.on(channel, onBus);
+
+    const heartbeat = setInterval(() => {
+      if (closed || res.writableEnded || res.destroyed) return;
+      try {
+        res.write(": heartbeat\n\n");
+      } catch {
+        // dead socket
+      }
+    }, 15_000);
+    heartbeat.unref?.();
+
+    const onClose = (): void => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      bus?.off(channel, onBus);
+      // abortOnDisconnect binding: turns that opted in and named this
+      // stream are aborted when the stream goes away. The default linger
+      // policy leaves the turn running (turns are wire-independent).
+      const bound = turnsByStream.get(streamId);
+      if (bound) {
+        turnsByStream.delete(streamId);
+        for (const entry of bound) {
+          try {
+            entry.controller?.abort(new Error("client disconnected"));
+          } catch {
+            // best effort
+          }
+          setTimeout(() => {
+            try {
+              entry.handle?.abort(new Error("client disconnected"));
+            } catch {
+              // best effort
+            }
+          }, 0);
         }
       }
-    } catch (err) {
-      if (!sawError && !closed && !res.writableEnded) {
-        const e = err as { code?: string; message?: string };
-        await emit({
-          id: 0,
-          type: "error",
-          version: 1,
-          ts: Date.now(),
-          code: e.code ?? "provider_error",
-          data: {
-            code: e.code ?? "provider_error",
-            message: e.message ?? String(err),
-            ...(cutUsage() !== undefined ? { usage: cutUsage() } : {}),
-          },
-        } as SseEnvelope);
-      }
-    } finally {
-      unsubscribeBus(onBusEvent);
-      req.off("close", onClose);
-      res.off("close", onClose);
-      if (!res.writableEnded && !res.destroyed) res.end();
-    }
+    };
+    req.on("close", onClose);
+    res.on("close", onClose);
   }
 }

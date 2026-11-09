@@ -6,6 +6,7 @@ import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import type Fuse from "fuse-native";
 import { createHttpServer, type HttpDeps } from "./http.ts";
+import { MESSAGE_TYPES } from "./messages.ts";
 import { type SseEnvelope } from "./sse.ts";
 import { SessionStore } from "./store/sessions.ts";
 import { WorkerPool } from "./workpool.ts";
@@ -459,7 +460,8 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         contractVersion: "v1",
         models: [modelId],
         tools: ["bash"],
-        features: ["sse", "transcript", "abort", "compact", "handoff", "shake"],
+        features: ["messages", "stream", "transcript", "abort", "compact", "handoff", "shake"],
+        messageTypes: [...MESSAGE_TYPES],
       },
       contextWindowFor: (model: string) => modelInfo?.getContextWindow(model),
       ...(store ? { store } : {}),
@@ -467,7 +469,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       ...(compaction ? { compaction } : {}),
       bus,
       ...(shake ? { shake } : {}),
-      // Turn-abort kill chain (POST /v1/sessions/{id}/abort): kill the
+      // Turn-abort kill chain (`turn.abort` message): kill the
       // session's running bash script, then let the orchestrator unwind.
       onUsageFor: (sessionId: string) => usageBySession.get(sessionId),
       onAbortKillTool: (sessionId: string) => abortBash(sessionId),
@@ -532,6 +534,9 @@ function listen(
 
 function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
   return new Promise((resolve, reject) => {
+    // Long-lived session streams would otherwise hold `close` open;
+    // destroying them lets graceful shutdown proceed.
+    (server as { closeAllConnections?: () => void }).closeAllConnections?.();
     server.close((err) => (err ? reject(err) : resolve()));
   });
 }
