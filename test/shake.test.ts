@@ -146,7 +146,7 @@ describe("createShakeRunner", () => {
     ];
     const store = stubStore(rows);
     const shake = createShakeRunner({ store, registry });
-    const outcome = await shake("s1");
+    await shake("s1");
     expect(store.updateMessage).not.toHaveBeenCalled();
   });
 });
