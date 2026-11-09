@@ -39,6 +39,16 @@ export interface ToolCall {
 export interface ToolExecuteContext {
   /** Already-aborted signal ⇒ the call fails before the tool runs. */
   signal?: AbortSignal;
+  /**
+   * Abort sentinel polled while the tool runs (same contract as the turn
+   * engine's `isAborted`). When it flips, the call rejects with an
+   * `AbortError` so the engine's unwind/heal path synthetically resolves
+   * the announced call instead of waiting for a tool that may never settle.
+   * Callers that already pass `signal` derived from the same source get
+   * identical behaviour from either mechanism; predicate-only callers
+   * (no `signal`) still unwind mid-tool instead of hanging.
+   */
+  isAborted?: () => boolean;
   /** Owning session id — forwarded to the tool as the abort key. */
   sessionId?: string;
   /** Persistent-state directory handed to the tool (bash shell snapshots). */
@@ -115,9 +125,20 @@ export class ToolRegistry {
     const tool = this.tools.get(name);
     if (!tool) return undefined;
 
-    if (ctx.signal?.aborted) {
-      return tool.failure("aborted before the tool call started");
-    }
+    const makeAbortError = (): Error => {
+      const err = new Error("tool call aborted");
+      err.name = "AbortError";
+      return err;
+    };
+    const isAbortedNow = (): boolean => {
+      if (ctx.signal?.aborted === true) return true;
+      try {
+        return ctx.isAborted?.() === true;
+      } catch {
+        return false;
+      }
+    };
+    if (isAbortedNow()) throw makeAbortError();
 
     let parsed: unknown;
     try {
@@ -142,27 +163,44 @@ export class ToolRegistry {
         ...(ctx.stateDir !== undefined ? { stateDir: ctx.stateDir } : {}),
       })
       .then((res) => capToolResult(res));
-    if (ctx.signal) {
-      // Turn abort mid-call: reject so the turn engine's unwind/heal path
-      // runs (the announced-but-unanswered call is stubbed there). The
-      // tool's own late settlement is discarded — the turn is unwinding.
-      // An already-aborted signal rejects immediately: the `abort` event
-      // fired before this listener could attach, so check the flag first.
-      void runP.catch(() => undefined);
-      const abortErr = new Error("tool call aborted");
-      abortErr.name = "AbortError";
-      if (ctx.signal.aborted) throw abortErr;
-      return await Promise.race([
-        runP,
-        new Promise<never>((_resolve, reject) => {
-          ctx.signal!.addEventListener("abort", () => reject(abortErr), { once: true });
-        }),
-      ]);
-    }
+    // A thrown tool run becomes a failure result (never a turn unwind),
+    // matching the no-abort path below. Abort rejections are the only
+    // exceptions that propagate: they trigger the engine's heal path.
+    const settledP: Promise<ToolResult> = runP.catch((err: unknown) =>
+      tool.failure(err instanceof Error ? (err.message as string) : String(err)),
+    );
+    void settledP.catch(() => undefined);
     try {
-      return await runP;
-    } catch (err) {
-      return tool.failure(err instanceof Error ? (err.message as string) : String(err));
+      ctx.onStart?.(call);
+      if (ctx.signal || ctx.isAborted) {
+        // Turn abort mid-call: reject so the turn engine's unwind/heal path
+        // runs (the announced-but-unanswered call is stubbed there). The
+        // tool's own late settlement is discarded — the turn is unwinding.
+        // An already-aborted signal rejects immediately: the `abort` event
+        // fired before this listener could attach, so check the flag first.
+        const abortErr = makeAbortError();
+        if (isAbortedNow()) throw abortErr;
+        const abortP = new Promise<never>((_resolve, reject) => {
+          if (ctx.signal) {
+            ctx.signal.addEventListener("abort", () => reject(abortErr), { once: true });
+          }
+          if (ctx.isAborted) {
+            const timer = setInterval(() => {
+              if (isAbortedNow()) {
+                clearInterval(timer);
+                reject(abortErr);
+              }
+            }, 10);
+            timer.unref?.();
+            void settledP.then(
+              () => clearInterval(timer),
+              () => clearInterval(timer),
+            );
+          }
+        });
+        return await Promise.race([settledP, abortP]);
+      }
+      return await settledP;
     } finally {
       ctx.onEnd?.(call);
     }

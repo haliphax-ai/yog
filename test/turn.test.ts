@@ -753,3 +753,212 @@ describe("TurnEngine onUsage (cut-point usage)", () => {
     expect(seen.at(-1)).toEqual({ total_tokens: 20 });
   });
 });
+
+describe("TurnEngine abort of an active tool call (issue #35)", () => {
+  /** Tool that never settles: only an abort can unwind its call. */
+  const hangingTool: ToolSpec<{ text: string }> = {
+    name: "echo",
+    description: "Hang forever.",
+    schema: z.object({ text: z.string() }).strict(),
+    failure: (error) => ({ error }),
+    run: async () => new Promise<Record<string, unknown>>(() => undefined),
+  };
+  const hangingRegistry = new ToolRegistry([hangingTool]);
+
+  function toolCallClient(ids: string[]): OpenAI {
+    return {
+      chat: {
+        completions: {
+          create: async () =>
+            (async function* () {
+              yield {
+                choices: [
+                  {
+                    delta: {
+                      tool_calls: ids.map((id, i) => ({
+                        index: i,
+                        id,
+                        function: { name: "echo", arguments: '{"text":"hi"}' },
+                      })),
+                    },
+                  },
+                ],
+              };
+            })(),
+        },
+      },
+    } as unknown as OpenAI;
+  }
+
+  function danglingIds(messages: ChatCompletionMessageParam[]): string[] {
+    const announced = new Set<string>();
+    for (const m of messages) {
+      const rec = m as { role?: string; tool_calls?: Array<{ id?: string }> };
+      if (rec.role === "assistant" && Array.isArray(rec.tool_calls)) {
+        for (const tc of rec.tool_calls) {
+          if (typeof tc?.id === "string") announced.add(tc.id);
+        }
+      }
+    }
+    for (const m of messages) {
+      const rec = m as { role?: string; tool_call_id?: string };
+      if (rec.role === "tool" && typeof rec.tool_call_id === "string") {
+        announced.delete(rec.tool_call_id);
+      }
+    }
+    return [...announced];
+  }
+
+  function stubIds(messages: ChatCompletionMessageParam[]): string[] {
+    return messages
+      .filter((m) => m.role === "tool")
+      .map((m) => (m as { tool_call_id: string }).tool_call_id)
+      .filter((id) => {
+        const row = messages.find(
+          (x) => x.role === "tool" && (x as { tool_call_id?: string }).tool_call_id === id,
+        ) as { content?: string } | undefined;
+        return typeof row?.content === "string" && row.content.includes('"error"');
+      });
+  }
+
+  it("synthetically resolves a hanging tool call aborted via isAborted alone (no signal)", async () => {
+    const sink = new RecordingSink();
+    const messages = userMessages();
+    let aborted = false;
+    const healed: string[] = [];
+    const run = new TurnEngine(sink).run(
+      toolCallClient(["call_1"]),
+      "test-model",
+      messages,
+      hangingRegistry,
+      {
+        sessionId: "abort-predicate-only",
+        isAborted: () => aborted,
+        abortReason: "turn aborted by operator",
+        onHeal: (ids) => void healed.push(...ids),
+      },
+    );
+    await vi.waitFor(() => expect(sink.events.some((e) => e.type === "tool.call")).toBe(true));
+    aborted = true;
+    await expect(run).rejects.toThrow("tool call aborted");
+    // The announced call was synthetically resolved: no dangling ids, the
+    // stub ids reported via onHeal match the tool rows in the transcript.
+    expect(danglingIds(messages)).toEqual([]);
+    expect(healed).toEqual(["call_1"]);
+    expect(stubIds(messages)).toEqual(["call_1"]);
+  });
+
+  it("synthetically resolves every call when a multi-call round aborts mid-stream", async () => {
+    const sink = new RecordingSink();
+    const messages = userMessages();
+    const ac = new AbortController();
+    const hangingStreamClient: OpenAI = {
+      chat: {
+        completions: {
+          create: (args: { signal?: AbortSignal }) =>
+            (async function* () {
+              yield {
+                choices: [
+                  {
+                    delta: {
+                      tool_calls: [
+                        { index: 0, id: "call_a", function: { name: "echo", arguments: '{"t' } },
+                        { index: 1, id: "call_b", function: { name: "echo", arguments: '{"t' } },
+                      ],
+                    },
+                  },
+                ],
+              };
+              await new Promise<void>((_resolve, reject) => {
+                if (args.signal?.aborted) {
+                  reject(new Error("aborted"));
+                  return;
+                }
+                args.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+                  once: true,
+                });
+              });
+            })(),
+        },
+      },
+    } as unknown as OpenAI;
+    const healed: string[] = [];
+    const run = new TurnEngine(sink).run(hangingStreamClient, "test-model", messages, registry, {
+      sessionId: "abort-mid-stream-multi",
+      signal: ac.signal,
+      isAborted: () => ac.signal.aborted,
+      onHeal: (ids) => void healed.push(...ids),
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    ac.abort(new Error("turn aborted by operator"));
+    await expect(run).rejects.toThrow();
+    // Both announced calls were reconstructed and stubbed — neither dangles.
+    expect(danglingIds(messages)).toEqual([]);
+    expect(new Set(healed)).toEqual(new Set(["call_a", "call_b"]));
+    const assistantRows = messages.filter(
+      (m) => m.role === "assistant" && (m as { tool_calls?: unknown }).tool_calls !== undefined,
+    );
+    expect(
+      assistantRows.flatMap((m) =>
+        ((m as { tool_calls: Array<{ id: string }> }).tool_calls ?? []).map((tc) => tc.id),
+      ),
+    ).toEqual(expect.arrayContaining(["call_a", "call_b"]));
+  });
+
+  it("treats a throwing tool as a failure result (tool.result), not a turn failure", async () => {
+    const throwingTool: ToolSpec<{ text: string }> = {
+      name: "echo",
+      description: "Always throws.",
+      schema: z.object({ text: z.string() }).strict(),
+      failure: (error) => ({ error }),
+      run: async () => {
+        throw new Error("tool blew up");
+      },
+    };
+    const throwingRegistry = new ToolRegistry([throwingTool]);
+    const sink = new RecordingSink();
+    const messages = userMessages();
+    let calls = 0;
+    const client: OpenAI = {
+      chat: {
+        completions: {
+          create: async () => {
+            calls++;
+            if (calls === 1) {
+              return (async function* () {
+                yield {
+                  choices: [
+                    {
+                      delta: {
+                        tool_calls: [
+                          {
+                            index: 0,
+                            id: "call_1",
+                            function: { name: "echo", arguments: '{"text":"hi"}' },
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                };
+              })();
+            }
+            return (async function* () {
+              yield { choices: [{ delta: { content: "done" } }] };
+            })();
+          },
+        },
+      },
+    } as unknown as OpenAI;
+    const ac = new AbortController();
+    await new TurnEngine(sink).run(client, "test-model", messages, throwingRegistry, {
+      sessionId: "throwing-tool",
+      signal: ac.signal,
+      isAborted: () => ac.signal.aborted,
+    });
+    expect(sink.events.map((e) => e.type)).toContain("tool.result");
+    expect(sink.events.some((e) => e.type === "error")).toBe(false);
+    expect(sink.events.at(-1)?.type).toBe("turn.finished");
+    expect(danglingIds(messages)).toEqual([]);
+  });
+});
