@@ -55,7 +55,7 @@ export class CliShimDescriptor implements DescriptorFile {
       "  });",
       '  res.on("end", () => {',
       "    process.stdout.write(data);",
-      "    process.exit(res.statusCode ?? 200);",
+      "    process.exit(res.statusCode === 200 ? 0 : 1);",
       "  });",
       "});",
       "",
