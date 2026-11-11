@@ -1,5 +1,10 @@
 import { bashTool, ToolRegistry } from "./toolkit/index.ts";
-import { DescriptorRegistry, type DescriptorFile, ListDescriptor } from "./vfs/index.ts";
+import {
+  DescriptorRegistry,
+  type DescriptorChild,
+  ListDescriptor,
+  CliShimDescriptor,
+} from "./vfs/index.ts";
 
 /**
  * The harness's wiring manifest: the set of model-facing tools and the set of
@@ -11,8 +16,12 @@ import { DescriptorRegistry, type DescriptorFile, ListDescriptor } from "./vfs/i
 /** Model-facing harness tools. */
 export const AVAILABLE_TOOLS = [bashTool];
 
-/** Virtual filesystem descriptors, keyed by mount path. */
-export const AVAILABLE_DESCRIPTORS: Record<string, DescriptorFile> = {
+/**
+ * Virtual filesystem descriptors, keyed by mount path.
+ * The /bin folder is auto-created by the registry; only leaf nodes need explicit entries.
+ */
+export const AVAILABLE_DESCRIPTORS: Record<string, DescriptorChild> = {
+  "/bin/yog": new CliShimDescriptor(),
   "/list": new ListDescriptor(),
 };
 

@@ -60,7 +60,7 @@ export class DescriptorRegistry {
 
   /**
    * Register a node at the given mount path (leading slash optional).
-   * Intermediate path segments must already exist as folders.
+   * Intermediate folders are auto-created if missing.
    */
   add(path: string, node: DescriptorChild): void {
     const segments = normalizePath(path).split("/").filter(Boolean);
@@ -69,10 +69,16 @@ export class DescriptorRegistry {
     for (let i = 0; i < segments.length - 1; i++) {
       const segment = segments[i] as string;
       const intermediate = parent.get(segment);
-      if (!intermediate || intermediate.kind !== "folder") {
-        throw new Error(`descriptor path ${path} requires intermediate folder "${segment}"`);
+      if (!intermediate) {
+        // Auto-create intermediate folder
+        const folder = new DescriptorFolder();
+        parent.add(segment, folder);
+        parent = folder;
+      } else if (intermediate.kind !== "folder") {
+        throw new Error(`descriptor path ${path} has non-folder intermediate "${segment}"`);
+      } else {
+        parent = intermediate;
       }
-      parent = intermediate;
     }
     const name = segments[segments.length - 1] as string;
     parent.add(name, node);

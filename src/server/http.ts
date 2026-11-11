@@ -386,6 +386,56 @@ export function createHttpServer(deps: HttpDeps): Server {
       return;
     }
 
+    // POST /v1/agent-cli — CLI command dispatch (agent shim).
+    if (method === "POST" && segs[0] === "v1" && segs[1] === "agent-cli" && segs.length === 2) {
+      let body: Record<string, unknown> = {};
+      try {
+        const raw = await readBody(req);
+        const parsed: unknown = raw ? JSON.parse(raw) : {};
+        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+          body = parsed as Record<string, unknown>;
+        }
+      } catch {
+        res.statusCode = 400;
+        res.setHeader("content-type", "text/plain");
+        res.end("invalid request body: must be a JSON object");
+        return;
+      }
+      const cmd = body.command;
+      const args = body.args;
+      if (typeof cmd !== "string" || !cmd) {
+        res.statusCode = 400;
+        res.setHeader("content-type", "text/plain");
+        res.end("invalid request: command must be a non-empty string");
+        return;
+      }
+      if (args !== undefined && !Array.isArray(args)) {
+        res.statusCode = 400;
+        res.setHeader("content-type", "text/plain");
+        res.end("invalid request: args must be an array");
+        return;
+      }
+      const { getCommand } = await import("../server/cli.ts");
+      const command = getCommand(cmd);
+      if (!command) {
+        res.statusCode = 404;
+        res.setHeader("content-type", "text/plain");
+        res.end(`unknown command: ${cmd}\n`);
+        return;
+      }
+      try {
+        const output = command.execute((args as string[]) ?? []);
+        res.statusCode = 200;
+        res.setHeader("content-type", "text/plain");
+        res.end(output);
+      } catch (err) {
+        res.statusCode = 500;
+        res.setHeader("content-type", "text/plain");
+        res.end(`error: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+      return;
+    }
+
     if (segs[0] !== "v1") {
       sendError(res, "invalid_request", `unknown route: ${method} ${req.url ?? ""}`);
       return;

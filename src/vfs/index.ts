@@ -35,3 +35,4 @@ export * from "./constants.ts";
 export * from "./node.ts";
 export * from "./registry.ts";
 export { ListDescriptor } from "./descriptors/list.ts";
+export { CliShimDescriptor } from "./descriptors/cli-shim.ts";
