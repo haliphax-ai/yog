@@ -1,7 +1,6 @@
 import { bashTool, ToolRegistry } from "./toolkit/index.ts";
 import {
   DescriptorRegistry,
-  DescriptorFolder,
   type DescriptorChild,
   ListDescriptor,
   CliShimDescriptor,
