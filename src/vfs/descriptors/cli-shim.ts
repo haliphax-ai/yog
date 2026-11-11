@@ -13,6 +13,12 @@ export class CliShimDescriptor implements DescriptorFile {
   readonly mode = 0o100755; // executable
   readonly flags = 0; // no read/write capabilities via FUSE
 
+  #script: string;
+
+  constructor() {
+    this.#script = this.render();
+  }
+
   render(): string {
     return [
       "#!/usr/bin/env node",
@@ -24,7 +30,7 @@ export class CliShimDescriptor implements DescriptorFile {
       "",
       "const [command, ...args] = process.argv.slice(2);",
       "",
-      "if (!command) {",
+      'if (!command) {',
       '  process.stderr.write("usage: yog <command> [args...]\\n");',
       "  process.exit(1);",
       "}",
@@ -53,7 +59,7 @@ export class CliShimDescriptor implements DescriptorFile {
       "});",
       "",
       'req.on("error", (err) => {',
-      "  process.stderr.write(`error: ${err.message}\\n`);",
+      '  process.stderr.write(`error: ${err.message}\\n`);',
       "  process.exit(1);",
       "});",
       "",
@@ -61,5 +67,9 @@ export class CliShimDescriptor implements DescriptorFile {
       "req.end();",
       "",
     ].join("\n");
+  }
+
+  get size(): number {
+    return Buffer.byteLength(this.#script);
   }
 }
