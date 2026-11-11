@@ -1,4 +1,3 @@
-import { FILE_MODE } from "../constants.ts";
 import { type DescriptorFile } from "../node.ts";
 
 /**
