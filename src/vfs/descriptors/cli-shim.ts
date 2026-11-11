@@ -1,3 +1,4 @@
+import { DescriptorFlags } from "../constants.ts";
 import { type DescriptorFile } from "../node.ts";
 
 /**
@@ -11,7 +12,7 @@ import { type DescriptorFile } from "../node.ts";
 export class CliShimDescriptor implements DescriptorFile {
   readonly kind = "file" as const;
   readonly mode = 0o100755; // executable
-  readonly flags = 0; // no read/write capabilities via FUSE
+  readonly flags = DescriptorFlags.CanRead;
 
   #script: string;
 
