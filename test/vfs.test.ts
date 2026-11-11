@@ -106,10 +106,12 @@ describe("DescriptorRegistry path hierarchy", () => {
     expect(names).toEqual(["s1"]);
   });
 
-  it("requires intermediate folders to exist", () => {
+  it("auto-creates intermediate folders", () => {
     const registry = new DescriptorRegistry();
     const child = new ListDescriptor();
-    expect(() => registry.add("/a/b", child)).toThrow(/intermediate folder/);
+    expect(() => registry.add("/a/b", child)).not.toThrow();
+    expect(registry.has("/a/b")).toBe(true);
+    expect(registry.has("/a")).toBe(true);
   });
 
   it("rejects registering the root", () => {
