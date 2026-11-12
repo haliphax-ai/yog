@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import { parseSkillMarkdown } from "../src/skills/parser.ts";
 import { skillNameError, splitFullName } from "../src/skills/validator.ts";
 import { SkillManager } from "../src/skills/manager.ts";
-import { dispatchSkillsCommand } from "../src/skills/commands.ts";
+import { availableSkillsBlock, dispatchSkillsCommand } from "../src/skills/commands.ts";
 import { getCommand, registerCommand, type CliCommand } from "../src/server/cli.ts";
 
 const SKILL_MD = `---
@@ -33,6 +33,14 @@ function makeSkillTree(name: string, children: string[] = []): string {
     writeFileSync(join(childDir, "SKILL.md"), SKILL_MD.replace("demo", child));
   }
   return dir;
+}
+
+/** Options with the cwd-only skill source (keeps host-installed skills out). */
+function testDiscover(dir: string) {
+  return {
+    sources: [{ source: "cwd" as const, dir: ".yog/skills" }],
+    cwd: dir,
+  };
 }
 
 /** Register a minimal `skills` agent-CLI command over `manager` (test shim). */
@@ -104,7 +112,7 @@ describe("SkillManager", () => {
     mkdirSync(pkgDir, { recursive: true });
     mkdirSync(join(pkgDir, "scripts"), { recursive: true });
     writeFileSync(join(pkgDir, "SKILL.md"), SKILL_MD.replace("demo", "pkg"));
-    const mgr = new SkillManager({ discover: { cwd: dir } });
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
     await mgr.discover();
     const list = await mgr.list("s");
     expect(list.map((e) => e.name).sort()).toEqual(["bare", "pkg"]);
@@ -117,14 +125,14 @@ describe("SkillManager", () => {
     const skillsDir = join(dir, ".yog", "skills");
     mkdirSync(skillsDir, { recursive: true });
     writeFileSync(join(skillsDir, "SKILL.md"), SKILL_MD);
-    const mgr = new SkillManager({ discover: { cwd: dir } });
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
     await mgr.discover();
     expect(await mgr.list("s")).toEqual([]);
   });
 
   it("lists child skills only when the parent is loaded", async () => {
     const dir = makeSkillTree("parent", ["child"]);
-    const mgr = new SkillManager({ discover: { cwd: dir } });
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
     await mgr.discover();
     const before = await mgr.list("s");
     expect(before.map((e) => e.name).sort()).toEqual(["parent"]);
@@ -139,7 +147,7 @@ describe("SkillManager", () => {
 
   it("load/unload tracks scripts and instructions per session", async () => {
     const dir = makeSkillTree("demo");
-    const mgr = new SkillManager({ discover: { cwd: dir } });
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
     await mgr.discover();
     expect(mgr.getScriptPathsFor("s")).toEqual([]);
     expect(await mgr.load("demo", "s")).toMatchObject({ ok: true, status: "loaded" });
@@ -155,7 +163,7 @@ describe("SkillManager", () => {
 
   it("loading twice is a no-op", async () => {
     const dir = makeSkillTree("demo");
-    const mgr = new SkillManager({ discover: { cwd: dir } });
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
     await mgr.discover();
     expect(await mgr.load("demo", "s")).toMatchObject({ ok: true, status: "loaded" });
     expect(await mgr.load("demo", "s")).toMatchObject({ ok: true, status: "noop" });
@@ -163,21 +171,21 @@ describe("SkillManager", () => {
 
   it("unloading an unloaded skill is a no-op", async () => {
     const dir = makeSkillTree("demo");
-    const mgr = new SkillManager({ discover: { cwd: dir } });
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
     await mgr.discover();
     expect(await mgr.unload("demo", "s")).toMatchObject({ ok: false, status: "noop" });
   });
 
   it("loading an unknown skill fails", async () => {
     const dir = makeSkillTree("demo");
-    const mgr = new SkillManager({ discover: { cwd: dir } });
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
     await mgr.discover();
     expect(await mgr.load("nope", "s")).toMatchObject({ ok: false });
   });
 
   it("status reports loaded skills for the session", async () => {
     const dir = makeSkillTree("demo");
-    const mgr = new SkillManager({ discover: { cwd: dir } });
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
     await mgr.discover();
     expect(await mgr.status("s")).toEqual([]);
     await mgr.load("demo", "s");
@@ -191,7 +199,7 @@ describe("SkillManager", () => {
 describe("skills commands", () => {
   it("lists available skills with a --verbose block", async () => {
     const dir = makeSkillTree("demo");
-    const mgr = new SkillManager({ discover: { cwd: dir } });
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
     await mgr.discover();
     const result = await dispatchSkillsCommand(mgr, ["list", "--verbose"]);
     expect(result.ok).toBe(true);
@@ -200,7 +208,7 @@ describe("skills commands", () => {
 
   it("load/unload/status round-trip", async () => {
     const dir = makeSkillTree("demo");
-    const mgr = new SkillManager({ discover: { cwd: dir } });
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
     await mgr.discover();
     expect(await dispatchSkillsCommand(mgr, ["load", "demo"])).toMatchObject({ ok: true });
     expect(await dispatchSkillsCommand(mgr, ["status"])).toMatchObject({ ok: true });
@@ -209,7 +217,7 @@ describe("skills commands", () => {
 
   it("load requires a name", async () => {
     const dir = makeSkillTree("demo");
-    const mgr = new SkillManager({ discover: { cwd: dir } });
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
     await mgr.discover();
     const result = await dispatchSkillsCommand(mgr, ["load"]);
     expect(result.ok).toBe(false);
@@ -218,7 +226,7 @@ describe("skills commands", () => {
 
   it("unknown subcommands fail", async () => {
     const dir = makeSkillTree("demo");
-    const mgr = new SkillManager({ discover: { cwd: dir } });
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
     await mgr.discover();
     expect(await dispatchSkillsCommand(mgr, ["frobnicate"])).toMatchObject({ ok: false });
   });
@@ -227,7 +235,7 @@ describe("skills commands", () => {
 describe("agent-cli registry", () => {
   it("renders skill entries as text", async () => {
     const dir = makeSkillTree("demo");
-    const mgr = new SkillManager({ discover: { cwd: dir } });
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
     await mgr.discover();
     registerTestSkillsCommand(mgr);
     const text = await getCommand("skills")!.execute(["list"]);
@@ -236,7 +244,7 @@ describe("agent-cli registry", () => {
 
   it("reports load failures as text", async () => {
     const dir = makeSkillTree("demo");
-    const mgr = new SkillManager({ discover: { cwd: dir } });
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
     await mgr.discover();
     registerTestSkillsCommand(mgr);
     const ok = await getCommand("skills")!.execute(["load", "demo"]);
@@ -249,9 +257,32 @@ describe("agent-cli registry", () => {
 describe("skills command via agent-cli registry", () => {
   it("help describes the skills command", () => {
     const dir = makeSkillTree("demo");
-    const mgr = new SkillManager({ discover: { cwd: dir } });
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
     registerTestSkillsCommand(mgr);
     const help = getCommand("help")!.execute([]);
     expect(help).toContain("skills");
+  });
+});
+
+describe("available-skills prompt block", () => {
+  it("lists skills with descriptions and points at `yog skills help`", async () => {
+    const dir = makeSkillTree("demo");
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
+    await mgr.discover();
+    const block = await availableSkillsBlock(mgr, "s");
+    expect(block).toContain("# Available skills");
+    expect(block).toContain("- **demo** — A demo skill for testing");
+    expect(block).toContain("`yog skills help`");
+    expect(block).not.toContain("yog skills load");
+  });
+
+  it("hides loaded skills and renders child skills with a marker", async () => {
+    const dir = makeSkillTree("parent", ["child"]);
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
+    await mgr.discover();
+    await mgr.load("parent", "s");
+    const block = await availableSkillsBlock(mgr, "s");
+    expect(block).not.toContain("parent (child skill)");
+    expect(block).toContain("- **parent:child (child skill)** — A demo skill for testing");
   });
 });

@@ -35,7 +35,7 @@ import {
 import { onAgentSpawn } from "../worker/index.ts";
 import { SkillManager } from "../skills/index.ts";
 import { registerCommand, type CliCommand } from "./cli.ts";
-import { dispatchSkillsCommand } from "../skills/commands.ts";
+import { dispatchSkillsCommand, availableSkillsBlock } from "../skills/commands.ts";
 import { mkdir } from "../host.ts";
 import { logger } from "../log.ts";
 import { resolveConfig, type YogConfig, type PartialYogConfig } from "../config.ts";
@@ -402,12 +402,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       // instructions plus the available-skills block are appended to the
       // system prompt at the END (cache-stable prefix).
       const skillInstructions = skills ? await skills.getInstructions(sessionId) : "";
-      const availableSkillList = skills
-        ? (await skills.list(sessionId))
-            .filter((s) => !s.loaded)
-            .map((s) => `- ${s.name} — load with \`yog skills load ${s.name}\``)
-            .join("\n")
-        : "";
+      const availableSkillList = skills ? await availableSkillsBlock(skills, sessionId) : "";
       const sink: TurnSink = {
         async emit(ev: TurnEvent): Promise<void> {
           const envelope = ev as unknown as SseEnvelope;
@@ -458,9 +453,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         },
         ...(modelInfo ? { contextWindow: modelInfo.getContextWindow(model) ?? undefined } : {}),
         ...(skillInstructions ? { skillInstructions } : {}),
-        ...(availableSkillList
-          ? { availableSkills: `# Available skills\n\n${availableSkillList}` }
-          : {}),
+        ...(availableSkillList ? { availableSkills: availableSkillList } : {}),
       };
       try {
         await new TurnEngine(sink).run(client, model, messages, tools, turnOpts);

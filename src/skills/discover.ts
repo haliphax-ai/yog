@@ -23,7 +23,7 @@ import { exists, readdir, stat } from "../host.ts";
 import { readSkillFile } from "./parser.ts";
 import { packageDir } from "./package.ts";
 import { isValidSkillName, normalizePath, skillNameError, splitFullName } from "./validator.ts";
-import type { Skill, SkillMetadata, SkillSource } from "./types.ts";
+import type { Skill, SkillFrontmatter, SkillMetadata, SkillSource } from "./types.ts";
 
 /** Default source directories, in priority order. */
 export const DEFAULT_SKILL_SOURCES: ReadonlyArray<{ source: SkillSource; dir: string }> = [
@@ -174,12 +174,10 @@ async function discoverChildNames(dir: string): Promise<string[]> {
 export async function discoverSkills(options: DiscoverOptions = {}): Promise<SkillMetadata[]> {
   const cwd = options.cwd ?? process.cwd();
   const home = process.env.HOME;
-  const sources =
-    options.sources ??
-    DEFAULT_SKILL_SOURCES.map((s) => ({
-      source: s.source,
-      dir: resolveSourceDir(s.dir, cwd, home),
-    }));
+  const sources = (options.sources ?? DEFAULT_SKILL_SOURCES).map((s) => ({
+    source: s.source,
+    dir: resolveSourceDir(s.dir, cwd, home),
+  }));
   const found = new Map<string, SkillMetadata>();
   for (const { source, dir } of sources) {
     if (!(await isDir(dir))) continue;
@@ -265,14 +263,28 @@ export function isChildRef(ref: string): boolean {
   return splitFullName(ref)[1] !== undefined;
 }
 
-/** Build the system prompt section listing available (unloaded) skills. */
-export function formatAvailableSkills(metas: readonly SkillMetadata[]): string {
+/** Build the system prompt section listing available (unloaded) skills.
+ *
+ * One bullet per skill with its frontmatter description; a generic pointer
+ * to `yog skills help` follows (the agent learns the command surface from
+ * the help doc, not from per-skill load lines).
+ */
+export function formatAvailableSkills(
+  metas: readonly (SkillMetadata & Pick<SkillFrontmatter, "description">)[],
+): string {
   if (metas.length === 0) return "";
-  const lines = metas.map((m) => {
-    const desc = m.isChild ? " (child skill)" : "";
-    return `- ${m.fullName}${desc} — load with \`yog skills load ${m.fullName}\``;
+  const bullets = metas.map((m) => {
+    const desc = m.isChild ? `${m.fullName} (child skill)` : m.fullName;
+    const summary = m.description || "(no description)";
+    return `- **${desc}** — ${summary}`;
   });
-  return `# Available skills\n\n${lines.join("\n")}`;
+  return [
+    "# Available skills",
+    "",
+    ...bullets,
+    "",
+    "Interact with skills using `yog skills help` (list, load, unload, status).",
+  ].join("\\n");
 }
 
 /** Build the system prompt section for loaded skills (instructions). */

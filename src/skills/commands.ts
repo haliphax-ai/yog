@@ -19,7 +19,16 @@ export async function listSkills(
     command: "list",
     ok: true,
     entries,
-    ...(opts.verbose ? { message: formatAvailableSkills(await manager.discover()) } : {}),
+    ...(opts.verbose
+      ? {
+          message: formatAvailableSkills(
+            (await manager.discover()).map((s) => ({
+              ...s,
+              description: s.frontmatter.description,
+            })),
+          ),
+        }
+      : {}),
   };
 }
 
@@ -114,11 +123,21 @@ export async function skillInstructions(manager: SkillManager): Promise<string> 
   return `# Loaded skill instructions\n\n${loaded}`;
 }
 
-/** Available-skills block for the initial system message, if any. */
-export async function availableSkillsBlock(manager: SkillManager): Promise<string> {
+/** Available-skills block for the system prompt, if any.
+ *
+ * Lists everything the session can see (child skills included) minus
+ * what is already loaded, so the prompt advertises the full surface.
+ */
+export async function availableSkillsBlock(
+  manager: SkillManager,
+  sessionId = manager.sessionId,
+): Promise<string> {
   const available = await manager.discover();
+  const loaded = new Set(manager.getLoaded(sessionId).map((s) => s.fullName));
   return formatAvailableSkills(
-    available.filter((s) => !manager.getLoaded().some((l) => l.fullName === s.fullName)),
+    available
+      .filter((s) => !loaded.has(s.fullName))
+      .map((s) => ({ ...s, description: s.frontmatter.description })),
   );
 }
 
