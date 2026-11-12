@@ -6,14 +6,14 @@ features are presented to agents as proxied virtual file descriptors.
 
 ## Documentation
 
-The docs live in `docs/`, split by concern with an index per directory:
+The docs live in `docs/`, one document per concern:
 
-- [Contract](docs/contract/README.md): the v1 HTTP/SSE wire contract. Routes,
+- [Contract](docs/contract.md): the v1 HTTP/SSE wire contract. Routes,
   message types, stream events, aborts, rate limits, disconnects, and
   session dormancy.
-- [Operations](docs/operations/README.md): running the daemon. CLI,
+- [Operations](docs/operations.md): running the daemon. CLI,
   configuration, Docker, state on disk, and environment requirements.
-- [Harness](docs/harness/README.md): what agents get. The virtual
+- [Harness](docs/harness.md): what agents get. The virtual
   filesystem, the bash tool, skills, state, and token accounting.
 - [Token accuracy](docs/token-accuracy.md): the plan and incident analysis
   behind the token estimator and `yog calibrate`.
