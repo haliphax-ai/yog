@@ -2,6 +2,7 @@
  * fuse-overlay-harness — agent harness with a virtual FUSE filesystem.
  *
  * Usage: yog serve [--host <addr>] [--port <n>] [--config <path>]
+ *       | yog skills <list|load|unload|status> [name]
  *
  * `serve` starts the long-lived HTTP/SSE daemon (see server/serve.ts),
  * which owns the in-process run orchestration (OpenAI client, state db,
@@ -10,6 +11,8 @@
  * application, which speaks the v1 HTTP/SSE contract directly.
  */
 import { parseServeArgs } from "./cli.ts";
+import { dispatchSkillsCommand } from "./skills/commands.ts";
+import { SkillManager } from "./skills/index.ts";
 import { createDaemon } from "./server/index.ts";
 import { logger } from "./log.ts";
 
@@ -38,6 +41,23 @@ async function serve(argv: readonly string[]): Promise<void> {
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  if (argv[0] === "skills") {
+    const [cmd, ...args] = argv.slice(1);
+    const manager = new SkillManager();
+    const result = await dispatchSkillsCommand(manager, [cmd ?? "list", ...args]);
+    if (result.message !== undefined) console.log(result.message);
+    else if (result.result !== undefined) console.log(result.result.message);
+    else if (result.entries !== undefined && result.entries.length > 0) {
+      for (const e of result.entries as unknown as Array<{
+        name: string;
+        source?: string;
+        loaded?: boolean;
+      }>) {
+        console.log([e.name, e.source ?? "", e.loaded ? "[loaded]" : ""].filter(Boolean).join(" "));
+      }
+    }
+    return;
+  }
   if (argv[0] !== "serve") {
     logger.error(`unknown subcommand "${argv[0] ?? ""}" (expected "serve")`);
     logger.error(USAGE);

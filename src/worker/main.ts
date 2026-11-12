@@ -12,7 +12,7 @@ import { createInterface } from "node:readline";
 import { chmod, mkdir, readFile, spawn, writeFile } from "../host.ts";
 import type { WorkerAbortResponse } from "./protocol.ts";
 import { decodeFrame, encodeFrame, type WorkerResponse, type WorkerRequest } from "./protocol.ts";
-import { buildToolEnv, resolveStateDir, WRAPPER } from "./wrapper.ts";
+import { buildToolEnv, composeWrapper, resolveStateDir } from "./wrapper.ts";
 import { logger } from "../log.ts";
 
 let currentChild: ReturnType<typeof spawn> | undefined;
@@ -57,6 +57,7 @@ async function runBash(
   script: string,
   stateDirArg?: string,
   restore?: Partial<import("./protocol.ts").ShellSnapshot>,
+  extraPath: readonly string[] = [],
 ): Promise<WorkerResponse> {
   const agentHome = process.env["HOME"] ?? "/root";
   const stateDir = resolveStateDir(stateDirArg, agentHome);
@@ -69,7 +70,7 @@ async function runBash(
       // `detached` gives the wrapper its own process group so an abort can
       // kill the whole tree (bash defers a plain SIGTERM while a foreground
       // child like `sleep` is running — the group kill reaches the child).
-      child = spawn("bash", ["-c", WRAPPER, "harness", script], {
+      child = spawn("bash", ["-c", composeWrapper(extraPath), "harness", script], {
         cwd: agentHome,
         env: buildToolEnv(stateDir),
         detached: true,
@@ -180,7 +181,12 @@ rl.on("line", (line) => {
   chain = chain.then(async () => {
     let resp: WorkerResponse;
     if (payload.type === "bash.run") {
-      resp = await runBash(payload.script, payload.stateDir, payload.restore);
+      resp = await runBash(
+        payload.script,
+        payload.stateDir,
+        payload.restore,
+        payload.extraPath ?? [],
+      );
     } else {
       resp = { ok: false, error: `unknown request type: ${JSON.stringify(payload)}` };
     }

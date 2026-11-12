@@ -34,6 +34,13 @@ export interface BashRunRequest {
    * across daemon restarts and is queryable/rewindable.
    */
   readonly restore?: Partial<ShellSnapshot>;
+  /**
+   * Extra PATH entries (loaded-skill `scripts/` directories) prepended for
+   * this run. The daemon supplies the session's loaded-skill script paths;
+   * each run is independent (the wrapper prepends them to the snapshotted
+   * PATH), so unloading a skill takes effect on the next call.
+   */
+  readonly extraPath?: readonly string[];
 }
 
 export type WorkerRequest = BashRunRequest | BashAbortRequest;

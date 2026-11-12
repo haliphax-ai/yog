@@ -51,6 +51,14 @@ export interface ShellHomeState {
   readonly functions?: string;
 }
 
+/**
+ * Persisted state contract the skills manager needs (subset of AgentFSState).
+ */
+export interface SkillStateStore {
+  saveSkills(sessionId: string, skills: readonly string[]): Promise<void>;
+  loadSkills(sessionId: string): Promise<string[]>;
+}
+
 export class AgentFSState {
   /** Path of the SQLite database file backing this agent state. */
   readonly path: string;
@@ -150,15 +158,31 @@ export class AgentFSState {
   }
 
   /**
-   * Delete shell snapshots last written more than `retentionDays` days
-   * ago (the kv rows behind {@link loadShellSnapshot}). The filesystem
-   * sweep (`pruneStaleHarnessState`) and this sweep are two halves of
-   * the same retention: without deleting the kv record, the next bash
-   * call for that session would resurrect the pruned shell state from
-   * the snapshot mirror. `kv_store.updated_at` is `unixepoch()` seconds,
-   * refreshed on every `set`. Only `session:<id>:shell` keys are
-   * touched; other kv entries are not harness records. Runs at daemon
-   * start-up only, alongside the filesystem sweep.
+   * Persist the loaded-skill set for a session (skills system). The value
+   * is a JSON string array of fully-qualified skill names, keyed by
+   * `session:<id>:skills`.
+   */
+  async saveSkills(sessionId: string, skills: readonly string[]): Promise<void> {
+    await this.#agent.kv.set(`session:${sessionId}:skills`, [...skills]);
+  }
+
+  /** Load the persisted loaded-skill set for a session (empty when none). */
+  async loadSkills(sessionId: string): Promise<string[]> {
+    const value = await this.#agent.kv.get(`session:${sessionId}:skills`);
+    return Array.isArray(value) ? (value as string[]) : [];
+  }
+
+  /**
+   * Delete shell snapshots and loaded-skill records last written more than
+   * `retentionDays` days ago (the kv rows behind {@link loadShellSnapshot}
+   * and {@link loadSkills}). The filesystem sweep (`pruneStaleHarnessState`)
+   * and this sweep are two halves of the same retention: without deleting
+   * the kv record, the next bash call for that session would resurrect the
+   * pruned shell state from the snapshot mirror. `kv_store.updated_at` is
+   * `unixepoch()` seconds, refreshed on every `set`. Only
+   * `session:<id>:shell` / `session:<id>:skills` keys are touched; other kv
+   * entries are not harness records. Runs at daemon start-up only,
+   * alongside the filesystem sweep.
    */
   async pruneStaleShellSnapshots(
     opts: { now?: number; retentionDays?: number } = {},
@@ -166,7 +190,11 @@ export class AgentFSState {
     const retentionDays = opts.retentionDays ?? 7;
     const cutoffSec = Math.floor((opts.now ?? Date.now()) / 1000) - retentionDays * 24 * 60 * 60;
     await this.getDatabase()
-      .prepare(`DELETE FROM kv_store WHERE key LIKE 'session:%:shell' AND updated_at < ?`)
+      .prepare(
+        `DELETE FROM kv_store
+         WHERE updated_at < ?
+           AND (key LIKE 'session:%:shell' OR key LIKE 'session:%:skills')`,
+      )
       .run(cutoffSec);
   }
 
