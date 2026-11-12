@@ -125,18 +125,21 @@ export async function skillInstructions(manager: SkillManager): Promise<string> 
 
 /** Available-skills block for the system prompt, if any.
  *
- * Lists everything the session can see (child skills included) minus
- * what is already loaded, so the prompt advertises the full surface.
+ * Lists everything the session can *see* minus what is already loaded. A
+ * child skill is visible only while its parent is loaded (the same rule as
+ * `SkillManager.list`), so the prompt never advertises a skill the agent
+ * cannot actually load.
  */
 export async function availableSkillsBlock(
   manager: SkillManager,
   sessionId = manager.sessionId,
 ): Promise<string> {
   const available = await manager.discover();
+  const visible = new Set((await manager.list(sessionId)).map((s) => s.name));
   const loaded = new Set(manager.getLoaded(sessionId).map((s) => s.fullName));
   return formatAvailableSkills(
     available
-      .filter((s) => !loaded.has(s.fullName))
+      .filter((s) => visible.has(s.fullName) && !loaded.has(s.fullName))
       .map((s) => ({ ...s, description: s.frontmatter.description })),
   );
 }

@@ -276,13 +276,21 @@ describe("available-skills prompt block", () => {
     expect(block).not.toContain("yog skills load");
   });
 
-  it("hides loaded skills and renders child skills with a marker", async () => {
+  it("hides loaded skills, gates child skills on the parent, and marks children", async () => {
     const dir = makeSkillTree("parent", ["child"]);
     const mgr = new SkillManager({ discover: testDiscover(dir) });
     await mgr.discover();
+    // While the parent is unloaded the child is not loadable, so neither
+    // appears in the block (only top-level entries are advertised).
+    const before = await availableSkillsBlock(mgr, "s");
+    expect(before).toContain("- **parent** — A demo skill for testing");
+    expect(before).not.toContain("parent:child");
+    // Once the parent is loaded the child shows up with its marker, and the
+    // parent itself drops out (it is loaded).
     await mgr.load("parent", "s");
-    const block = await availableSkillsBlock(mgr, "s");
-    expect(block).not.toContain("parent (child skill)");
-    expect(block).toContain("- **parent:child (child skill)** — A demo skill for testing");
+    const after = await availableSkillsBlock(mgr, "s");
+    expect(after).not.toContain("parent (child skill)");
+    expect(after).toContain("- **parent:child (child skill)** — A demo skill for testing");
+    expect(after).not.toContain("- **parent** —");
   });
 });
