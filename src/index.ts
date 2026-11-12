@@ -64,7 +64,9 @@ async function main(): Promise<void> {
     return;
   }
   if (argv[0] !== "serve") {
-    logger.error(`unknown subcommand "${argv[0] ?? ""}" (expected "serve", "skills", or "calibrate")`);
+    logger.error(
+      `unknown subcommand "${argv[0] ?? ""}" (expected "serve", "skills", or "calibrate")`,
+    );
     logger.error(USAGE);
     process.exit(1);
   }
