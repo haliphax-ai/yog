@@ -22,7 +22,13 @@ import { logger } from "../log.ts";
 import { exists, readdir, stat } from "../host.ts";
 import { readSkillFile } from "./parser.ts";
 import { packageDir } from "./package.ts";
-import { isValidSkillName, normalizePath, skillNameError, splitFullName } from "./validator.ts";
+import {
+  isModelInvocationDisabled,
+  isValidSkillName,
+  normalizePath,
+  skillNameError,
+  splitFullName,
+} from "./validator.ts";
 import type { Skill, SkillFrontmatter, SkillMetadata, SkillSource } from "./types.ts";
 
 /** Default source directories, in priority order. */
@@ -261,6 +267,11 @@ export function parseSkillRef(ref: string): { trunk: string; branch: string | un
 /** Whether a skill reference is a child (namespaced) reference. */
 export function isChildRef(ref: string): boolean {
   return splitFullName(ref)[1] !== undefined;
+}
+
+/** `true` when a discovered skill must be hidden from the agent. */
+export function isAgentVisible(s: Skill): boolean {
+  return !isModelInvocationDisabled(s.frontmatter);
 }
 
 /** Build the system prompt section listing available (unloaded) skills.

@@ -11,13 +11,17 @@
  * (the CLI/HTTP registry uses the `"daemon"` default session). Child
  * skills load independently of their parents; unloading a trunk skill
  * also unloads its children.
+ * A skill whose frontmatter sets `disable-model-invocation: true` is hidden
+ * from discovery-driven listings and cannot be loaded through the agent
+ * surface (`SkillManager.load`). (An operator-side path to load these skills
+ * for agents is planned but not implemented yet.)
  *
  * Concurrency: load/unload are mutex-protected (serialized) so a session
  * cannot race two loads into an inconsistent PATH.
  */
 import { logger } from "../log.ts";
 import { readSkillFile } from "./parser.ts";
-import { discoverSkills, type DiscoverOptions } from "./discover.ts";
+import { discoverSkills, isAgentVisible, type DiscoverOptions } from "./discover.ts";
 import { isValidFullName, skillNameError, splitFullName } from "./validator.ts";
 import type {
   LoadedSkillState,
@@ -177,6 +181,7 @@ export class SkillManager {
     const parentLoaded = (s: Skill): boolean =>
       s.isChild === false || (s.parentName !== undefined && map?.has(s.parentName) === true);
     return available
+      .filter((s) => isAgentVisible(s))
       .filter((s) => parentLoaded(s))
       .map((s) => ({
         name: s.fullName,
@@ -229,6 +234,14 @@ export class SkillManager {
     }
     const available = await this.discover();
     const skill = available.find((s) => s.fullName === ref);
+    if (skill !== undefined && !isAgentVisible(skill)) {
+      return {
+        ok: false,
+        name: ref,
+        status: "not_found",
+        message: `skill "${ref}" is not available to this agent (use \`yog skills list\` to see available skills)`,
+      };
+    }
     if (!skill) {
       return {
         ok: false,

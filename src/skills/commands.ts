@@ -5,7 +5,7 @@
  * returns a structured result; formatting for humans happens in `cli.ts`
  * (or the HTTP adapter), never here.
  */
-import { formatAvailableSkills } from "./discover.ts";
+import { formatAvailableSkills, isAgentVisible } from "./discover.ts";
 import type { SkillManager } from "./manager.ts";
 import type { SkillCommandResult, SkillsCommandResult } from "./types.ts";
 
@@ -22,10 +22,12 @@ export async function listSkills(
     ...(opts.verbose
       ? {
           message: formatAvailableSkills(
-            (await manager.discover()).map((s) => ({
-              ...s,
-              description: s.frontmatter.description,
-            })),
+            (await manager.discover())
+              .filter((s) => isAgentVisible(s))
+              .map((s) => ({
+                ...s,
+                description: s.frontmatter.description,
+              })),
           ),
         }
       : {}),
@@ -66,6 +68,7 @@ export function skillsHelp(): SkillsCommandResult {
       "  load      Activate a skill (add to PATH, load instructions)",
       "  unload    Deactivate a skill",
       "  status    Show currently loaded skills",
+      "            (skills with disable-model-invocation are hidden and cannot be loaded)",
       "  help      Show this help",
     ].join("\n"),
   };
@@ -139,7 +142,7 @@ export async function availableSkillsBlock(
   const loaded = new Set(manager.getLoaded(sessionId).map((s) => s.fullName));
   return formatAvailableSkills(
     available
-      .filter((s) => visible.has(s.fullName) && !loaded.has(s.fullName))
+      .filter((s) => isAgentVisible(s) && visible.has(s.fullName) && !loaded.has(s.fullName))
       .map((s) => ({ ...s, description: s.frontmatter.description })),
   );
 }

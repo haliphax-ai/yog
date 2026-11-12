@@ -7,10 +7,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseSkillMarkdown } from "../src/skills/parser.ts";
-import { skillNameError, splitFullName } from "../src/skills/validator.ts";
+import {
+  isModelInvocationDisabled,
+  skillNameError,
+  splitFullName,
+  toFrontmatter,
+} from "../src/skills/validator.ts";
 import { SkillManager } from "../src/skills/manager.ts";
 import { availableSkillsBlock, dispatchSkillsCommand } from "../src/skills/commands.ts";
 import { getCommand, registerCommand, type CliCommand } from "../src/server/cli.ts";
+import { parseYamlSubset } from "../src/skills/parser.ts";
 
 const SKILL_MD = `---
 name: demo
@@ -80,6 +86,30 @@ describe("parseSkillMarkdown", () => {
 
   it("rejects a missing description", () => {
     expect(() => parseSkillMarkdown("---\nname: demo\n---\nbody")).toThrow();
+  });
+});
+describe("disable-model-invocation frontmatter", () => {
+  it("parses the key and types it as a boolean", () => {
+    const parsed = parseSkillMarkdown(
+      "---\nname: hidden\ndescription: shh\ndisable-model-invocation: true\n---\nbody",
+    );
+    expect(parsed.frontmatter.disableModelInvocation).toBe(true);
+    expect(parsed.frontmatter.extra["disable-model-invocation"]).toBeUndefined();
+    expect(isModelInvocationDisabled(parsed.frontmatter)).toBe(true);
+  });
+
+  it("defaults to false and rejects non-boolean values", () => {
+    const plain = parseSkillMarkdown("---\nname: shown\ndescription: hello\n---\nbody");
+    expect(plain.frontmatter.disableModelInvocation).toBe(false);
+    expect(isModelInvocationDisabled(plain.frontmatter)).toBe(false);
+    expect(() =>
+      parseSkillMarkdown(
+        '---\nname: bad\ndescription: hello\ndisable-model-invocation: "yes"\n---\nbody',
+      ),
+    ).toThrow(/must be a boolean/);
+    expect(toFrontmatter(parseYamlSubset("disable-model-invocation: true"))).toMatchObject({
+      disableModelInvocation: true,
+    });
   });
 });
 
@@ -292,5 +322,42 @@ describe("available-skills prompt block", () => {
     expect(after).not.toContain("parent (child skill)");
     expect(after).toContain("- **parent:child (child skill)** — A demo skill for testing");
     expect(after).not.toContain("- **parent** —");
+  });
+});
+
+describe("disable-model-invocation behavior", () => {
+  it("hides the skill from list, verbose list, and the prompt block", async () => {
+    const dir = makeSkillTree("loud");
+    const skillsDir = join(dir, ".yog", "skills");
+    writeFileSync(
+      join(skillsDir, "shy.md"),
+      "---\nname: shy\ndescription: A hidden skill\ndisable-model-invocation: true\n---\nSecret body.\n",
+    );
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
+    await mgr.discover();
+    const rows = await mgr.list("s");
+    expect(rows.map((e) => e.name)).toEqual(["loud"]);
+    const result = await dispatchSkillsCommand(mgr, ["list", "--verbose"]);
+    expect(result.message).toContain("loud");
+    expect(result.message).not.toContain("shy");
+    const block = await availableSkillsBlock(mgr, "s");
+    expect(block).toContain("- **loud** — A demo skill for testing");
+    expect(block).not.toContain("shy");
+  });
+
+  it("refuses to load a hidden skill from the agent surface", async () => {
+    const dir = makeSkillTree("loud");
+    const skillsDir = join(dir, ".yog", "skills");
+    writeFileSync(
+      join(skillsDir, "shy.md"),
+      "---\nname: shy\ndescription: A hidden skill\ndisable-model-invocation: true\n---\nSecret body.\n",
+    );
+    const mgr = new SkillManager({ discover: testDiscover(dir) });
+    await mgr.discover();
+    const result = await dispatchSkillsCommand(mgr, ["load", "shy"]);
+    expect(result.ok).toBe(false);
+    expect(result.result).toMatchObject({ ok: false, status: "not_found" });
+    expect(result.result?.message).toContain("not available to this agent");
+    expect(await mgr.status("s")).toEqual([]);
   });
 });

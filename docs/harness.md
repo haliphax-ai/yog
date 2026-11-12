@@ -133,7 +133,10 @@ three sources in priority order (`/var/lib/yog/skills`, `~/.yog/skills`,
 `.yog/skills`); bare `<name>.md` files and package directories are both
 recognized, and one level of child skills (`<parent>:<child>`) is
 supported. Discovery deduplicates by name (first source wins) and skips
-invalid skills with a warning; a _loaded_ skill is validated loudly.
+invalid skills with a warning; a _loaded_ skill is validated loudly. A
+`disable-model-invocation: true` frontmatter key hides the skill from the
+agent entirely (list, prompt block) and makes `yog skills load <name>`
+refuse it; there is no operator-side way to load these for agents yet.
 
 Loaded skills contribute per session: their instructions are appended to
 the system prompt (after the cache-stable prefix), the available-skills

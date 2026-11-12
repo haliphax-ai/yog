@@ -5,6 +5,11 @@
  * bundle the agent can inspect and load on demand: a `SKILL.md` document
  * (YAML frontmatter + markdown body) and an optional package structure
  * (`scripts/`, `references/`, `assets/`) next to it.
+ * A skill may opt out of agent invocation with
+ * `disable-model-invocation: true` in its frontmatter: it is then hidden
+ * from the available-skills list and cannot be loaded by the agent.
+ * (Loading such skills for the agent from the operator side is planned but
+ * not implemented yet.)
  *
  * Skills are discovered from up to three sources (system, agent home, working
  * directory); see `discover.ts`.
@@ -49,6 +54,8 @@ export interface SkillFrontmatter {
   readonly compatibility: string | undefined;
   readonly metadata: Readonly<Record<string, unknown>> | undefined;
   readonly allowedTools: readonly string[] | undefined;
+  /** True when `disable-model-invocation: true` hides this from the agent. */
+  readonly disableModelInvocation: boolean;
   /** Any frontmatter keys outside the known set (kept for round-tripping). */
   readonly extra: Readonly<Record<string, unknown>>;
 }
