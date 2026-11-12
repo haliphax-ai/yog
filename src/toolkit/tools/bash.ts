@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { type ToolResult, type ToolSpec } from "../types.ts";
-import { middleTruncate, toolOutputBudgets } from "../truncation.ts";
+import { fairTruncate, middleTruncate, toolOutputBudgets } from "../truncation.ts";
 export interface BashResult extends ToolResult {
   stdout: string | null;
   stderr: string | null;
@@ -18,35 +18,24 @@ export interface ShellStateProvider {
   save(sessionId: string, state: { cwd: string; env: string; functions: string }): Promise<void>;
 }
 
-/** /shake truncation budgets (chars). */
+/** /shake truncation budgets (raw chars). */
 export const BASH_ARG_TRUNCATE_CHARS = 500;
 export const BASH_RESULT_TRUNCATE_CHARS = 500;
 
 /**
- * Live tool-output budgets (chars) come from the composition root via
- * `setToolOutputBudgets`; defaults hold until it is called, so the tool
+ * Live tool-output budgets (serialized chars) come from the composition root
+ * via `setToolOutputBudgets`; defaults hold until it is called, so the tool
  * stays usable in tests and CLI paths without a config file.
  */
 
-function truncateStream(text: string, max: number): string {
-  return text.length <= max ? text : middleTruncate(text, max);
-}
-
 /**
- * Split the output budget fairly between stdout and stderr (both middle-
- * truncated). Each stream's base share is half the budget; any unused share
- * from one stream is offered to the other.
+ * The output budget is split fairly between stdout and stderr, both
+ * middle-truncated in serialized space (`fairTruncate` in truncation.ts):
+ * raw `.length` under-counts escape-dense content (ANSI colors, tabs,
+ * backslashes), which previously slipped past this cap and tripped the
+ * registry fallback. Each stream's base share is half the budget; any
+ * unused share from one stream is offered to the other.
  */
-function fairTruncate(stdout: string, stderr: string, budget: number): [string, string] {
-  const half = Math.floor(budget / 2);
-  const retainedOut = Math.min(stdout.length, half);
-  let remaining = budget - retainedOut;
-  const retainedErr = Math.min(stderr.length, remaining);
-  remaining -= retainedErr;
-  // Unused portion of the second stream flows back to the first.
-  const extraOut = Math.min(stdout.length - retainedOut, remaining);
-  return [truncateStream(stdout, retainedOut + extraOut), truncateStream(stderr, retainedErr)];
-}
 
 /** Options the bash tool forwards to the injected executor. */
 export interface BashRequestOpts {
@@ -188,9 +177,12 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
         return { stdout: null, stderr: null, runtimeMs, exitCode: null, error: resp.error };
       }
       // Limit the tool's own output: the budget (config `toolOutputLimit`,
-      // default 50,000 chars) is fairly split across stdout and stderr, each
-      // middle-truncated with the shared marker where cut. This runs BEFORE
-      // the registry's generic `capToolResult` fallback ever sees the result.
+      // default 50,000 serialized chars) is fairly split across stdout and
+      // stderr, each middle-truncated with the shared marker where cut.
+      // Budgets are measured on the JSON-serialized lengths (what the
+      // transcript actually stores), so the result is guaranteed to fit
+      // `toolOutputLimit` before the registry's generic `capToolResult`
+      // fallback ever sees it.
       const { limit } = toolOutputBudgets();
       const capped = fairTruncate(resp.stdout ?? "", resp.stderr ?? "", limit);
       return {
