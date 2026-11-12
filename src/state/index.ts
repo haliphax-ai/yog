@@ -3,7 +3,7 @@
  * id generator. Only this layer may import the agentfs SDK (depcruise rule
  * `agentfs-only-in-state`).
  */
-export { AgentFSState, type ToolCallRecord } from "./agentfs.ts";
+export { AgentFSState, type SkillStateStore, type ToolCallRecord } from "./agentfs.ts";
 export {
   DEFAULT_AGENT_ID,
   HARNESS_STATE_RETENTION_DAYS,

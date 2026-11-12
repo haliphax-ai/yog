@@ -11,7 +11,7 @@ export interface CliCommand {
   name: string;
   description: string;
   usage: string;
-  execute(args: readonly string[]): string;
+  execute(args: readonly string[]): string | Promise<string>;
 }
 
 const registry = new Map<string, CliCommand>();

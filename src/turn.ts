@@ -443,6 +443,18 @@ export interface TurnOptions {
    * delays / a fake `sleep` for determinism.
    */
   rateLimit?: Partial<RateLimitPolicy>;
+  /**
+   * Loaded-skill instructions (concatenated `SKILL.md` bodies). Appended to
+   * the system prompt at the *end* so everything before it stays
+   * cacheable; empty/undefined appends nothing.
+   */
+  skillInstructions?: string;
+  /**
+   * Available (unloaded) skills block for the initial system message. Also
+   * appended at the end (after instructions), keeping the cache boundary
+   * stable across turns.
+   */
+  availableSkills?: string;
 }
 
 /**
@@ -495,6 +507,31 @@ export class TurnEngine {
         if (opts.signal?.aborted === true || opts.isAborted?.() === true) throw abortErr();
       };
       checkAbort();
+
+      // Skills system: append the loaded-skill instructions and the
+      // available-skills block to the END of the first system message
+      // (create it when absent), so everything before the addition stays
+      // prompt-cacheable across turns.
+      {
+        const instructions = opts.skillInstructions?.trim();
+        const available = opts.availableSkills?.trim();
+        if (instructions || available) {
+          const addition = [instructions, available].filter(Boolean).join("\n\n");
+          const first = messages[0];
+          const firstRec = first as { role?: string; content?: unknown } | undefined;
+          if (firstRec && firstRec.role === "system" && typeof firstRec.content === "string") {
+            messages[0] = {
+              role: "system",
+              content: `${firstRec.content}\n\n${addition}`,
+            } as ChatCompletionMessageParam;
+          } else {
+            messages.unshift({
+              role: "system",
+              content: addition,
+            } as ChatCompletionMessageParam);
+          }
+        }
+      }
 
       // Bound the tool-call loop so a misbehaving model cannot spin forever.
       const maxRounds = opts.maxRounds ?? 200;

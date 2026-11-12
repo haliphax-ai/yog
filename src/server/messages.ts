@@ -27,6 +27,10 @@ export const MESSAGE_TYPES = [
   "turn.start",
   "compaction.run",
   "transcript.shake",
+  "skills.list",
+  "skills.load",
+  "skills.unload",
+  "skills.status",
 ] as const;
 
 export type MessageType = (typeof MESSAGE_TYPES)[number];

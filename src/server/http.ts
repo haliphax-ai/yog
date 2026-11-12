@@ -9,6 +9,7 @@ import { activeToolCallFor, toolStubMessage, unansweredToolCallIds } from "../tu
 import { logger } from "../log.ts";
 import type { CompactionBoundary, CompactionKind } from "./compaction.ts";
 import type { ShakeOutcome } from "./shake.ts";
+import type { SkillManager } from "../skills/index.ts";
 
 /** Capabilities advertisement served at GET /v1/capabilities. */
 export interface Capabilities {
@@ -115,6 +116,12 @@ export interface HttpDeps {
   compaction?: CompactionBoundary;
   /** Transcript shake runner (see `shake.ts`). */
   shake?: (sessionId: string) => Promise<ShakeOutcome>;
+  /**
+   * Session used for skills commands when the request does not name one
+   * (defaults to the manager's `"daemon"` session). The daemon injects the
+   * session id from the URL (`/v1/sessions/{id}/messages`).
+   */
+  skillsSessionId?: string;
   [key: string]: unknown;
 }
 
@@ -424,7 +431,7 @@ export function createHttpServer(deps: HttpDeps): Server {
         return;
       }
       try {
-        const output = command.execute((args as string[]) ?? []);
+        const output = await command.execute((args as string[]) ?? []);
         res.statusCode = 200;
         res.setHeader("content-type", "text/plain");
         res.end(output);
@@ -433,6 +440,7 @@ export function createHttpServer(deps: HttpDeps): Server {
         res.setHeader("content-type", "text/plain");
         res.end(`error: ${err instanceof Error ? err.message : String(err)}\n`);
       }
+
       return;
     }
 
@@ -1038,6 +1046,44 @@ export function createHttpServer(deps: HttpDeps): Server {
         fail("internal", err instanceof Error ? err.message : String(err));
       }
 
+      return;
+    }
+
+    if (type.startsWith("skills.")) {
+      const manager = deps.skills as SkillManager | undefined;
+      if (
+        !manager ||
+        typeof manager.list !== "function" ||
+        typeof manager.load !== "function" ||
+        typeof manager.unload !== "function"
+      ) {
+        fail("internal", "skills system is not configured on this server");
+        return;
+      }
+      const sessionId = typeof deps.skillsSessionId === "string" ? deps.skillsSessionId : id;
+      const sub = type.slice("skills.".length);
+      if (sub === "list") {
+        reply(200, { skills: await manager.list(sessionId) });
+        return;
+      }
+      if (sub === "status") {
+        reply(200, { skills: manager.status(sessionId) });
+        return;
+      }
+      if (sub === "load" || sub === "unload") {
+        const name = data.name;
+        if (typeof name !== "string" || name.trim() === "") {
+          fail("invalid_request", `"name" must be a non-empty string`);
+          return;
+        }
+        const result =
+          sub === "load"
+            ? await manager.load(name, sessionId)
+            : await manager.unload(name, sessionId);
+        reply(result.ok ? 200 : 404, result);
+        return;
+      }
+      fail("invalid_request", `unsupported skills command: ${sub}`);
       return;
     }
 
