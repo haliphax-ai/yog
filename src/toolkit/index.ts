@@ -18,6 +18,7 @@ export {
   setBashAbort,
   setBashExecutor,
   setShellStateProvider,
+  setSkillPathProvider,
 } from "./tools/bash.ts";
 export type {
   BashAbort,
@@ -27,4 +28,5 @@ export type {
   BashRequestOpts,
   BashResult,
   ShellStateProvider,
+  SkillPathProvider,
 } from "./tools/bash.ts";

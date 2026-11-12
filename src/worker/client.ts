@@ -147,6 +147,7 @@ export class WorkerClient {
     script: string,
     stateDir?: string,
     restore?: Partial<ShellSnapshot>,
+    extraPath?: readonly string[],
   ): Promise<WorkerResponse> {
     if (this.#closed) {
       return Promise.reject(new Error("worker closed"));
@@ -157,6 +158,7 @@ export class WorkerClient {
       script,
       ...(stateDir !== undefined ? { stateDir } : {}),
       ...(restore ? { restore } : {}),
+      ...(extraPath && extraPath.length > 0 ? { extraPath: [...extraPath] } : {}),
     };
     this.#inFlightIds.add(id);
     return new Promise((resolve, reject) => {

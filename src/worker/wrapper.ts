@@ -8,10 +8,14 @@
  *  - restore the previous call's cwd and exported vars/functions
  *  - source the agent's rc (BASH_ENV, falling back to ~/.bashrc) so every
  *    call starts from the full-fledged home environment
+ *  - prepend the session's loaded-skill `scripts/` directories to PATH
+ *    (per-run, not persisted — unloading takes effect on the next call)
  *  - run the requested script as `eval "$1"` (argv, no string surgery) in
  *    THIS shell so its cd/export/functions mutate the state we capture
  *  - persist cwd + `export -p` + `declare -f` atomically for the next call
  */
+
+/** The base wrapper: everything except the skill-PATH preamble. */
 export const WRAPPER = `set +e
 
 HARNESS_STATE_DIR="\${HARNESS_STATE_DIR:-.harness}"
@@ -63,11 +67,38 @@ if [ -n "$HARNESS_RC" ] && [ -f "$HARNESS_RC" ]; then
   # shellcheck disable=SC1090
   source "$HARNESS_RC" >/dev/null || true
 fi
+__HARNESS_SKILL_PATH__
 
 # The script runs in THIS shell, so its cd/export/functions mutate the very
 # state we capture on EXIT — a child bash would throw all of it away.
 eval "$1"
 `;
+
+/**
+ * Compose the wrapper for one bash run, prepending the session's
+ * loaded-skill `scripts/` directories to PATH.
+ *
+ * The preamble runs at eval time — after the persisted snapshot and the
+ * agent rc are sourced — so the operator's PATH stays the baseline and the
+ * skill scripts win. The result is *not* persisted specially: each run
+ * re-derives PATH from the session's currently-loaded skills, so unloading
+ * a skill takes effect on the next call (no stale entries, no duplicates).
+ */
+export function composeWrapper(extraPath: readonly string[] = []): string {
+  if (extraPath.length === 0) return WRAPPER.replace("__HARNESS_SKILL_PATH__", "");
+  const list = extraPath.map((d) => `'${d.replace(/'/g, `'\\''`)}'`).join(" ");
+  const preamble = `
+for __h_skill_dir in ${list}; do
+  case ":$PATH:" in
+    *":$__h_skill_dir:"*) ;;
+    *) PATH="$__h_skill_dir:$PATH" ;;
+  esac
+done
+unset __h_skill_dir
+export PATH
+`;
+  return WRAPPER.replace("__HARNESS_SKILL_PATH__", preamble);
+}
 
 /**
  * Resolve the shell-state directory to a fixed absolute path. The daemon

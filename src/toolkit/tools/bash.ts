@@ -18,6 +18,22 @@ export interface ShellStateProvider {
   save(sessionId: string, state: { cwd: string; env: string; functions: string }): Promise<void>;
 }
 
+/**
+ * Resolves the loaded-skill `scripts/` directories for a session (PATH
+ * injection). Injected by the composition root from the `SkillManager`;
+ * returns an empty array when the skills system is not wired.
+ */
+export type SkillPathProvider = (
+  sessionId: string,
+) => readonly string[] | Promise<readonly string[]>;
+
+let skillPathProvider: SkillPathProvider | undefined;
+
+/** Inject the loaded-skill PATH provider (owned by the composition root). */
+export function setSkillPathProvider(provider: SkillPathProvider | undefined): void {
+  skillPathProvider = provider;
+}
+
 /** /shake truncation budgets (chars). */
 export const BASH_ARG_TRUNCATE_CHARS = 500;
 export const BASH_RESULT_TRUNCATE_CHARS = 500;
@@ -65,6 +81,11 @@ export interface BashRequestOpts {
   stateDir?: string;
   /** Prior snapshot to restore before running. */
   restore?: { cwd?: string; env?: string; functions?: string };
+  /**
+   * Loaded-skill `scripts/` directories prepended to PATH for this run
+   * (resolved from the session's `SkillManager` by the composition root).
+   */
+  extraPath?: readonly string[];
 }
 
 /** Structural result contract the injected executor must satisfy. */
@@ -169,10 +190,23 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
         restore = undefined;
       }
 
+      // Loaded-skill PATH injection: resolve this session's skill scripts
+      // (best effort — a failure must not fail the tool call).
+      let extraPath: readonly string[] | undefined;
+      if (skillPathProvider) {
+        try {
+          const paths = await skillPathProvider(sessionKey);
+          if (paths.length > 0) extraPath = paths;
+        } catch {
+          extraPath = undefined;
+        }
+      }
+
       const resp = await bashExecutor(args.command, {
         ...(ctx?.sessionId !== undefined ? { scriptId: ctx.sessionId } : {}),
         stateDir: ctx?.stateDir,
         ...(restore ? { restore } : {}),
+        ...(extraPath ? { extraPath } : {}),
       });
       const runtimeMs = Math.round(performance.now() - start);
 

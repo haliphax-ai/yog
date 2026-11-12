@@ -27,11 +27,15 @@ import {
   setBashAbort,
   setBashExecutor,
   setShellStateProvider,
+  setSkillPathProvider,
   setToolOutputBudgets,
   TOOL_OUTPUT_LIMIT_CHARS,
   TOOL_OUTPUT_GRACE_CHARS,
 } from "../toolkit/index.ts";
 import { onAgentSpawn } from "../worker/index.ts";
+import { SkillManager } from "../skills/index.ts";
+import { registerCommand, type CliCommand } from "./cli.ts";
+import { dispatchSkillsCommand } from "../skills/commands.ts";
 import { mkdir } from "../host.ts";
 import { logger } from "../log.ts";
 import { resolveConfig, type YogConfig, type PartialYogConfig } from "../config.ts";
@@ -91,6 +95,43 @@ function openaiClient(config: YogConfig): OpenAI {
     ...(config.providerApiKey ? { apiKey: config.providerApiKey } : {}),
     ...(Object.keys(extraHeaders).length > 0 ? { defaultHeaders: extraHeaders } : {}),
   });
+}
+
+/**
+ * Register the `skills` command with the agent-CLI registry (the `yog`
+ * shim's `/v1/agent-cli` endpoint). The registry lives in the server
+ * domain; the command's behavior comes from the skills domain.
+ */
+function registerSkillsCliCommand(manager: SkillManager): void {
+  const cmd: CliCommand = {
+    name: "skills",
+    description: "List, load, or unload skills (list|load|unload|status [name])",
+    usage: "skills <list|load|unload|status> [name]",
+    async execute(args) {
+      const [sub = "list", ...rest] = args;
+      const result = await dispatchSkillsCommand(manager, [sub, ...rest]);
+      if (result.message !== undefined) return `${result.message}\n`;
+      if (result.result !== undefined) return `${result.result.message}\n`;
+      if (result.entries !== undefined && result.entries.length > 0) {
+        const rows = result.entries as unknown as Array<{
+          name: string;
+          source?: string;
+          loaded?: boolean;
+        }>;
+        return (
+          rows
+            .map((e) =>
+              [e.name, e.source ?? "", e.loaded === undefined ? "" : e.loaded ? "[loaded]" : ""]
+                .filter(Boolean)
+                .join(" "),
+            )
+            .join("\n") + "\n"
+        );
+      }
+      return "(none)\n";
+    },
+  };
+  registerCommand(cmd);
 }
 
 /**
@@ -202,6 +243,24 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       logger.warn(`[yog] warning: worker pool unavailable (${(err as Error).message}); continuing`);
     }
 
+    // --- skills registry (agent-skills subsystem) ---
+    // One manager serves the daemon; the per-session loaded set is keyed by
+    // the bash tool's `sessionId`. Best effort: a discovery failure must
+    // not take the daemon down.
+    let skills: SkillManager | undefined;
+    try {
+      skills = new SkillManager({
+        ...(state ? { state } : {}),
+        discover: { cwd: config.agentHome ?? process.cwd() },
+      });
+      await skills.discover();
+    } catch (err) {
+      logger.warn(`[yog] warning: skills unavailable (${(err as Error).message}); continuing`);
+      skills = undefined;
+    }
+    setSkillPathProvider((sessionId) => (skills ? skills.getScriptPathsFor(sessionId) : []));
+    if (skills) registerSkillsCliCommand(skills);
+
     // --- wire the bash tool through the worker pool ---
     if (pool) {
       const p = pool;
@@ -214,6 +273,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
             stateDir:
               opts?.stateDir ?? harnessStateDir(opts?.scriptId ?? "daemon", config.stateRoot),
             ...(opts?.restore !== undefined ? { restore: opts.restore } : {}),
+            ...(opts?.extraPath && opts.extraPath.length > 0 ? { extraPath: opts.extraPath } : {}),
           });
           if (resp.ok) {
             return {
@@ -337,6 +397,17 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       let turnId: string | null = null;
       let liveUsage: TurnUsage | undefined;
       usageBySession.set(sessionId, undefined);
+
+      // Loaded-skill context (agent-skills): the session's loaded
+      // instructions plus the available-skills block are appended to the
+      // system prompt at the END (cache-stable prefix).
+      const skillInstructions = skills ? await skills.getInstructions(sessionId) : "";
+      const availableSkillList = skills
+        ? (await skills.list(sessionId))
+            .filter((s) => !s.loaded)
+            .map((s) => `- ${s.name} — load with \`yog skills load ${s.name}\``)
+            .join("\n")
+        : "";
       const sink: TurnSink = {
         async emit(ev: TurnEvent): Promise<void> {
           const envelope = ev as unknown as SseEnvelope;
@@ -386,6 +457,10 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
           backoffFactor: config.rateLimitBackoffFactor,
         },
         ...(modelInfo ? { contextWindow: modelInfo.getContextWindow(model) ?? undefined } : {}),
+        ...(skillInstructions ? { skillInstructions } : {}),
+        ...(availableSkillList
+          ? { availableSkills: `# Available skills\n\n${availableSkillList}` }
+          : {}),
       };
       try {
         await new TurnEngine(sink).run(client, model, messages, tools, turnOpts);
@@ -489,6 +564,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
           "handoff",
           "shake",
           "rate-limit-retry",
+          "skills",
         ],
         messageTypes: [...MESSAGE_TYPES],
       },
@@ -498,6 +574,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       ...(compaction ? { compaction } : {}),
       bus,
       ...(shake ? { shake } : {}),
+      ...(skills ? { skills } : {}),
       // Turn-abort kill chain (`turn.abort` message): kill the
       // session's running bash script, then let the orchestrator unwind.
       onUsageFor: (sessionId: string) => usageBySession.get(sessionId),

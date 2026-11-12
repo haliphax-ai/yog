@@ -28,6 +28,8 @@ export interface WorkerPoolRunOptions {
   readonly stateDir?: string;
   /** Prior snapshot to restore into the state dir before running. */
   readonly restore?: Partial<ShellSnapshot>;
+  /** Loaded-skill `scripts/` directories prepended to PATH for this run. */
+  readonly extraPath?: readonly string[];
 }
 
 /** Resolve the pool size from an explicit option; undefined = CPU default. */
@@ -80,7 +82,7 @@ export class WorkerPool {
     try {
       const client = clients[idx];
       if (!client) throw new Error(`no worker at index ${idx}`);
-      return await client.runBash(script, opts?.stateDir, opts?.restore);
+      return await client.runBash(script, opts?.stateDir, opts?.restore, opts?.extraPath);
     } finally {
       this.#inFlight[idx] = (this.#inFlight[idx] ?? 1) - 1;
       if (this.#running.get(sessionId) === idx) this.#running.delete(sessionId);
