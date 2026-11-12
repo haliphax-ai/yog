@@ -13,14 +13,16 @@ import {
   TRUNCATION_IDENTIFIER,
   FALLBACK_TRUNCATE_CHARS,
   middleTruncate,
-  estimateTokenCount,
+  estimateTokenCountWithProfile,
+  DEFAULT_PROFILE,
+  type TokenProfile,
 } from "../toolkit/index.ts";
 export interface ShakeOutcome {
   /** Number of tool-call argument payloads truncated. */
   argsTruncated: number;
   /** Number of tool-result payloads truncated. */
   resultsTruncated: number;
-  /** Estimated current transcript size in tokens (chars/4) after the shake. */
+  /** Estimated current transcript size in tokens (profile-driven tokenx) after the shake. */
   contextSize: number;
 }
 
@@ -37,6 +39,12 @@ export interface ShakeStore {
 export interface ShakeDeps {
   store: ShakeStore;
   registry: ToolRegistry;
+  /**
+   * Token profile for the `contextSize` estimate. Defaults to the neutral
+   * profile; the daemon passes the overlay-loaded profile for the session's
+   * model so the reported size matches native counts on calibrated models.
+   */
+  profile?: TokenProfile;
 }
 
 export { TRUNCATION_IDENTIFIER };
@@ -143,13 +151,19 @@ export function createShakeRunner(deps: ShakeDeps) {
       });
     }
 
-    // Estimated current transcript size (chars/4 over every surviving row).
+    // Estimated transcript size after the shake: tokenx under the configured
+    // profile (neutral default until a calibrated overlay exists). Native
+    // usage is authoritative when the session has any — this is the
+    // display-side fallback for sessions without anchors.
     let contextSize = 0;
+    const profile = deps.profile ?? DEFAULT_PROFILE;
     const finalRows = await deps.store.getTranscript(sessionId);
     for (const row of finalRows) {
       const content = typeof row.content === "string" ? row.content : "";
       const calls = typeof row.tool_calls_json === "string" ? row.tool_calls_json : "";
-      contextSize += estimateTokenCount(content) + estimateTokenCount(calls);
+      contextSize +=
+        estimateTokenCountWithProfile(content, profile) +
+        estimateTokenCountWithProfile(calls, profile);
     }
     return { argsTruncated, resultsTruncated, contextSize };
   };

@@ -24,6 +24,27 @@ export interface TurnUsage {
   total_tokens?: number;
   /** Context window size for the session model (from models.dev). */
   context_window?: number;
+  /**
+   * Provider generation/request id for the round that reported this usage
+   * (OpenRouter `gen-…`, OpenAI `req_…` when present). Captured verbatim so
+   * post-hoc reconciliation (OpenRouter /generation) can audit the native
+   * counts without any protocol-specific parsing here.
+   */
+  requestId?: string;
+  /**
+   * Native usage detail blocks, captured verbatim from the provider when
+   * present. `prompt_tokens_details.cached_tokens` is the calibration
+   * filter: reported counts on cache-warm rounds exclude the cached prefix,
+   * so a naive fit against them under-counts ~2.5x. Capture-first:
+   * interpretation lives in the calibrate script, not here.
+   */
+  prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+  completion_tokens_details?: { reasoning_tokens?: number };
+  /**
+   * Provider-reported cost (OpenRouter credits, dollars when present).
+   * Absent on providers that do not report it; never computed locally.
+   */
+  cost?: number;
 }
 
 /** Per-event payload shapes, discriminated by the envelope's `type`. */
@@ -103,7 +124,19 @@ export type TurnEventDataMap = {
   };
   /** Terminal error; the turn stops. `code` is `provider_error`, or
    * `rate_limited` when a 429 exhausted the retry policy. */
-  error: { code: string; message: string; details?: unknown };
+  error: {
+    code: string;
+    message: string;
+    details?: unknown;
+    /**
+     * Last known turn usage when the turn died in an error (plan §3.3
+     * error-path capture). A rejected request never produces a usage chunk
+     * of its own, so this final anchor is what calibration and post-mortems
+     * have — including the details blocks that separate cache-warm from
+     * cache-cold counts. Absent when the provider never reported usage.
+     */
+    usage?: TurnUsage;
+  };
   /** Terminal abort: the operator ended the turn (transcript was healed). */
   "turn.aborted": { reason: string };
 };

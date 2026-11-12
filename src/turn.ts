@@ -5,7 +5,45 @@ import type { ToolCallRecord } from "./state/index.ts";
 
 import { logger } from "./log.ts";
 import { newSessionId } from "./state/index.ts";
-import { estimateTokenCount } from "tokenx";
+import { estimateTokenCount as tokenxResultTokens } from "tokenx";
+
+/**
+ * Widen a provider `usage` object to the standard-schema extras yog captures
+ * verbatim (token-accuracy plan §3.3). The OpenAI SDK's `CompletionUsage`
+ * types only the three summary numbers; OpenRouter (and newer OpenAI
+ * deployments) attach `prompt_tokens_details`, `completion_tokens_details`,
+ * and a cost figure. Numbers-of-wrong-shape are dropped, not coerced.
+ */
+function orUsageDetails(raw: Record<string, unknown>): {
+  prompt_tokens_details?: TurnUsage["prompt_tokens_details"];
+  completion_tokens_details?: TurnUsage["completion_tokens_details"];
+  cost?: number;
+} {
+  const out: {
+    prompt_tokens_details?: TurnUsage["prompt_tokens_details"];
+    completion_tokens_details?: TurnUsage["completion_tokens_details"];
+    cost?: number;
+  } = {};
+  const ptd = raw.prompt_tokens_details;
+  if (typeof ptd === "object" && ptd !== null) {
+    const d = ptd as Record<string, unknown>;
+    const details = {
+      ...(typeof d.cached_tokens === "number" ? { cached_tokens: d.cached_tokens } : {}),
+      ...(typeof d.cache_write_tokens === "number"
+        ? { cache_write_tokens: d.cache_write_tokens }
+        : {}),
+    };
+    if (Object.keys(details).length > 0) out.prompt_tokens_details = details;
+  }
+  const ctd = raw.completion_tokens_details;
+  if (typeof ctd === "object" && ctd !== null) {
+    const d = ctd as Record<string, unknown>;
+    out.completion_tokens_details =
+      typeof d.reasoning_tokens === "number" ? { reasoning_tokens: d.reasoning_tokens } : {};
+  }
+  if (typeof raw.cost === "number" && Number.isFinite(raw.cost)) out.cost = raw.cost;
+  return out;
+}
 import {
   StdoutSink,
   TURN_EVENT_VERSION,
@@ -444,6 +482,9 @@ export class TurnEngine {
     // Declared outside `try` so the unwind/heal path in `catch` can
     // reconstruct assistant rows for calls announced before the unwind.
     const announcedCalls = new Map<string, { id: string; name: string; args: string }>();
+    // Declared outside `try` so the error path can reference it: the last
+    // usage seen anywhere in the turn, carried on the terminal error event.
+    let lastUsage: TurnUsage | undefined;
     try {
       await emit("turn.started", { turnId, model: modelId, ts: Date.now() });
 
@@ -462,9 +503,9 @@ export class TurnEngine {
       // `include_usage`); merge partial fields so a round that reports only
       // some of them keeps the rest of the running total.
       let usage: TurnUsage | undefined;
+      const rateLimitPolicy = resolveRateLimitPolicy(opts.rateLimit);
       // Previous round's prompt_tokens, for the per-round context-growth delta.
       let prevRoundPrompt: number | undefined;
-      const rateLimitPolicy = resolveRateLimitPolicy(opts.rateLimit);
       // Total 429 backoffs this turn (reported on `turn.finished`).
       let rateLimitRetries = 0;
       for (let round = 0; round < maxRounds; round++) {
@@ -537,21 +578,50 @@ export class TurnEngine {
             throw abortErr();
           }
           // Aggregate usage for this round onto the turn-wide running total.
-          // Providers that don't support `include_usage` simply never send a
-          // `usage` field, so this stays undefined for them. The round-level
-          // copy drives per-tool-call attribution; it resets each round.
+          // Providers that don't support `include_usage` (or newer always-on
+          // reporting) simply never send a `usage` field, so this stays
+          // undefined for them. The round-level copy drives per-tool-call
+          // attribution; it resets each round.
+          //
+          // Capture-first (token-accuracy plan §3.3): the standard-schema
+          // extras - prompt/completion token details, provider request id,
+          // cost - are stored verbatim on the turn/round usage records.
+          // The OpenAI SDK types only the three summary numbers, so the
+          // extra fields are widened at this boundary and nowhere else.
           if (chunk.usage) {
+            const raw = chunk.usage as unknown as Record<string, unknown>;
+            const details = orUsageDetails(raw);
             usage = {
               prompt_tokens: chunk.usage.prompt_tokens ?? usage?.prompt_tokens,
               completion_tokens: chunk.usage.completion_tokens ?? usage?.completion_tokens,
               total_tokens: chunk.usage.total_tokens ?? usage?.total_tokens,
+              ...(details.prompt_tokens_details !== undefined
+                ? { prompt_tokens_details: details.prompt_tokens_details }
+                : {}),
+              ...(details.completion_tokens_details !== undefined
+                ? { completion_tokens_details: details.completion_tokens_details }
+                : {}),
+              ...(details.cost !== undefined ? { cost: details.cost } : {}),
             };
+            const requestId = typeof chunk.id === "string" ? chunk.id : undefined;
+            if (requestId !== undefined) {
+              usage = { ...usage, requestId };
+            }
             opts.onUsage?.(usage);
             roundUsage = {
               prompt_tokens: chunk.usage.prompt_tokens ?? roundUsage?.prompt_tokens,
               completion_tokens: chunk.usage.completion_tokens ?? roundUsage?.completion_tokens,
               total_tokens: chunk.usage.total_tokens ?? roundUsage?.total_tokens,
+              ...(details.prompt_tokens_details !== undefined
+                ? { prompt_tokens_details: details.prompt_tokens_details }
+                : {}),
+              ...(details.completion_tokens_details !== undefined
+                ? { completion_tokens_details: details.completion_tokens_details }
+                : {}),
+              ...(details.cost !== undefined ? { cost: details.cost } : {}),
+              ...(requestId !== undefined ? { requestId } : {}),
             };
+            lastUsage = usage;
           }
           const delta = chunk.choices[0]?.delta;
           if (!delta) continue;
@@ -620,6 +690,14 @@ export class TurnEngine {
                 ...(roundUsage.total_tokens !== undefined
                   ? { total_tokens: roundUsage.total_tokens }
                   : {}),
+                ...(roundUsage.prompt_tokens_details !== undefined
+                  ? { prompt_tokens_details: roundUsage.prompt_tokens_details }
+                  : {}),
+                ...(roundUsage.completion_tokens_details !== undefined
+                  ? { completion_tokens_details: roundUsage.completion_tokens_details }
+                  : {}),
+                ...(roundUsage.requestId !== undefined ? { requestId: roundUsage.requestId } : {}),
+                ...(roundUsage.cost !== undefined ? { cost: roundUsage.cost } : {}),
               };
         const promptDelta =
           roundUsage?.prompt_tokens !== undefined && prevRoundPrompt !== undefined
@@ -702,7 +780,9 @@ export class TurnEngine {
             result === undefined
               ? JSON.stringify({ error: `unknown tool "${tc.name}"` })
               : JSON.stringify(result);
-          const resultTokens = estimateTokenCount(payload);
+          // Per-result estimate rides the event for UI stat rows; the
+          // round-level `usage` above is the authoritative native count.
+          const resultTokens = tokenxResultTokens(payload);
 
           await emit("tool.result", {
             id: tcId,
@@ -809,6 +889,11 @@ export class TurnEngine {
         code: isRateLimitError(err) ? "rate_limited" : "provider_error",
         message: err instanceof Error ? err.message : String(err),
         ...(err instanceof Error ? { details: { name: err.name, stack: err.stack } } : {}),
+        // Capture-first on the error path too (plan §3.3): the last known
+        // round usage is the freshest native anchor a failed turn has —
+        // rejected requests never yield a usage chunk of their own, so this
+        // is what calibration and post-mortems have to work with.
+        ...(lastUsage !== undefined ? { usage: lastUsage } : {}),
       });
       throw err;
     } finally {
