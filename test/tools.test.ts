@@ -250,18 +250,9 @@ describe("tool output limiting", () => {
     // realistic offenders (colored build logs, jq-style output).
     setToolOutputBudgets(1000, 100);
     const commands: Array<[string, string]> = [
-      [
-        "ansi",
-        "printf '\\033[32mok\\033[0m '%s $(yes | head -c 3000) | tr -d '\\n'",
-      ],
-      [
-        "backslashes",
-        "printf 'a\\\\\\\\b%s' $(yes | head -c 3000) | tr -d '\\n'",
-      ],
-      [
-        "tabs and quotes",
-        "printf 'x\\ty\\\"z\\\\%s' $(yes | head -c 3000) | tr -d '\\n'",
-      ],
+      ["ansi", "printf '\\033[32mok\\033[0m '%s $(yes | head -c 3000) | tr -d '\\n'"],
+      ["backslashes", "printf 'a\\\\\\\\b%s' $(yes | head -c 3000) | tr -d '\\n'"],
+      ["tabs and quotes", "printf 'x\\ty\\\"z\\\\%s' $(yes | head -c 3000) | tr -d '\\n'"],
     ];
     try {
       for (const [name, command] of commands) {
@@ -289,7 +280,7 @@ describe("tool output limiting", () => {
     const samples = [
       "",
       "plain ascii",
-      "tab\tnewline\ncr\rquote\"backslash\\del\x7fnul\x00vt\x0besc\x1b",
+      'tab\tnewline\ncr\rquote"backslash\\del\x7fnul\x00vt\x0besc\x1b',
       "\u2028\u2029\ufeff\u00ad\x85",
       "😀 flag 🇺🇸 marker [✂️ TRUNCATED]",
       "\ud800 lone high\udc00 lone low\ud83d\ude00 pair",
