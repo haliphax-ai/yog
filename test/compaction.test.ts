@@ -121,9 +121,14 @@ describe("message building", () => {
 });
 
 describe("token heuristic and middle truncation", () => {
-  it("estimates tokens weighted: alnum chars/4, non-alnum chars/2", () => {
+  it("estimates tokens via tokenx under the default profile", () => {
+    // tokenx segmentation: "abcd" is a short lowercase word -> 1 token.
     expect(estimateTokens("abcd")).toBe(1);
-    expect(estimateTokens("abcdefghij")).toBe(3);
+    // "abcdefghij" is a 10-char lowercase word: over the 8-char single-
+    // token threshold, so it falls to the default rate (1.5 c/t) -> 7.
+    // The old alnum/4 heuristic gave 3 — the pin tracks tokenx now, not
+    // the fork.
+    expect(estimateTokens("abcdefghij")).toBe(7);
   });
 
   it("passes a transcript that already fits through unchanged", () => {

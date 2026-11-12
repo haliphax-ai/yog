@@ -3,6 +3,7 @@
  *
  * Usage: yog serve [--host <addr>] [--port <n>] [--config <path>]
  *       | yog skills <list|load|unload|status> [name]
+ *       | yog calibrate <sessionId> [--config <path>]
  *
  * `serve` starts the long-lived HTTP/SSE daemon (see server/serve.ts),
  * which owns the in-process run orchestration (OpenAI client, state db,
@@ -13,7 +14,7 @@
 import { parseServeArgs } from "./cli.ts";
 import { dispatchSkillsCommand } from "./skills/commands.ts";
 import { SkillManager } from "./skills/index.ts";
-import { createDaemon } from "./server/index.ts";
+import { createDaemon, runCalibrate } from "./server/index.ts";
 import { logger } from "./log.ts";
 
 const USAGE = "usage: yog serve [--host <addr>] [--port <n>] [--config <path>]";
@@ -58,8 +59,14 @@ async function main(): Promise<void> {
     }
     return;
   }
+  if (argv[0] === "calibrate") {
+    process.exitCode = await runCalibrate(argv.slice(1));
+    return;
+  }
   if (argv[0] !== "serve") {
-    logger.error(`unknown subcommand "${argv[0] ?? ""}" (expected "serve")`);
+    logger.error(
+      `unknown subcommand "${argv[0] ?? ""}" (expected "serve", "skills", or "calibrate")`,
+    );
     logger.error(USAGE);
     process.exit(1);
   }

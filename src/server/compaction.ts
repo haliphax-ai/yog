@@ -66,6 +66,12 @@ export interface CompactionRunnerDeps {
   /** Server-configured compaction model; unset = same as `model`. */
   compactionModel?: string;
   modelInfo?: { getContextWindow(modelId: string): number | undefined } | undefined;
+  /**
+   * Token profile for the transcript-fit budget (tokenx under the
+   * overlay-loaded profile; neutral default when unset). Display/native
+   * accounting is unaffected — this only sizes the compaction fit.
+   */
+  profile?: TokenProfile;
   /** 429 retry policy for the summary turn (see `TurnOptions.rateLimit`). */
   rateLimit?: Partial<import("../turn.ts").RateLimitPolicy>;
 }
@@ -93,9 +99,17 @@ export const COMPACTION_TOKEN_MARGIN = 20_000;
 /** Window used when the compaction model's window is unknown. */
 export const DEFAULT_COMPACTION_WINDOW = 128_000;
 
-import { estimateTokenCount as estimateTokens } from "../toolkit/index.ts";
+import {
+  estimateTokenCountWithProfile,
+  DEFAULT_PROFILE,
+  type TokenProfile,
+} from "../toolkit/index.ts";
 
-export { estimateTokens };
+/** Default-fit transcript estimator (compaction budgets; tests pin behavior). */
+export const estimateTokens = (text: string): number =>
+  estimateTokenCountWithProfile(text, DEFAULT_PROFILE);
+
+export type { TokenProfile };
 
 /**
  * Render the session transcript as a readable text block so the summary
@@ -131,12 +145,15 @@ export const MIDDLE_TRUNCATION_MARKER = TRUNCATION_IDENTIFIER;
  * Fit a serialized transcript (lines) under a token budget by keeping the
  * earliest and latest lines and truncating the middle. The cut is obvious to
  * the consumer: the dropped span is replaced by {@link MIDDLE_TRUNCATION_MARKER}.
+ * Line sizing uses `estimate` (default: the neutral default profile); pass
+ * the session model's calibrated profile when available.
  */
 export function fitSerializedTranscript(
   lines: string[],
   budgetTokens: number,
+  estimate: (line: string) => number = estimateTokens,
 ): { text: string; truncated: boolean } {
-  const total = lines.reduce((sum, line) => sum + estimateTokens(line), 0);
+  const total = lines.reduce((sum, line) => sum + estimate(line), 0);
   if (total <= budgetTokens || lines.length < 2) {
     return { text: lines.join("\n"), truncated: false };
   }
@@ -144,17 +161,17 @@ export function fitSerializedTranscript(
   const head: string[] = [];
   let headTokens = 0;
   for (const line of lines) {
-    if (headTokens + estimateTokens(line) > half && head.length > 0) break;
+    if (headTokens + estimate(line) > half && head.length > 0) break;
     head.push(line);
-    headTokens += estimateTokens(line);
+    headTokens += estimate(line);
   }
   const tail: string[] = [];
   let tailTokens = 0;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i] as string;
-    if (tailTokens + estimateTokens(line) > half && tail.length > 0) break;
+    if (tailTokens + estimate(line) > half && tail.length > 0) break;
     tail.unshift(line);
-    tailTokens += estimateTokens(line);
+    tailTokens += estimate(line);
   }
   return {
     text: head.join("\n") + MIDDLE_TRUNCATION_MARKER + tail.join("\n"),
@@ -252,7 +269,9 @@ export function createCompactionRunner(deps: CompactionRunnerDeps): CompactionBo
     let sourceText = serialized;
     let truncated = false;
     if (kind === "compact") {
-      const fitted = fitSerializedTranscript(lines, budget);
+      const profile = deps.profile ?? DEFAULT_PROFILE;
+      const estimate = (line: string) => estimateTokenCountWithProfile(line, profile);
+      const fitted = fitSerializedTranscript(lines, budget, estimate);
       sourceText = fitted.text;
       truncated = fitted.truncated;
     }

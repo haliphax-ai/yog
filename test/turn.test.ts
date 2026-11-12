@@ -25,6 +25,7 @@ interface FakeDelta {
 }
 
 interface FakeChunk {
+  id?: string;
   choices: { delta: FakeDelta }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
 }
@@ -549,6 +550,134 @@ describe("TurnEngine token usage", () => {
   });
 });
 
+describe("TurnEngine native usage capture (plan §3.3)", () => {
+  it("captures details, request id, and cost verbatim on turn.finished", async () => {
+    const sink = new RecordingSink();
+    const rounds: FakeChunk[][] = [
+      [
+        { choices: [{ delta: { content: "Hello" } }] },
+        {
+          id: "gen_abc123",
+          choices: [{ delta: { content: "" } }],
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 4,
+            total_tokens: 14,
+            prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 7 },
+            completion_tokens_details: { reasoning_tokens: 2 },
+            cost: 0.25,
+          } as FakeChunk["usage"] & Record<string, unknown>,
+        },
+      ],
+    ];
+    await new TurnEngine(sink).run(fakeClient(rounds), "test-model", userMessages(), registry);
+    const finished = sink.events.find((e) => e.type === "turn.finished");
+    if (finished?.type !== "turn.finished") throw new Error("expected turn.finished");
+    expect(finished.data.usage).toEqual({
+      prompt_tokens: 10,
+      completion_tokens: 4,
+      total_tokens: 14,
+      requestId: "gen_abc123",
+      prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 7 },
+      completion_tokens_details: { reasoning_tokens: 2 },
+      cost: 0.25,
+    });
+  });
+
+  it("drops malformed extras instead of coercing them", async () => {
+    const sink = new RecordingSink();
+    const rounds: FakeChunk[][] = [
+      [
+        { choices: [{ delta: { content: "Hi" } }] },
+        {
+          choices: [{ delta: { content: "" } }],
+          usage: {
+            prompt_tokens: 5,
+            prompt_tokens_details: { cached_tokens: "many" },
+            cost: "free",
+          } as FakeChunk["usage"] & Record<string, unknown>,
+        },
+      ],
+    ];
+    await new TurnEngine(sink).run(fakeClient(rounds), "test-model", userMessages(), registry);
+    const finished = sink.events.find((e) => e.type === "turn.finished");
+    if (finished?.type !== "turn.finished") throw new Error("expected turn.finished");
+    expect(finished.data.usage).toEqual({ prompt_tokens: 5 });
+  });
+
+  it("stamps round usage (with details) on tool.result events", async () => {
+    const sink = new RecordingSink();
+    const rounds: FakeChunk[][] = [
+      [
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_1",
+                    function: { name: "echo", arguments: '{"text":"hi"}' },
+                  },
+                ],
+              },
+            },
+          ],
+          usage: {
+            prompt_tokens: 30,
+            completion_tokens: 5,
+            total_tokens: 35,
+            prompt_tokens_details: { cached_tokens: 12 },
+          } as FakeChunk["usage"] & Record<string, unknown>,
+        },
+      ],
+      [{ choices: [{ delta: { content: "Done" } }] }],
+    ];
+    await new TurnEngine(sink).run(fakeClient(rounds), "test-model", userMessages(), registry);
+    const result = sink.events.find((e) => e.type === "tool.result");
+    if (result?.type !== "tool.result") throw new Error("expected tool.result");
+    expect(result.data.usage).toMatchObject({
+      prompt_tokens: 30,
+      prompt_tokens_details: { cached_tokens: 12 },
+    });
+  });
+
+  it("carries the last known usage on the terminal error event", async () => {
+    const sink = new RecordingSink();
+    const rounds: FakeChunk[][] = [
+      [
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_1",
+                    function: { name: "echo", arguments: '{"text":"hi"}' },
+                  },
+                ],
+              },
+            },
+          ],
+          usage: { prompt_tokens: 77, completion_tokens: 6, total_tokens: 83 },
+        },
+      ],
+      [{ choices: [{ delta: { content: "" } }], usage: { prompt_tokens: 90 } }],
+    ];
+    await expect(
+      new TurnEngine(sink).run(
+        fakeClient(rounds, { failOn: 1 }),
+        "test-model",
+        userMessages(),
+        registry,
+      ),
+    ).rejects.toThrow("provider exploded");
+    const err = sink.events.find((e) => e.type === "error");
+    if (err?.type !== "error") throw new Error("expected error event");
+    expect(err.data.usage).toEqual({ prompt_tokens: 77, completion_tokens: 6, total_tokens: 83 });
+  });
+});
 describe("StdoutSink output parity", () => {
   it("writes byte-identical stdout text: deltas concatenated, one trailing newline", async () => {
     const out: string[] = [];

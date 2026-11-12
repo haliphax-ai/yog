@@ -13,20 +13,30 @@ export const TOOL_OUTPUT_LIMIT_CHARS = 50_000;
 export const TOOL_OUTPUT_GRACE_CHARS = 1_000;
 
 /**
- * Token heuristic for estimating context size, calibrated against real
- * provider `prompt_tokens` (nemotron-3.5 via OpenRouter, agentic transcript
- * mix): alphanumeric characters count as ~1 token per 4 chars, everything
- * else (punctuation, whitespace, symbols) as ~1 per 2 — dense code and JSON
- * dominate agent transcripts, and plain chars/4 under-counts those by ~2x.
+ * Token estimation through tokenx with the configured profile.
+ *
+ * Historically this was a hand-rolled alnum/4+other/2 heuristic documented
+ * as "calibrated against nemotron-3.5" — but it under-counts dense tool
+ * output ~2x vs native usage and duplicated tokenx behind the same name,
+ * so /shake and compaction were budgeting on fiction. It is now the real
+ * tokenx, driven by the caller-chosen {@link TokenProfile} (neutral default
+ * until `yog calibrate` writes a per-model overlay; see token-profiles.ts).
+ *
+ * Callers that do not care about per-model accuracy can use
+ * {@link estimateTokenCountWithProfile} with {@link DEFAULT_PROFILE}; the
+ * daemon wires the overlay-loaded profile through /shake and compaction.
+ * NOTE: the profile must be applied by the *caller* — this module stays
+ * dependency-injected (no daemon singleton) so tests can pin behavior.
  */
-export function estimateTokenCount(text: string): number {
-  let alnum = 0;
-  let other = 0;
-  for (const ch of text) {
-    if (/[A-Za-z0-9]/.test(ch)) alnum += 1;
-    else other += 1;
-  }
-  return Math.max(1, Math.ceil(alnum / 4 + other / 2));
+import { DEFAULT_PROFILE, profileOptions, type TokenProfile } from "./token-profiles.ts";
+import { estimateTokenCount as tokenxEstimate } from "tokenx";
+
+/** tokenx estimate under `profile` (defaults to the neutral default). */
+export function estimateTokenCountWithProfile(
+  text: string,
+  profile: TokenProfile = DEFAULT_PROFILE,
+): number {
+  return tokenxEstimate(text, profileOptions(profile));
 }
 
 /**

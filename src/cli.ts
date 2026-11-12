@@ -1,9 +1,10 @@
 /**
  * CLI argument parsing.
  *
- * The only subcommand is `serve`, which starts the long-lived HTTP/SSE
- * daemon. One-shot client turns are handled by the external
- * [yog-client-tui](https://github.com/haliphax-ai/yog-client-tui)
+ * Two subcommands exist: `serve`, which starts the long-lived HTTP/SSE
+ * daemon, and `calibrate <sessionId>`, which fits a token-accuracy profile
+ * for a session's model from its recorded traffic (server/calibrate-cli.ts).
+ * One-shot client turns are handled by the external
  * application, which speaks the v1 HTTP/SSE contract directly.
  */
 
