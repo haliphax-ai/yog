@@ -89,13 +89,16 @@ export function profileToJson(profile: TokenProfile): string {
  * files are logged once and ignored — a bad overlay must degrade to the
  * neutral default, never break a turn.
  */
-export function createOverlayLoader(stateRoot: string, opts: {
-  readFile: (path: string) => Promise<string>;
-  log?: (msg: string) => void;
-}): (modelId: string) => Promise<TokenProfile> {
+export function createOverlayLoader(
+  stateRoot: string,
+  opts: {
+    readFile: (path: string) => Promise<string>;
+    log?: (msg: string) => void;
+  },
+): (modelId: string) => Promise<TokenProfile> {
   const cache = new Map<string, Promise<TokenProfile>>();
   const { readFile, log = () => {} } = opts;
-    return (modelId) => {
+  return (modelId) => {
     const slug = overlaySlug(modelId);
     const key = slug;
     let entry = cache.get(key);
@@ -105,11 +108,15 @@ export function createOverlayLoader(stateRoot: string, opts: {
         try {
           const raw = JSON.parse(await readFile(file));
           const profile = overlayFromJson(raw);
-          log(`[token-profiles] overlay ${file}: defaultCharsPerToken=${profile.defaultCharsPerToken}`);
+          log(
+            `[token-profiles] overlay ${file}: defaultCharsPerToken=${profile.defaultCharsPerToken}`,
+          );
           return profile;
         } catch (err) {
           if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
-            log(`[token-profiles] overlay ${file} unreadable (${(err as Error).message}); using default`);
+            log(
+              `[token-profiles] overlay ${file} unreadable (${(err as Error).message}); using default`,
+            );
           }
           return DEFAULT_PROFILE;
         }
@@ -136,7 +143,8 @@ export function overlayFromJson(raw: unknown): TokenProfile {
   }
   let configs: TokenProfile["languageConfigs"];
   if (r.languageConfigs !== undefined) {
-    if (!Array.isArray(r.languageConfigs)) throw new Error("overlay: languageConfigs must be an array");
+    if (!Array.isArray(r.languageConfigs))
+      throw new Error("overlay: languageConfigs must be an array");
     configs = r.languageConfigs.map((c) => {
       if (typeof c !== "object" || c === null) throw new Error("overlay: bad languageConfig");
       const cc = c as Record<string, unknown>;
@@ -149,6 +157,8 @@ export function overlayFromJson(raw: unknown): TokenProfile {
       };
     });
   }
-  return { defaultCharsPerToken: rate, ...(configs !== undefined ? { languageConfigs: configs } : {}) };
+  return {
+    defaultCharsPerToken: rate,
+    ...(configs !== undefined ? { languageConfigs: configs } : {}),
+  };
 }
-

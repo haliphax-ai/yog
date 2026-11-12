@@ -13,7 +13,6 @@
  * native counts — the strongest tier, when present).
  */
 
-
 /** One trustworthy (chars, tokens) sample. */
 export interface CalibSample {
   /** Serialized request size in chars (transcript + tool_calls JSON). */
@@ -106,9 +105,15 @@ export function extractCalibrationSamples(
 export function fitRate(samples: CalibSample[]): CalibrationFit {
   const n = samples.length;
   if (n < 2) throw new Error("need at least 2 samples to fit");
-  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  let sx = 0,
+    sy = 0,
+    sxx = 0,
+    sxy = 0;
   for (const s of samples) {
-    sx += s.chars; sy += s.tokens; sxx += s.chars * s.chars; sxy += s.chars * s.tokens;
+    sx += s.chars;
+    sy += s.tokens;
+    sxx += s.chars * s.chars;
+    sxy += s.chars * s.tokens;
   }
   const denom = n * sxx - sx * sx;
   if (denom === 0) {
@@ -204,4 +209,3 @@ export async function calibrateFromSamples(
   const path = await opts.writeOverlay(slug, json);
   return { written: true, path, fit };
 }
-

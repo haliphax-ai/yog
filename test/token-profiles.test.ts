@@ -23,7 +23,9 @@ const readFileOf = (files: Record<string, string>) => async (path: string) => {
 
 describe("overlaySlug", () => {
   it("folds / to _ and drops provider-tier suffixes", () => {
-    expect(overlaySlug("nvidia/nemotron-3-ultra-550b-a55b")).toBe("nvidia_nemotron-3-ultra-550b-a55b");
+    expect(overlaySlug("nvidia/nemotron-3-ultra-550b-a55b")).toBe(
+      "nvidia_nemotron-3-ultra-550b-a55b",
+    );
     expect(overlaySlug("nvidia/nemotron-3-ultra-550b-a55b:free")).toBe(
       "nvidia_nemotron-3-ultra-550b-a55b",
     );

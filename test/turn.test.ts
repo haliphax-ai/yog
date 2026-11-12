@@ -550,7 +550,6 @@ describe("TurnEngine token usage", () => {
   });
 });
 
-
 describe("TurnEngine native usage capture (plan §3.3)", () => {
   it("captures details, request id, and cost verbatim on turn.finished", async () => {
     const sink = new RecordingSink();
@@ -615,7 +614,11 @@ describe("TurnEngine native usage capture (plan §3.3)", () => {
             {
               delta: {
                 tool_calls: [
-                  { index: 0, id: "call_1", function: { name: "echo", arguments: '{"text":"hi"}' } },
+                  {
+                    index: 0,
+                    id: "call_1",
+                    function: { name: "echo", arguments: '{"text":"hi"}' },
+                  },
                 ],
               },
             },
@@ -633,7 +636,10 @@ describe("TurnEngine native usage capture (plan §3.3)", () => {
     await new TurnEngine(sink).run(fakeClient(rounds), "test-model", userMessages(), registry);
     const result = sink.events.find((e) => e.type === "tool.result");
     if (result?.type !== "tool.result") throw new Error("expected tool.result");
-    expect(result.data.usage).toMatchObject({ prompt_tokens: 30, prompt_tokens_details: { cached_tokens: 12 } });
+    expect(result.data.usage).toMatchObject({
+      prompt_tokens: 30,
+      prompt_tokens_details: { cached_tokens: 12 },
+    });
   });
 
   it("carries the last known usage on the terminal error event", async () => {
@@ -645,7 +651,11 @@ describe("TurnEngine native usage capture (plan §3.3)", () => {
             {
               delta: {
                 tool_calls: [
-                  { index: 0, id: "call_1", function: { name: "echo", arguments: '{"text":"hi"}' } },
+                  {
+                    index: 0,
+                    id: "call_1",
+                    function: { name: "echo", arguments: '{"text":"hi"}' },
+                  },
                 ],
               },
             },
@@ -653,12 +663,15 @@ describe("TurnEngine native usage capture (plan §3.3)", () => {
           usage: { prompt_tokens: 77, completion_tokens: 6, total_tokens: 83 },
         },
       ],
-      [
-        { choices: [{ delta: { content: "" } }], usage: { prompt_tokens: 90 } },
-      ],
+      [{ choices: [{ delta: { content: "" } }], usage: { prompt_tokens: 90 } }],
     ];
     await expect(
-      new TurnEngine(sink).run(fakeClient(rounds, { failOn: 1 }), "test-model", userMessages(), registry),
+      new TurnEngine(sink).run(
+        fakeClient(rounds, { failOn: 1 }),
+        "test-model",
+        userMessages(),
+        registry,
+      ),
     ).rejects.toThrow("provider exploded");
     const err = sink.events.find((e) => e.type === "error");
     if (err?.type !== "error") throw new Error("expected error event");

@@ -62,10 +62,7 @@ describe("extractCalibrationSamples", () => {
       { role: "tool", content: "x", turn_id: 1 },
       { role: "assistant", content: "abc", turn_id: 2 },
     ];
-    const events = [
-      toolResult(1, { prompt_tokens: 100 }),
-      toolResult(2, { prompt_tokens: 150 }),
-    ];
+    const events = [toolResult(1, { prompt_tokens: 100 }), toolResult(2, { prompt_tokens: 150 })];
     const samples = extractCalibrationSamples(rows, events);
     // Round 1 request = the user row (5). Round 2 request adds the
     // assistant row (10) + tool result (1) -> 16. The final assistant's own

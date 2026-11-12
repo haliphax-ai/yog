@@ -41,10 +41,10 @@ native count covering those bytes lands with the **next** round's usage chunk �
 one full model round-trip later (tool execution + next stream), or at `turn.finished`
 for the terminal round. From the incident session:
 
-| turn (model, rounds) | median | p90 | max |
-|---|---|---|---|
-| 68 (ernie, 124) | 4.1s | 7.5s | 18.1s |
-| 74 (GLM, 263) | 7.6s | 24.1s | 77.1s |
+| turn (model, rounds) | median | p90   | max   |
+| -------------------- | ------ | ----- | ----- |
+| 68 (ernie, 124)      | 4.1s   | 7.5s  | 18.1s |
+| 74 (GLM, 263)        | 7.6s   | 24.1s | 77.1s |
 
 Consequences:
 
@@ -123,11 +123,11 @@ overlay write; no API key, no network.
    - round 1 of a turn (cold by construction), or
    - rounds whose captured `prompt_tokens_details.cached_tokens` (L1) is 0/absent, or
    - L2-reconciled `native_tokens_prompt` values (OpenRouter; strongest tier).
-   Drop cache-warm rounds — they're the −50% dimmed liars that ruined naive fits.
+     Drop cache-warm rounds — they're the −50% dimmed liars that ruined naive fits.
 3. **Intercept:** `tokens = intercept + rate × chars`. The intercept is fit from the
    data — round 1 of the session's first turn (tiny transcript) measures system prompt
-   + tool schemas + wire overhead in one number (~250 tokens in the incident session).
-   It's the *useful* overhead: present in every subsequent request.
+   - tool schemas + wire overhead in one number (~250 tokens in the incident session).
+     It's the _useful_ overhead: present in every subsequent request.
 4. **Fit:** default = intercept + single rate (robust at n=3–5). If ≥10 qualified
    samples, fit tokenx's class axes (JSON punct / code punct / words / default) with
    the intercept, regularized toward the default profile so small sessions can't
@@ -140,8 +140,13 @@ overlay write; no API key, no network.
    {
      "model": "nvidia/nemotron-3-ultra-550b-a55b",
      "profile": { "defaultCharsPerToken": 2.56, "languageConfigs": ["…"] },
-     "fit": { "kind": "classes", "mape": 0.017, "worst": 0.121,
-              "samples": 11, "interceptTokens": 250 },
+     "fit": {
+       "kind": "classes",
+       "mape": 0.017,
+       "worst": 0.121,
+       "samples": 11,
+       "interceptTokens": 250
+     },
      "source": { "sessionId": "ebbc0bd8…", "fittedAt": 1794457000000 }
    }
    ```
@@ -181,22 +186,22 @@ stop trying. Adds to §3.2 as the strongest calibration tier and surfaces
 
 ## 5. Test plan
 
-| file | coverage |
-|---|---|
-| new `test/token-profiles.test.ts` | overlay load/slug/fold rules; malformed overlay ignored; default fallback; tail-bridge arithmetic |
-| new `test/calibrate.test.ts` | fixture DB (incident corpus subset): sample extraction, cache-warm exclusion, intercept fit, single-rate vs class fit selection, quality-gate refusals, output schema |
-| `test/turn.test.ts` | fake provider emitting details + gen-id; `usageRaw` capture; error-path usage |
-| `test/shake.test.ts` | `contextSize` uses profile; overlay wins over default |
-| new `test/capabilities.test.ts` | hostname × dynamic confirmation; reconciler degradation |
+| file                              | coverage                                                                                                                                                              |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| new `test/token-profiles.test.ts` | overlay load/slug/fold rules; malformed overlay ignored; default fallback; tail-bridge arithmetic                                                                     |
+| new `test/calibrate.test.ts`      | fixture DB (incident corpus subset): sample extraction, cache-warm exclusion, intercept fit, single-rate vs class fit selection, quality-gate refusals, output schema |
+| `test/turn.test.ts`               | fake provider emitting details + gen-id; `usageRaw` capture; error-path usage                                                                                         |
+| `test/shake.test.ts`              | `contextSize` uses profile; overlay wins over default                                                                                                                 |
+| new `test/capabilities.test.ts`   | hostname × dynamic confirmation; reconciler degradation                                                                                                               |
 
 ## 6. Rollout
 
-| phase | content |
-|---|---|
-| P0 | de-fork toolkit estimator + `DEFAULT_PROFILE` + overlay loader; shake/compaction switch |
-| P1 | L1 native capture (`usageRaw`, details, error path) |
-| P2 | `yog calibrate <sessionId>` (single-rate fit + quality gate + overlay write) |
-| P3 | L2 OpenRouter reconcile + reroute events; class-based fit upgrade |
+| phase | content                                                                                 |
+| ----- | --------------------------------------------------------------------------------------- |
+| P0    | de-fork toolkit estimator + `DEFAULT_PROFILE` + overlay loader; shake/compaction switch |
+| P1    | L1 native capture (`usageRaw`, details, error path)                                     |
+| P2    | `yog calibrate <sessionId>` (single-rate fit + quality gate + overlay write)            |
+| P3    | L2 OpenRouter reconcile + reroute events; class-based fit upgrade                       |
 
 P0–P2 are each independently shippable; nothing waits on OpenRouter.
 
@@ -205,7 +210,7 @@ P0–P2 are each independently shippable; nothing waits on OpenRouter.
 - Overlay discoverability: `yog calibrate` could print a "profile quality" summary and
   suggest running a longer session when the gate refuses — is CLI output enough, or
   should the daemon surface `profile.stale` hints in status? (Deferred.)
-- Should the fit job ever run *inside* the daemon automatically after turn N? v3 says
+- Should the fit job ever run _inside_ the daemon automatically after turn N? v3 says
   no (explicit user action only) — auto-fitting risks surprise behavior changes from
   background writes.
 - GLM/ernie examples for docs: regenerate from the incident corpus via the script once
