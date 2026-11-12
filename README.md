@@ -468,11 +468,18 @@ result (a huge file read, a complex web fetch, …). Tools are expected to limit
 their own output — the `bash` tool middle-truncates its stdout/stderr streams
 against a shared budget — but a registry-level fallback covers every tool:
 
+- Both budgets are measured on the JSON-serialized lengths, not raw
+  characters: escaping can inflate a string (a newline, tab, quote, or
+  backslash doubles; an ANSI escape or lone surrogate expands 6x), so a
+  25k-char colored build log can serialize to 78k. Raw counts would let
+  escape-dense output slip past the cap.
 - When a tool's serialized result JSON exceeds `toolOutputLimit` plus
   `toolOutputGrace`, the WHOLE serialized payload is middle-truncated to
-  `toolOutputLimit` and wrapped in a single-field `{"truncated": …}` envelope;
-  extra result structure does not survive the cut. `originalLength` preserves
-  the payload's true size for clients.
+  `toolOutputLimit` (in serialized space) and wrapped in a single-field
+  `{"truncated": …}` envelope; extra result structure does not survive the
+  cut. `originalLength` preserves the payload's true size for clients, and
+  the shipped envelope itself stays within `toolOutputLimit` +
+  `toolOutputGrace`.
 - The truncation marker is the same `TRUNCATION_IDENTIFIER` /shake uses, so
   clients and /shake treat the cuts uniformly.
 

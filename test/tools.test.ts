@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   bashTool,
+  jsonEscapedLen,
   setBashExecutor,
   setShellStateProvider,
   setToolOutputBudgets,
@@ -240,6 +241,62 @@ describe("tool output limiting", () => {
       setToolOutputBudgets(TOOL_OUTPUT_LIMIT_CHARS, TOOL_OUTPUT_GRACE_CHARS);
     }
   });
+
+  it("keeps escape-dense output within the budget where the fallback used to engage", async () => {
+    // Regression (issue #48): the cap used to budget on raw `.length`, so
+    // JSON-escaping inflated an "in-budget" result past limit + grace and the
+    // registry fallback shredded it into a {"truncated": …} envelope. ANSI
+    // escapes ( → \u001b, 6x) and backslashes/quotes (2x) are the
+    // realistic offenders (colored build logs, jq-style output).
+    setToolOutputBudgets(1000, 100);
+    const commands: Array<[string, string]> = [
+      [
+        "ansi",
+        "printf '\\033[32mok\\033[0m '%s $(yes | head -c 3000) | tr -d '\\n'",
+      ],
+      [
+        "backslashes",
+        "printf 'a\\\\\\\\b%s' $(yes | head -c 3000) | tr -d '\\n'",
+      ],
+      [
+        "tabs and quotes",
+        "printf 'x\\ty\\\"z\\\\%s' $(yes | head -c 3000) | tr -d '\\n'",
+      ],
+    ];
+    try {
+      for (const [name, command] of commands) {
+        const result = await registry.execute("bash", JSON.stringify({ command }));
+        expect(result?.error).toBeUndefined();
+        const out = String(result?.["stdout"] ?? "");
+        const err = String(result?.["stderr"] ?? "");
+        expect(out + err).toContain(TRUNCATION_IDENTIFIER);
+        // The whole serialized result — escaping included — must fit
+        // limit + grace; this is the invariant the fallback used to break.
+        const serialized = JSON.stringify(result);
+        expect(serialized.length).toBeLessThanOrEqual(1100);
+        expect(Object.keys(result ?? {}).sort()).not.toEqual(["originalLength", "truncated"]);
+        if (name === "ansi") expect(serialized).toContain("\\u001b");
+      }
+    } finally {
+      setToolOutputBudgets(TOOL_OUTPUT_LIMIT_CHARS, TOOL_OUTPUT_GRACE_CHARS);
+    }
+  });
+
+  it("measures jsonEscapedLen exactly as JSON.stringify escapes", async () => {
+    // Property test pinning the counter to the engine (see jsonEscapedLen):
+    // C0 controls, quotes/backslashes, lone surrogates expand; DEL, C1
+    // controls, U+2028/2029, and BOM pass through raw on this engine.
+    const samples = [
+      "",
+      "plain ascii",
+      "tab\tnewline\ncr\rquote\"backslash\\del\x7fnul\x00vt\x0besc\x1b",
+      "\u2028\u2029\ufeff\u00ad\x85",
+      "😀 flag 🇺🇸 marker [✂️ TRUNCATED]",
+      "\ud800 lone high\udc00 lone low\ud83d\ude00 pair",
+      Array.from({ length: 0x200 }, (_, i) => String.fromCodePoint(0x20 + i)).join(""),
+    ];
+    for (const s of samples) expect(jsonEscapedLen(s)).toBe(JSON.stringify(s).length);
+  });
 });
 
 describe("registry fallback cap (capToolResult)", () => {
@@ -262,7 +319,12 @@ describe("registry fallback cap (capToolResult)", () => {
       expect(Object.keys(result ?? {}).sort()).toEqual(["originalLength", "truncated"]);
       expect(result?.["originalLength"]).toBe(JSON.stringify({ data: "x".repeat(2000) }).length);
       const truncated = String(result?.["truncated"]);
-      expect(truncated.length).toBe(200);
+      // The envelope's cut is in serialized space: the escaped length is
+      // the budget (raw length sits just under — the envelope's own quotes
+      // are the two extra chars), and re-serializing the envelope stays
+      // within limit + grace.
+      expect(jsonEscapedLen(truncated)).toBe(202); // content + the field's quotes
+      expect(truncated.length).toBeLessThanOrEqual(200);
       expect(truncated).toContain(TRUNCATION_IDENTIFIER);
       // Head + tail survive a middle cut.
       expect(truncated.startsWith('{"data":"x')).toBe(true);
