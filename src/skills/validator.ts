@@ -8,6 +8,9 @@
 import { stat } from "../host.ts";
 import type { SkillFrontmatter } from "./types.ts";
 
+/** Name of the frontmatter key that hides a skill from the agent. */
+export const DISABLE_MODEL_INVOCATION_KEY = "disable-model-invocation";
+
 /** Maximum `SKILL.md` size (100 KB) — guards the agent's context window. */
 export const MAX_SKILL_MD_BYTES = 100 * 1024;
 
@@ -111,10 +114,15 @@ export interface FrontmatterCheck {
 /**
  * Validate the *shape* of a parsed frontmatter object (before typed
  * conversion): `name` and `description` must be non-empty strings when
- * present, `allowed-tools` a string or string array, `metadata` a mapping.
+ * present, `allowed-tools` a string or string array, `metadata` a mapping,
+ * `disable-model-invocation` a boolean.
  */
 export function checkFrontmatterShape(value: Record<string, unknown>): FrontmatterCheck {
   const errors: string[] = [];
+  const disable = value["disable-model-invocation"];
+  if (disable !== undefined && disable !== null && typeof disable !== "boolean") {
+    errors.push(`frontmatter "disable-model-invocation" must be a boolean (got ${typeof disable})`);
+  }
   const name = value.name;
   if (name !== undefined && (typeof name !== "string" || name.trim() === "")) {
     errors.push(`frontmatter "name" must be a non-empty string (got ${JSON.stringify(name)})`);
@@ -168,6 +176,7 @@ export function toFrontmatter(value: Record<string, unknown>): SkillFrontmatter 
     "metadata",
     "allowed-tools",
     "allowedTools",
+    "disable-model-invocation",
   ]);
   const extra: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value)) {
@@ -180,6 +189,7 @@ export function toFrontmatter(value: Record<string, unknown>): SkillFrontmatter 
     compatibility: typeof value.compatibility === "string" ? value.compatibility : undefined,
     metadata,
     allowedTools: allowedTools && allowedTools.length > 0 ? allowedTools : undefined,
+    disableModelInvocation: value["disable-model-invocation"] === true,
     extra,
   };
 }
@@ -192,4 +202,11 @@ export async function fileSize(path: string): Promise<number> {
   } catch {
     return -1;
   }
+}
+
+/**
+ * `true` when the skill's frontmatter disables agent (model) invocation.
+ */
+export function isModelInvocationDisabled(fm: SkillFrontmatter): boolean {
+  return fm.disableModelInvocation === true;
 }
