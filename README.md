@@ -8,12 +8,12 @@ features are presented to agents as proxied virtual file descriptors.
 
 The docs live in `docs/`, split by concern with an index per directory:
 
-- [Contract](docs/contract/index.md): the v1 HTTP/SSE wire contract. Routes,
+- [Contract](docs/contract/README.md): the v1 HTTP/SSE wire contract. Routes,
   message types, stream events, aborts, rate limits, disconnects, and
   session dormancy.
-- [Operations](docs/operations/index.md): running the daemon. CLI,
+- [Operations](docs/operations/README.md): running the daemon. CLI,
   configuration, Docker, state on disk, and environment requirements.
-- [Harness](docs/harness/index.md): what agents get. The virtual
+- [Harness](docs/harness/README.md): what agents get. The virtual
   filesystem, the bash tool, skills, state, and token accounting.
 - [Token accuracy](docs/token-accuracy.md): the plan and incident analysis
   behind the token estimator and `yog calibrate`.
@@ -66,7 +66,7 @@ src/
                     commands.
 test/               Unit suites per layer, plus the external-client
                     conformance suites.
-docs/               Split documentation; start at docs/index.md.
+docs/               Split documentation; start at docs/README.md.
 Dockerfile          Container image: node:24, daemon + agent users, the
                     fuse/CLI packages, tini init.
 docker-compose.yml  Runs the daemon with FUSE and seccomp; publishes 8111.

@@ -116,7 +116,7 @@ a round the turn ends with a terminal `error { code: "rate_limited" }` and
 the usual partial-batch persist/heal path. A failure after streaming has
 begun (deltas already emitted, tool calls possibly announced) cannot be
 retried transparently and stays terminal. The policy is configurable (see
-[operations/configuration](../operations/index.md)); capabilities advertise
+the [configuration reference](../operations/README.md)); capabilities advertise
 the `rate-limit-retry` feature.
 
 ## Disconnect policy
