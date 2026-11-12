@@ -15,7 +15,7 @@ import { join } from "node:path";
  * The estimator is not load-bearing for safety: native provider usage
  * (Layer 1) is authoritative whenever a session has any, and display uses
  * the profile only to bridge the one-round gap before the next usage chunk
- * lands. See `~/workspace/yog-token-accuracy.md` (v3) for the evidence.
+ * lands (native provider usage is authoritative whenever a session has any).
  */
 
 /** Single-pass token-estimation profile for tokenx. */

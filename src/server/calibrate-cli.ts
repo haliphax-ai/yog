@@ -1,5 +1,5 @@
 /**
- * CLI wiring for `yog calibrate <sessionId>` (token-accuracy plan §3.2):
+ * CLI wiring for `yog calibrate <sessionId>`:
  * resolve config paths, open the sessions store, extract cold-round
  * samples, fit, gate, and write `profiles/<slug>.json`. Lives in the
  * server domain because it composes the store + config like the daemon

@@ -9,7 +9,7 @@ import { estimateTokenCount as tokenxResultTokens } from "tokenx";
 
 /**
  * Widen a provider `usage` object to the standard-schema extras yog captures
- * verbatim (token-accuracy plan §3.3). The OpenAI SDK's `CompletionUsage`
+ * verbatim. The OpenAI SDK's `CompletionUsage`
  * types only the three summary numbers; OpenRouter (and newer OpenAI
  * deployments) attach `prompt_tokens_details`, `completion_tokens_details`,
  * and a cost figure. Numbers-of-wrong-shape are dropped, not coerced.
@@ -583,7 +583,7 @@ export class TurnEngine {
           // undefined for them. The round-level copy drives per-tool-call
           // attribution; it resets each round.
           //
-          // Capture-first (token-accuracy plan §3.3): the standard-schema
+          // Capture-first: the standard-schema
           // extras - prompt/completion token details, provider request id,
           // cost - are stored verbatim on the turn/round usage records.
           // The OpenAI SDK types only the three summary numbers, so the
@@ -889,7 +889,7 @@ export class TurnEngine {
         code: isRateLimitError(err) ? "rate_limited" : "provider_error",
         message: err instanceof Error ? err.message : String(err),
         ...(err instanceof Error ? { details: { name: err.name, stack: err.stack } } : {}),
-        // Capture-first on the error path too (plan §3.3): the last known
+        // Capture-first on the error path too: the last known
         // round usage is the freshest native anchor a failed turn has —
         // rejected requests never yield a usage chunk of their own, so this
         // is what calibration and post-mortems have to work with.

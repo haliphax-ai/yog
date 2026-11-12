@@ -129,8 +129,8 @@ export type TurnEventDataMap = {
     message: string;
     details?: unknown;
     /**
-     * Last known turn usage when the turn died in an error (plan §3.3
-     * error-path capture). A rejected request never produces a usage chunk
+     * Last known turn usage when the turn died in an error
+     * (error-path capture). A rejected request never produces a usage chunk
      * of its own, so this final anchor is what calibration and post-mortems
      * have — including the details blocks that separate cache-warm from
      * cache-cold counts. Absent when the provider never reported usage.

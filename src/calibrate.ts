@@ -1,6 +1,6 @@
 /**
  * `yog calibrate <sessionId>` — fit a tokenx profile for a session's model
- * from the session's own recorded traffic (token-accuracy plan §3.2).
+ * from the session's own recorded traffic.
  *
  * Offline and DB-only: reads the sessions store, fits
  * `tokens = intercept + rate x chars` over *trustworthy* rounds, writes

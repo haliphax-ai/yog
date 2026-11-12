@@ -40,15 +40,6 @@ export function estimateTokenCountWithProfile(
 }
 
 /**
- * Compatibility shim over the neutral default — same call sites as the old
- * heuristic (shake fallback paths, compaction helpers without a profile in
- * scope). New code should thread a real profile instead.
- */
-export function estimateTokenCount(text: string): number {
-  return estimateTokenCountWithProfile(text, DEFAULT_PROFILE);
-}
-
-/**
  * Serialized length of `s` exactly as `JSON.stringify` would emit it — the
  * wrapping quotes included — without building the escaped string. Tool
  * budgets are measured in these units because raw `.length` is a strict
