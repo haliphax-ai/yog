@@ -2,6 +2,7 @@ services:
   yog:
     build: .
     image: yog:latest
+    container_name: yog
     devices:
       - /dev/fuse:/dev/fuse
     env_file: .env
