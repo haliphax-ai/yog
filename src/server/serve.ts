@@ -36,7 +36,7 @@ import { onAgentSpawn } from "../worker/index.ts";
 import { SkillManager } from "../skills/index.ts";
 import { registerCommand, type CliCommand } from "./cli.ts";
 import { dispatchSkillsCommand, availableSkillsBlock } from "../skills/commands.ts";
-import { COMPACTION_COMMANDS, SHAKE_COMMAND, SKILLS_COMMANDS } from "./commands.ts";
+import { COMPACTION_COMMANDS, SHAKE_COMMAND } from "./commands.ts";
 import { mkdir } from "../host.ts";
 import { logger } from "../log.ts";
 import { resolveConfig, type YogConfig, type PartialYogConfig } from "../config.ts";
@@ -558,11 +558,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
           ...(skills ? ["skills"] : []),
         ],
         messageTypes: [...MESSAGE_TYPES],
-        commands: [
-          ...(compaction ? COMPACTION_COMMANDS : []),
-          ...(shake ? [SHAKE_COMMAND] : []),
-          ...(skills ? SKILLS_COMMANDS : []),
-        ],
+        commands: [...(compaction ? COMPACTION_COMMANDS : []), ...(shake ? [SHAKE_COMMAND] : [])],
       },
       contextWindowFor: (model: string) => modelInfo?.getContextWindow(model),
       ...(store ? { store } : {}),

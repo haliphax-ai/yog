@@ -59,10 +59,19 @@ Rules:
    dispatch against an unwired subsystem still answers `500 internal` —
    the advertisement is advisory in that direction only.
 
-A fully wired daemon advertises `compact`/`handoff` (`compaction.run`),
-`shake` (`transcript.shake`), and `skills-list`, `skills-load <name>`,
-`skills-unload <name>`, `skills-status` (`skills.*`). A client can offer
-every advertised command with no bespoke code: build
+Under the strict-separation rule, commands are defined on exactly one
+surface: the agent CLI (`cli.ts`, invoked through `/bin/yog` over
+`POST /v1/agent-cli`) or the operator surface (`commands` here, dispatched
+through the messages channel). They do not share definitions, project onto
+each other, or derive from a common command object; the underlying
+*resources* (the `SkillManager`, the store, the compaction and shake
+runners) are shared freely and are the only thing the two surfaces have in
+common. If a surface needs to act on a resource, an interaction is authored
+on that surface with its own semantics — never exposed, projected, or
+aliased from the other surface's command. Today the operator surface
+advertises `compact`/`handoff` (`compaction.run`) and `shake`
+(`transcript.shake`); skills interactions are agent-facing only. A client
+can offer every advertised command with no bespoke code: build
 `{ type, data: { ...data, [argField]: rest } }` and print the reply.
 
 | Type                                                              | `data`                                              | Response `data`                                                                                      |
