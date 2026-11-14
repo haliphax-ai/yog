@@ -64,7 +64,7 @@ surface: the agent CLI (`cli.ts`, invoked through `/bin/yog` over
 `POST /v1/agent-cli`) or the operator surface (`commands` here, dispatched
 through the messages channel). They do not share definitions, project onto
 each other, or derive from a common command object; the underlying
-*resources* (the `SkillManager`, the store, the compaction and shake
+_resources_ (the `SkillManager`, the store, the compaction and shake
 runners) are shared freely and are the only thing the two surfaces have in
 common. If a surface needs to act on a resource, an interaction is authored
 on that surface with its own semantics — never exposed, projected, or
