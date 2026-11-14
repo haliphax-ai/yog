@@ -162,6 +162,18 @@ describe("conformance: capabilities", () => {
     expect(Array.isArray(body.messageTypes)).toBe(true);
     expect(body.messageTypes).toContain("turn.start");
   });
+  it("advertises commands only for wired subsystems", async () => {
+    // The conformance daemon injects bare capabilities (no compaction,
+    // shake, or skills wiring), so the projection is empty.
+    const res = await fetch(`${base}/v1/capabilities`);
+    const body = await json(res);
+    expect(Array.isArray(body.commands)).toBe(true);
+    expect(body.commands).toEqual([]);
+    // The invocable commands are no longer bare feature flags.
+    expect(body.features).not.toContain("compact");
+    expect(body.features).not.toContain("handoff");
+    expect(body.features).not.toContain("shake");
+  });
 });
 
 describe("conformance: session lifecycle", () => {
