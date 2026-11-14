@@ -1,6 +1,6 @@
-# Mirror CI (`.github/workflows/ci.yml`) over the whole repo, except
+# Staged-only mirror of CI (.github/workflows/ci.yml) via nano-staged:
 # oxfmt runs in write mode (no --check) so formatting is fixed in place.
-npx oxfmt --no-error-on-unmatched-pattern .
-npx oxlint .
+# CI additionally runs the checks repo-wide, not just staged files.
+npx nano-staged
 npm run typecheck
 npm run depcruise
