@@ -72,6 +72,24 @@ module.exports = {
     // Cycles are the classic architecture rot; forbid them outright.
     { name: "no-circular", severity: "error", from: {}, to: { circular: true } },
 
+    // Strict command separation: the operator projection
+    // (server/commands.ts -> capabilities.commands) and the agent CLI
+    // registry (server/cli.ts -> POST /v1/agent-cli) define their commands
+    // independently. Sharing command definitions between them would couple
+    // two contracts; resources underneath are shared, commands are not.
+    {
+      name: "commands-never-share-registries",
+      severity: "error",
+      from: { path: "^src/server/commands.ts$" },
+      to: { path: "^src/server/cli.ts$" },
+    },
+    {
+      name: "cli-never-imports-operator-projection",
+      severity: "error",
+      from: { path: "^src/server/cli.ts$" },
+      to: { path: "^src/server/commands.ts$" },
+    },
+
     // The CLI entry is the composition root: nothing below may import it.
     {
       name: "entry-is-root",

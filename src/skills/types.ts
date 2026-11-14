@@ -121,3 +121,10 @@ export interface SkillsCommandResult {
   readonly result?: SkillCommandResult;
   readonly message?: string;
 }
+
+/**
+ * Descriptors for the skills commands (see `server/commands.ts` for the
+ * shared `CommandDescriptor` shape). `SKILLS_COMMANDS` itself lives in
+ * `server/commands.ts` because the skills domain sits below the server and
+ * may not import from it (domain-entry-only); serve.ts wires it.
+ */

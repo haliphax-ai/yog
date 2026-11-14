@@ -10,7 +10,7 @@ import { logger } from "../log.ts";
 import type { CompactionBoundary, CompactionKind } from "./compaction.ts";
 import type { ShakeOutcome } from "./shake.ts";
 import type { SkillManager } from "../skills/index.ts";
-
+import type { CommandDescriptor } from "./commands.ts";
 /** Capabilities advertisement served at GET /v1/capabilities. */
 export interface Capabilities {
   contractVersion: string | number;
@@ -18,6 +18,10 @@ export interface Capabilities {
   tools: string[];
   features: string[];
   messageTypes?: string[];
+  /** Slash commands a client may surface for this daemon (what a human
+   *  would type after "/"); presence here IS availability — no separate
+   *  feature flags for invocable commands. */
+  commands?: CommandDescriptor[];
   [key: string]: unknown;
 }
 
@@ -291,11 +295,16 @@ export function createHttpServer(deps: HttpDeps): Server {
   // (`messages` + `stream` features and the `messageTypes` list) is owned
   // here — it is always advertised so clients can discover the dispatch
   // table. The composition root (serve.ts) passes the same set explicitly.
-  const baseCapabilities: Capabilities = deps.capabilities ?? {
-    contractVersion: "v1",
-    models: [],
-    tools: [],
-    features: [],
+  // `commands` defaults to an empty list, never undefined, so a client can
+  // always iterate the user-facing projection.
+  const baseCapabilities: Capabilities = {
+    commands: [],
+    ...(deps.capabilities ?? {
+      contractVersion: "v1",
+      models: [],
+      tools: [],
+      features: [],
+    }),
   };
   const features = [...new Set(["messages", "stream", ...baseCapabilities.features])];
   const messageTypes = [...new Set([...MESSAGE_TYPES, ...(baseCapabilities.messageTypes ?? [])])];
