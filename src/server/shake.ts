@@ -47,6 +47,9 @@ export interface ShakeDeps {
   profile?: TokenProfile;
 }
 
+/** Descriptors for the shake runner (see `./commands.ts`). */
+export { SHAKE_COMMAND } from "./commands.ts";
+
 export { TRUNCATION_IDENTIFIER };
 
 /** Wrap a middle-truncated JSON string in the generic marker blob. */

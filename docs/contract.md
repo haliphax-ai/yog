@@ -6,18 +6,64 @@ everything else through the messages channel.
 
 | Method | Path                         | Purpose                                                                                                                                                                                                                                                                                          |
 | ------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `GET`  | `/v1/capabilities`           | Bootstrap discovery: contract version, models, tools, `features` (`["messages", "stream", …]`), the `messageTypes` dispatch table, and context-window sizes for the queried model.                                                                                                               |
+| `GET`  | `/v1/capabilities`           | Bootstrap discovery: contract version, models, tools, `features` (`["messages", "stream", …]`), the `messageTypes` dispatch table, the `commands` slash-command advertisement, and context-window sizes for the queried model.                                                                   |
 | `POST` | `/v1/sessions`               | Bootstrap creation, optional body `{ title?, system? }` → `{ session: { id, … } }` (201). `system` seeds the first transcript message (role `system`) so it is part of every turn's context.                                                                                                     |
 | `GET`  | `/v1/sessions/{id}/stream`   | The long-lived SSE event channel, opened once per session. Frames `stream.hello { streamId, sessionId }` on connect, then turn/ask/future events; replays any running turn's persisted events. A stream disconnect detaches, never aborts (unless a turn bound to it via `abortOnDisconnect`).   |
 | `POST` | `/v1/sessions/{id}/messages` | Typed dispatch: `{ type, version?, requestId?, data? }` → `{ type, version, requestId?, data }` or `{ error: { code, message } }` (`requestId` echoed when supplied). Streaming types (`turn.start`) return `202 { accepted: true }` at once; progress and terminal events arrive on the stream. |
+
+Message types are advertised as `messageTypes` on capabilities; an unknown
+`type` or `version` answers `400 invalid_request`. Adding a feature means
+adding a `type` and a handler, never a new HTTP route.
 
 There is also `POST /v1/agent-cli`, the command endpoint the `/bin/yog` shim
 in the FUSE mount calls; it is agent-facing plumbing, not part of the
 client contract.
 
-Message types are advertised as `messageTypes` on capabilities; an unknown
-`type` or `version` answers `400 invalid_request`. Adding a feature means
-adding a `type` and a handler, never a new HTTP route.
+Capabilities carry three orthogonal surfaces. `messageTypes` is the **wire
+surface** (what the messages channel dispatches), `features` the **behavior
+surface** (transport and policy capabilities a client can branch on:
+`messages`, `stream`, `transcript`, `abort`, `rate-limit-retry`, `skills`),
+and `commands` the **user-facing projection** of the dispatch table — the
+slash commands a human may type. The projection is deliberately narrower
+than `messageTypes`: protocol primitives (`turn.start`, `turn.abort`,
+`transcript.get`, `turn.get`, `session.*`) never get descriptors, because
+they are not user invocations.
+
+### Commands
+
+Each entry of `commands` is a descriptor:
+
+| Field           | Meaning                                                                                     |
+| --------------- | ------------------------------------------------------------------------------------------- |
+| `name`          | The slash token, without the leading `/` (`compact`).                                       |
+| `summary`       | One-liner for the client's autocomplete menu.                                               |
+| `args?`         | Argument syntax hint (`"[guidance]"`, `"<name>"`); a leading `<` marks a required argument. |
+| `message`       | The messages-channel `type` an invocation dispatches.                                       |
+| `data?`         | Static payload merged into every invocation's `data`.                                       |
+| `argField?`     | The `data` field free-text line args land in (a single remainder string).                   |
+| `requiresIdle?` | True when the client must wait for an idle turn before dispatching.                         |
+
+Rules:
+
+1. Presence in `commands` **is** availability: the composition root lists a
+   command only when its subsystem actually wired. There are no feature
+   flags for invocable commands (`compact`/`handoff`/`shake` are no longer
+   in `features`).
+2. Dispatch is keyed on `message`, never on the slash name. The name is
+   client-side sugar and is never sent to the server.
+3. Free-text args are a single remainder string placed at
+   `data[argField]`; multi-argument parsing is a client concern (none
+   exists yet).
+4. Clients merge the advertised commands under their local ones; local
+   commands win on name collision, and clients may present a subset. A
+   dispatch against an unwired subsystem still answers `500 internal` —
+   the advertisement is advisory in that direction only.
+
+A fully wired daemon advertises `compact`/`handoff` (`compaction.run`),
+`shake` (`transcript.shake`), and `skills-list`, `skills-load <name>`,
+`skills-unload <name>`, `skills-status` (`skills.*`). A client can offer
+every advertised command with no bespoke code: build
+`{ type, data: { ...data, [argField]: rest } }` and print the reply.
 
 | Type                                                              | `data`                                              | Response `data`                                                                                      |
 | ----------------------------------------------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
