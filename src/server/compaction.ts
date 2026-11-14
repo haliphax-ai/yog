@@ -290,15 +290,13 @@ export function createCompactionRunner(deps: CompactionRunnerDeps): CompactionBo
       },
     };
 
-    // Both compact and handoff start a NEW session: the summary turn itself is
-    // thrown away, and only its artifact becomes the new session's transcript.
-    let targetSession = sessionId;
-    if (deps.store.createSession) {
-      const created = await deps.store.createSession();
-      targetSession = created.id;
-    }
+    // The summary turn runs FIRST and to completion. Only after the artifact
+    // exists is the replacement session created and adopted — a provider
+    // failure leaves the original session live and untouched (all-or-nothing;
+    // see issue #56). The orphan turn receives the source session id solely
+    // for engine bookkeeping (abort fan-out); nothing is persisted under it.
     const opts: TurnOptions = {
-      sessionId: targetSession,
+      sessionId,
       maxRounds: 1, // one completion; no tool loop
       ...(deps.rateLimit ? { rateLimit: deps.rateLimit } : {}),
       ...(deps.modelInfo
@@ -310,6 +308,16 @@ export function createCompactionRunner(deps: CompactionRunnerDeps): CompactionBo
     const trimmed = summary.trim();
     if (trimmed === "") {
       throw new Error(`compaction produced an empty summary (model ${model})`);
+    }
+
+    // All-or-nothing point: the summary exists, so adopt the fresh session.
+    // Both compact and handoff continue in a NEW session: the summary turn
+    // itself is thrown away, and only its artifact becomes the new
+    // session's transcript.
+    let targetSession = sessionId;
+    if (deps.store.createSession) {
+      const created = await deps.store.createSession();
+      targetSession = created.id;
     }
     // Start the fresh session with ONLY the artifact (the throwaway summary
     // turn and the prior session are not carried forward).

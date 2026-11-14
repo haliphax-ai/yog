@@ -237,6 +237,62 @@ describe("createCompactionRunner", () => {
     });
     await expect(runner("s1", "compact" as CompactionKind)).rejects.toThrow(/empty summary/);
   });
+
+  it("does not create or adopt a session when the summary turn fails", async () => {
+    const store = stubStore([{ role: "user", content: "hello" }]);
+    const failingClient = {
+      chat: {
+        completions: {
+          create: async () => {
+            throw new Error("401 Missing Authentication header");
+          },
+        },
+      },
+    } as unknown as OpenAI;
+    const runner = createCompactionRunner({
+      client: failingClient,
+      store,
+      model: "session-model",
+    });
+    await expect(runner("s1", "compact" as CompactionKind)).rejects.toThrow(
+      /401 Missing Authentication header/,
+    );
+    // All-or-nothing: no replacement session was created and the source
+    // transcript was never reset.
+    expect(store.createSession).not.toHaveBeenCalled();
+    expect(store.resetTranscript).not.toHaveBeenCalled();
+  });
+
+  it("adopts the fresh session only after the artifact exists", async () => {
+    const store = stubStore([{ role: "user", content: "hello" }]);
+    const createSession = store.createSession as ReturnType<typeof vi.fn>;
+    createSession.mockImplementation(async () => {
+      // The adoption point: creating the replacement session must happen
+      // after (not before) the artifact is produced and stored.
+      expect(store.resetTranscript).not.toHaveBeenCalled();
+      return { id: "fresh-session" };
+    });
+    const runner = createCompactionRunner({
+      client: summaryClient(summary),
+      store,
+      model: "session-model",
+    });
+    const result = await runner("s1", "compact" as CompactionKind);
+    expect(result.sessionId).toBe("fresh-session");
+    expect(createSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the session untouched when the artifact is empty", async () => {
+    const store = stubStore([{ role: "user", content: "hello" }]);
+    const runner = createCompactionRunner({
+      client: summaryClient("   "),
+      store,
+      model: "session-model",
+    });
+    await expect(runner("s1", "handoff" as CompactionKind)).rejects.toThrow(/empty summary/);
+    expect(store.createSession).not.toHaveBeenCalled();
+    expect(store.resetTranscript).not.toHaveBeenCalled();
+  });
 });
 
 describe("compaction.run message", () => {
