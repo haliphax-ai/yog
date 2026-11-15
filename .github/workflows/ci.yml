@@ -41,12 +41,30 @@ jobs:
 
   unit:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: haliphax-ai/yog/.github@main
       - run: |
           sudo apt-get update -qq && \
             sudo apt-get install -yqq --no-install-recommends fuse
-      - run: npx vitest run --silent=true .
+      - name: Install coverage provider
+        run: |
+          npm install --no-save \
+            "@vitest/coverage-v8@$(node -p "require('./node_modules/vitest/package.json').version")"
+      - run: >-
+          npx vitest run --silent=true
+          --coverage.enabled
+          --coverage.provider=v8
+          --coverage.reporter=lcov
+          --coverage.include='src/**'
+          .
+      - uses: qltysh/qlty-action/coverage@v2
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        with:
+          oidc: true
+          files: coverage/lcov.info
 
   depcruise:
     runs-on: ubuntu-latest
