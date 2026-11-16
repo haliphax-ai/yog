@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { type ToolResult, type ToolSpec } from "../types.ts";
+import { type ToolContext, type ToolResult, type ToolSpec } from "../types.ts";
 import { fairTruncate, middleTruncate, toolOutputBudgets } from "../truncation.ts";
 export interface BashResult extends ToolResult {
   stdout: string | null;
@@ -34,15 +34,84 @@ export function setSkillPathProvider(provider: SkillPathProvider | undefined): v
   skillPathProvider = provider;
 }
 
+/**
+ * Build the all-null failure result every early exit of `run` returns (with
+ * the wall-clock `runtimeMs` for the elapsed window).
+ */
+function nullResult(start: number, error: string): BashResult {
+  return {
+    stdout: null,
+    stderr: null,
+    runtimeMs: Math.round(performance.now() - start),
+    exitCode: null,
+    error,
+  };
+}
+
 /** /shake truncation budgets (raw chars). */
 export const BASH_ARG_TRUNCATE_CHARS = 500;
 export const BASH_RESULT_TRUNCATE_CHARS = 500;
 
 /**
- * Live tool-output budgets (serialized chars) come from the composition root
- * via `setToolOutputBudgets`; defaults hold until it is called, so the tool
- * stays usable in tests and CLI paths without a config file.
+ * Executor arguments for a bash run: the session-scoped abort key plus the
+ * optional restore snapshot and skill-PATH injection, omitted when unset.
  */
+function executorOpts(
+  ctx: ToolContext | undefined,
+  restore: BashRequestOpts["restore"],
+  extraPath: readonly string[] | undefined,
+): BashRequestOpts {
+  return {
+    ...(ctx?.sessionId !== undefined ? { scriptId: ctx.sessionId } : {}),
+    stateDir: ctx?.stateDir,
+    ...(restore ? { restore } : {}),
+    ...(extraPath ? { extraPath } : {}),
+  };
+}
+
+/**
+ * Restore the prior shell snapshot from the agentfs-backed home (if a
+ * provider is wired) so state survives across daemon restarts. The
+ * snapshot is keyed by session: sessions must not restore each other's
+ * shell. A load failure degrades to no restore.
+ */
+async function loadRestore(sessionKey: string): Promise<BashRequestOpts["restore"]> {
+  try {
+    return await shellProvider?.load(sessionKey);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Loaded-skill PATH injection: resolve this session's skill scripts
+ * (best effort — a failure must not fail the tool call).
+ */
+async function resolveExtraPath(sessionKey: string): Promise<readonly string[] | undefined> {
+  if (!skillPathProvider) return undefined;
+  try {
+    const paths = await skillPathProvider(sessionKey);
+    return paths.length > 0 ? paths : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Persist the fresh shell snapshot after a successful run (best effort — a
+ * home write failure must not fail the tool call).
+ */
+async function saveState(
+  sessionKey: string,
+  state: { cwd: string; env: string; functions: string },
+): Promise<void> {
+  if (!shellProvider) return;
+  try {
+    await shellProvider.save(sessionKey, state);
+  } catch {
+    // ignore
+  }
+}
 
 /**
  * The output budget is split fairly between stdout and stderr, both
@@ -52,6 +121,10 @@ export const BASH_RESULT_TRUNCATE_CHARS = 500;
  * registry fallback. Each stream's base share is half the budget; any
  * unused share from one stream is offered to the other.
  */
+function capStreams(stdout: string, stderr: string): [string, string] {
+  const { limit } = toolOutputBudgets();
+  return fairTruncate(stdout, stderr, limit);
+}
 
 /** Options the bash tool forwards to the injected executor. */
 export interface BashRequestOpts {
@@ -157,59 +230,21 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
   async run(args, ctx): Promise<BashResult> {
     const start = performance.now();
     try {
-      if (!bashExecutor) {
-        return {
-          stdout: null,
-          stderr: null,
-          runtimeMs: Math.round(performance.now() - start),
-          exitCode: null,
-          error: "bash executor not configured",
-        };
-      }
-
+      if (!bashExecutor) return nullResult(start, "bash executor not configured");
       // Restore the prior shell snapshot from the agentfs-backed home (if a
       // provider is wired) so state survives across daemon restarts. The
-      // snapshot is keyed by session: sessions must not restore each
-      // other's shell.
+      // snapshot is keyed by session: sessions must not restore each other's
+      // shell.
       const sessionKey = ctx?.sessionId ?? "daemon";
-      let restore: BashRequestOpts["restore"];
-      try {
-        restore = await shellProvider?.load(sessionKey);
-      } catch {
-        restore = undefined;
-      }
+      const restore = await loadRestore(sessionKey);
+      const extraPath = await resolveExtraPath(sessionKey);
 
-      // Loaded-skill PATH injection: resolve this session's skill scripts
-      // (best effort — a failure must not fail the tool call).
-      let extraPath: readonly string[] | undefined;
-      if (skillPathProvider) {
-        try {
-          const paths = await skillPathProvider(sessionKey);
-          if (paths.length > 0) extraPath = paths;
-        } catch {
-          extraPath = undefined;
-        }
-      }
-
-      const resp = await bashExecutor(args.command, {
-        ...(ctx?.sessionId !== undefined ? { scriptId: ctx.sessionId } : {}),
-        stateDir: ctx?.stateDir,
-        ...(restore ? { restore } : {}),
-        ...(extraPath ? { extraPath } : {}),
-      });
+      const resp = await bashExecutor(args.command, executorOpts(ctx, restore, extraPath));
       const runtimeMs = Math.round(performance.now() - start);
 
-      if (resp.ok && resp.state && shellProvider) {
-        try {
-          await shellProvider.save(sessionKey, resp.state);
-        } catch {
-          // A home write failure must not fail the tool call.
-        }
-      }
+      if (resp.ok && resp.state) await saveState(sessionKey, resp.state);
 
-      if (!resp.ok) {
-        return { stdout: null, stderr: null, runtimeMs, exitCode: null, error: resp.error };
-      }
+      if (!resp.ok) return nullResult(start, resp.error ?? "bash call failed");
       // Limit the tool's own output: the budget (config `toolOutputLimit`,
       // default 50,000 serialized chars) is fairly split across stdout and
       // stderr, each middle-truncated with the shared marker where cut.
@@ -217,8 +252,7 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
       // transcript actually stores), so the result is guaranteed to fit
       // `toolOutputLimit` before the registry's generic `capToolResult`
       // fallback ever sees it.
-      const { limit } = toolOutputBudgets();
-      const capped = fairTruncate(resp.stdout ?? "", resp.stderr ?? "", limit);
+      const capped = capStreams(resp.stdout ?? "", resp.stderr ?? "");
       return {
         stdout: capped[0],
         stderr: capped[1],
@@ -226,20 +260,13 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
         exitCode: resp.exitCode ?? null,
       };
     } catch (err) {
-      const runtimeMs = Math.round(performance.now() - start);
-      return {
-        stdout: null,
-        stderr: null,
-        runtimeMs,
-        exitCode: null,
-        error: err instanceof Error ? err.message : String(err),
-      };
+      return nullResult(start, err instanceof Error ? err.message : String(err));
     }
   },
 
-  /**
-   * /shake: truncate the `command` argument to 500 chars (middle cut).
-   * The arguments are stored as a JSON string; other fields pass through.
+  /** /shake: truncate the `command` argument (middle cut); other fields pass
+   * through. The raw form is truncated verbatim when it is not a JSON object
+   * with a string `command`.
    */
   truncateArgs(raw: string): string {
     let parsed: unknown;
@@ -257,22 +284,17 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
     if (command === rec.command) return raw;
     return JSON.stringify({ ...rec, command });
   },
-  /**
-   * /shake: truncate stdout/stderr fairly against a shared 500-char budget
-   * (middle cut, marker appended where content is dropped). Other fields are
-   * preserved.
-   */
+
+  /** /shake: truncate stdout/stderr fairly against a shared 500-char budget
+   * (middle cut, marker appended where content is dropped); other fields are
+   * preserved. No change when the value is not an object with at least one
+   * string stream or nothing was cut. */
   truncateResult(value: unknown): unknown | undefined {
     if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
     const rec = value as Record<string, unknown>;
     const stdout = typeof rec.stdout === "string" ? (rec.stdout as string) : "";
     const stderr = typeof rec.stderr === "string" ? (rec.stderr as string) : "";
-    if (
-      (rec.stdout === null || rec.stdout === undefined) &&
-      (rec.stderr === null || rec.stderr === undefined)
-    ) {
-      return undefined; // nothing to truncate
-    }
+    if (rec.stdout === undefined && rec.stderr === undefined) return undefined;
     const [newOut, newErr] = fairTruncate(stdout, stderr, BASH_RESULT_TRUNCATE_CHARS);
     if (newOut === rec.stdout && newErr === rec.stderr) return undefined;
     return {
