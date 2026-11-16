@@ -63,9 +63,12 @@ with a persistent shell and the harness's descriptors:
   root (`<stateRoot>/harness/<sessionId>`, keyed by session: never the
   agent's HOME and never a single shared dir) after every call. The agent
   rc (`BASH_ENV`, falling back to `~/.bashrc`) is sourced before each
-  command as the home baseline. When skills are loaded for the session,
-  their `scripts/` directories are prepended to the worker's PATH for that
-  call.
+  command as the home baseline. PATH is layered per run (none of the layers
+  are persisted — each call re-derives them from the session's current
+  state): the mount's `bin` directory first (the `/yog/bin/yog` shim, so
+  `yog` stays callable even when a skill would shadow it), then the agent
+  rc baseline, then loaded skills' `scripts/` directories (skill scripts
+  may shadow the shim, but an unload drops the shadow on the next call).
 
   **Host env is hidden from the tool.** Children are spawned with a minimal
   env: `HOME`, a fixed `PATH`, `TERM`, `TZ`, plus `BASH_ENV` and `HARNESS_*`
@@ -141,8 +144,9 @@ refuse it; there is no operator-side way to load these for agents yet.
 Loaded skills contribute per session: their instructions are appended to
 the system prompt (after the cache-stable prefix), the available-skills
 block is appended after that, and each skill's `scripts/` directory is
-added to the bash tool's PATH for that session. The agent manages skills
-through the `/bin/yog` shim (agent-CLI `skills` command) or the
+added to the bash tool's PATH for that session (behind the always-present
+`<mount>/bin` shim dir). The agent manages skills through the
+`/yog/bin/yog` shim (agent-CLI `skills` command) or the
 `skills.*` message types; a daemon built without the skills subsystem
 answers those types `500 internal`.
 

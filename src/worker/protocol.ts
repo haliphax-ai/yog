@@ -41,6 +41,12 @@ export interface BashRunRequest {
    * PATH), so unloading a skill takes effect on the next call.
    */
   readonly extraPath?: readonly string[];
+  /**
+   * The agent-CLI shim directory (the FUSE mount's `<mount>/bin`), prepended
+   * for this run ahead of the skill entries — a skill shadowing `yog` cannot
+   * outlive its unload. Omitted only by direct worker callers (tests).
+   */
+  readonly cliBin?: string;
 }
 
 export type WorkerRequest = BashRunRequest | BashAbortRequest;

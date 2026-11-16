@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -130,6 +130,38 @@ describe("WorkerClient", () => {
       expectOk(r);
       expect(r.stdout.trim()).toBe(`job-${i}`);
     });
+  });
+
+  it("prepends cliBin to PATH ahead of skill scripts", async () => {
+    const cliBin = mkdtempSync(join(tmpdir(), "yog-worker-clibin-"));
+    const skills = mkdtempSync(join(tmpdir(), "yog-worker-skillbin-"));
+    const stateDir = mkdtempSync(join(tmpdir(), "yog-worker-clistate-"));
+    // The shim (`yog`) and a skill script that shadows it by name.
+    writeFileSync(join(cliBin, "yog"), "#!/bin/sh\necho shim\n", { mode: 0o755 });
+    writeFileSync(join(skills, "yog"), "#!/bin/sh\necho skill\n", { mode: 0o755 });
+    const client = await startWorker();
+    try {
+      // cliBin wins while the skill is loaded: it is prepended first, so it
+      // sits at the front of the (layered) PATH.
+      const r1 = await client.runBash("command -v yog", stateDir, undefined, [skills], cliBin);
+      expectOk(r1);
+      expect(r1.stdout).toContain("yog");
+      // This is the regression guard: the shim must beat the skill shadow.
+      expect(r1.stdout.trim()).toBe(join(cliBin, "yog"));
+      // After the unload (no extraPath), only the shim remains on the
+      // injected layers — the shadow is gone with the skill.
+      const r2 = await client.runBash("command -v yog", stateDir, undefined, undefined, cliBin);
+      expectOk(r2);
+      expect(r2.stdout).toBe(`${join(cliBin, "yog")}\n`);
+      // cliBin alone must not disturb the baseline: a coreutil still resolves.
+      const r3 = await client.runBash("command -v ls", stateDir, undefined, undefined, cliBin);
+      expectOk(r3);
+      expect(r3.stdout).toContain("/ls\n");
+    } finally {
+      rmSync(cliBin, { recursive: true, force: true });
+      rmSync(skills, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it("close() kills a running bash child promptly", async () => {
