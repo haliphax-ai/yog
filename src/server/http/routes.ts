@@ -1,7 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AdapterState, SessionRecord } from "./types.ts";
-import { readBody } from "./transport.ts";
-import { normalizeSession } from "./transport.ts";
+import { normalizeSession, readBody } from "./helpers.ts";
 import { randomUUID } from "node:crypto";
 import { sendJson, sendError } from "./reply.ts";
 /**

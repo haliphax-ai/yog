@@ -5,21 +5,6 @@ import type { MsgCtx, RoundAttribution } from "./types.ts";
 import type { HttpDeps, SessionRecord, StoreBoundary } from "./types.ts";
 import { toWireMessage } from "./wire.ts";
 
-/** Parse a persisted event payload row into an object ({} when unparseable). */
-export function parseEventPayload(ev: Record<string, unknown>): Record<string, unknown> {
-  let data: unknown = ev.payload;
-  if (typeof data === "string") {
-    try {
-      data = JSON.parse(data);
-    } catch {
-      return {};
-    }
-  }
-  return data !== null && typeof data === "object" && !Array.isArray(data)
-    ? (data as Record<string, unknown>)
-    : {};
-}
-
 /**
  * Round attribution for tool result rows comes from the turns' persisted
  * tool.result events (the live envelope data), so the dump carries the same

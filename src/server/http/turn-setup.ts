@@ -1,7 +1,6 @@
-import type { IncomingMessage } from "node:http";
 import type { SseEnvelope } from "../sse.ts";
 import type { AdapterState, SessionRecord } from "./types.ts";
-import { lookupSession } from "./transport.ts";
+import { lookupSession } from "./helpers.ts";
 /**
  * Validate a `turn.start` request beyond the session lookup: an open
  * session, a non-empty string `prompt`, string `model`/`streamId` and

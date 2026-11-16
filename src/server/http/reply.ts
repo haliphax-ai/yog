@@ -1,6 +1,18 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AdapterState } from "./types.ts";
-import { ERROR_STATUS } from "./transport.ts";
+/**
+ * Machine-readable error codes with HTTP status mapping.
+ */
+export const ERROR_STATUS: Record<string, number> = {
+  invalid_request: 400,
+  unknown_model: 400,
+  unknown_session: 404,
+  unauthorized: 401,
+  provider_error: 502,
+  rate_limited: 429,
+  internal: 500,
+};
+
 export function sendJson(res: ServerResponse, status: number, body: unknown): void {
   if (res.writableEnded) return;
   res.statusCode = status;

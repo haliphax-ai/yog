@@ -1,7 +1,7 @@
 import type { AdapterState, TurnEmitCtx } from "./types.ts";
 
 import type { HttpDeps, SessionRecord } from "./types.ts";
-import { channelFor, lookupSession, publish } from "./transport.ts";
+import { channelFor, publish } from "./helpers.ts";
 import { sendErrorWithRequestId, sendMessage } from "./reply.ts";
 import { healFallbackMessages, providerErrorEnvelope } from "./wire.ts";
 import { reviveSessionForTurn, validateTurnInput, emitTurnAbortedEvent } from "./turn-setup.ts";

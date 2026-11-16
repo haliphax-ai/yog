@@ -24,89 +24,13 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { MESSAGE_TYPES, parseEnvelope } from "../messages.ts";
 import type { MessageEnvelope } from "../messages.ts";
-import type { SseEnvelope } from "../sse.ts";
-import { randomUUID } from "node:crypto";
-import { sendJson, sendError, sendErrorWithRequestId, sendMessage, checkAuth } from "./reply.ts";
+import { sendError, sendErrorWithRequestId, sendMessage, checkAuth } from "./reply.ts";
 import { handleCapabilities, handleAgentCli, handleSessionCreate } from "./routes.ts";
-
-/** Machine-readable error codes with HTTP status mapping. */
-export const ERROR_STATUS: Record<string, number> = {
-  invalid_request: 400,
-  unknown_model: 400,
-  unknown_session: 404,
-  unauthorized: 401,
-  provider_error: 502,
-  rate_limited: 429,
-  internal: 500,
-};
-
-export async function readBody(req: IncomingMessage, limit = 1_000_000): Promise<string> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += (chunk as Buffer).length;
-    if (size > limit) throw new Error("body too large");
-    chunks.push(chunk as Buffer);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
+import { lookupSession, readBody } from "./helpers.ts";
 /** Split `/v1/...` path into segments (query string stripped). */
 export function segments(url: string): string[] {
   const path = url.split("?")[0] ?? "";
   return path.split("/").filter(Boolean);
-}
-
-/** Coerce a store row (sqlite) into the adapter's session shape. */
-export function normalizeSession(row: unknown): SessionRecord {
-  const rec = (row ?? {}) as Record<string, unknown>;
-  const status = rec.status === "dormant" ? "dormant" : "open";
-  return {
-    ...rec,
-    id: String(rec.id ?? ""),
-    status,
-    created_at: Number(rec.created_at ?? Date.now()),
-    updated_at: Number(rec.updated_at ?? Date.now()),
-    detached_at: (rec.detached_at as number | null | undefined) ?? null,
-  } as SessionRecord;
-}
-
-/**
- * Wire shape for one transcript message: the store's snake_case columns
- * (`tool_call_id`, `tool_calls`) become camelCase (`toolCallId`, `toolCalls`);
- * only the contract's known keys cross the boundary. The store itself stays
- * snake_case — its rows feed the model hydrate (OpenAI message shape) — the
- * conversion is a route-layer concern. Round attribution on tool result rows
- * (`usage`, `promptDelta`) is forwarded when present, matching the live
- * `tool.result` envelope so rehydration renders the same counts.
- */
-
-/** Session channel name on the event bus. */
-export function channelFor(id: string): string {
-  return `session:${id}`;
-}
-
-/**
- * Publish an event for a session: the bus boundary only exposes on/off;
- * EventEmitter-style emit is used when the injected bus is an EventEmitter
- * (serve.ts/tests). No emit capability means no stream delivery — turns
- * still settle.
- */
-export function publish(st: AdapterState, sessionId: string, ev: SseEnvelope): void {
-  (st.bus as unknown as { emit?: (ch: string, ev: SseEnvelope) => void } | undefined)?.emit?.(
-    channelFor(sessionId),
-    ev,
-  );
-}
-
-/** Look a session up in the store (preferred) or the in-memory fallback. */
-
-export async function lookupSession(st: AdapterState, id: string): Promise<SessionRecord | null> {
-  if (st.hasStore) {
-    const row = await st.store!.getSession(id);
-    return row ? normalizeSession(row) : null;
-  }
-  return st.sessions.get(id) ?? null;
 }
 
 export function createHttpServer(deps: HttpDeps): Server {
