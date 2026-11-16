@@ -58,6 +58,7 @@ async function runBash(
   stateDirArg?: string,
   restore?: Partial<import("./protocol.ts").ShellSnapshot>,
   extraPath: readonly string[] = [],
+  cliBin?: string,
 ): Promise<WorkerResponse> {
   const agentHome = process.env["HOME"] ?? "/root";
   const stateDir = resolveStateDir(stateDirArg, agentHome);
@@ -70,7 +71,7 @@ async function runBash(
       // `detached` gives the wrapper its own process group so an abort can
       // kill the whole tree (bash defers a plain SIGTERM while a foreground
       // child like `sleep` is running — the group kill reaches the child).
-      child = spawn("bash", ["-c", composeWrapper(extraPath), "harness", script], {
+      child = spawn("bash", ["-c", composeWrapper(cliBin, extraPath), "harness", script], {
         cwd: agentHome,
         env: buildToolEnv(stateDir),
         detached: true,
@@ -186,6 +187,7 @@ rl.on("line", (line) => {
         payload.stateDir,
         payload.restore,
         payload.extraPath ?? [],
+        payload.cliBin,
       );
     } else {
       resp = { ok: false, error: `unknown request type: ${JSON.stringify(payload)}` };

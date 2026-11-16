@@ -235,6 +235,10 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       ...(config.agentGid !== undefined ? { gid: config.agentGid } : {}),
       ...(config.agentHome !== undefined ? { home: config.agentHome } : {}),
     });
+    // The agent-CLI shim lives on the FUSE mount at `<mount>/bin/yog`; its
+    // directory rides every bash run's PATH (ahead of skill scripts) so
+    // `yog` is callable whether or not a skill shadows it.
+    const cliBinDir = join(config.mountPoint, "bin");
 
     // --- worker pool (production caller for the bash tool) ---
     let pool: WorkerPool | undefined;
@@ -275,6 +279,7 @@ export async function createDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
               opts?.stateDir ?? harnessStateDir(opts?.scriptId ?? "daemon", config.stateRoot),
             ...(opts?.restore !== undefined ? { restore: opts.restore } : {}),
             ...(opts?.extraPath && opts.extraPath.length > 0 ? { extraPath: opts.extraPath } : {}),
+            ...(cliBinDir ? { cliBin: cliBinDir } : {}),
           });
           if (resp.ok) {
             return {
