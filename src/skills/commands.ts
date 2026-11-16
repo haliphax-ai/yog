@@ -1,3 +1,12 @@
+/** Usage-line failure result for a name-taking skills subcommand. */
+function usageResult(command: "load" | "unload"): SkillsCommandResult {
+  return {
+    command,
+    ok: false,
+    message: `usage: yog skills ${command} <name>`,
+  };
+}
+
 /**
  * Command handlers for the `yog skills` CLI / daemon-side registry.
  *
@@ -74,51 +83,62 @@ export function skillsHelp(): SkillsCommandResult {
   };
 }
 
+/** Dispatch a skills subcommand to its handler (sync cases only). */
+function dispatchSub(
+  manager: SkillManager,
+  sub: string,
+  rest: readonly string[],
+): Promise<SkillsCommandResult> | SkillsCommandResult {
+  switch (sub) {
+    case "list":
+      return listSkills(manager, { verbose: verboseFlag(rest) });
+    case "load":
+      return withNameOrUsage(manager, rest, "load", loadSkill);
+    case "unload":
+      return withNameOrUsage(manager, rest, "unload", unloadSkill);
+    case "status":
+      return statusSkills(manager);
+    default:
+      return sub === "help" ? skillsHelp() : unknownCommand(sub);
+  }
+}
+
 /** Dispatch a `yog skills ...` argv tail (after `skills`) to a handler. */
 export async function dispatchSkillsCommand(
   manager: SkillManager,
   argv: readonly string[],
 ): Promise<SkillsCommandResult> {
-  const [sub, ...rest] = argv;
-  switch (sub) {
-    case "list":
-      return listSkills(manager, { verbose: rest.includes("--verbose") || rest.includes("-v") });
-    case "load": {
-      const name = rest.find((a) => !a.startsWith("-"));
-      if (!name) {
-        return {
-          command: "load",
-          ok: false,
-          message: "usage: yog skills load <name>",
-        };
-      }
-      return loadSkill(manager, name);
-    }
-    case "unload": {
-      const name = rest.find((a) => !a.startsWith("-"));
-      if (!name) {
-        return {
-          command: "unload",
-          ok: false,
-          message: "usage: yog skills unload <name>",
-        };
-      }
-      return unloadSkill(manager, name);
-    }
-    case "status":
-      return statusSkills(manager);
-    case "help":
-    case undefined:
-      return skillsHelp();
-    default:
-      return {
-        command: "help",
-        ok: false,
-        message: `unknown skills command "${sub}" (expected list, load, unload, status, or help)`,
-      };
-  }
+  return dispatchSub(manager, argv[0] ?? "", argv.slice(1));
 }
 
+/** Usage/error result for an unrecognized skills subcommand. */
+function unknownCommand(sub: string | undefined): SkillsCommandResult {
+  return {
+    command: "help",
+    ok: false,
+    message: `unknown skills command "${sub}" (expected list, load, unload, status, or help)`,
+  };
+}
+
+/** The `--verbose` / `-v` flag of a skills argv tail. */
+function verboseFlag(rest: readonly string[]): boolean {
+  return rest.includes("--verbose") || rest.includes("-v");
+}
+
+/**
+ * Shared argument guard for name-taking skills subcommands: pick the first
+ * non-flag argument, or fall back to the command's usage line.
+ */
+function withNameOrUsage(
+  manager: SkillManager,
+  rest: readonly string[],
+  command: "load" | "unload",
+  run: (manager: SkillManager, name: string) => Promise<SkillsCommandResult>,
+): Promise<SkillsCommandResult> {
+  const name = rest.find((a) => !a.startsWith("-"));
+  if (name === undefined) return Promise.resolve(usageResult(command));
+  return run(manager, name);
+}
 /** Instructions block for the system prompt (loaded skills), if any. */
 export async function skillInstructions(manager: SkillManager): Promise<string> {
   const loaded = await manager.getInstructions();
