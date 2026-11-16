@@ -47,60 +47,84 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
-/**
- * Parse + validate a raw request body into an envelope.
- * Returns `{ envelope }` or `{ error }` with a stable error code/message.
- */
-export function parseEnvelope(
-  raw: string,
-): { envelope: MessageEnvelope } | { error: { code: string; message: string } } {
+/** The shared failure shape every validation step returns. */
+type EnvelopeError = { code: string; message: string };
+
+/** Parse the body, rejecting blanks, bad JSON, and non-objects. */
+function parseBodyObject(raw: string): Record<string, unknown> | EnvelopeError {
   const trimmed = raw.trim();
   if (trimmed === "") {
-    return { error: { code: "invalid_request", message: "message body must be a JSON object" } };
+    return { code: "invalid_request", message: "message body must be a JSON object" };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed);
   } catch {
-    return { error: { code: "invalid_request", message: "message body must be a JSON object" } };
+    return { code: "invalid_request", message: "message body must be a JSON object" };
   }
   if (!isRecord(parsed)) {
-    return { error: { code: "invalid_request", message: "message body must be a JSON object" } };
+    return { code: "invalid_request", message: "message body must be a JSON object" };
   }
+  return parsed;
+}
+
+/** Validate the envelope `type` field against the known message types. */
+function envelopeTypeError(parsed: Record<string, unknown>): EnvelopeError | undefined {
   const type = parsed.type;
   if (typeof type !== "string" || type === "") {
-    return {
-      error: { code: "invalid_request", message: "message type must be a non-empty string" },
-    };
+    return { code: "invalid_request", message: "message type must be a non-empty string" };
   }
   if (!(MESSAGE_TYPES as readonly string[]).includes(type)) {
-    return { error: { code: "invalid_request", message: `unsupported message type: ${type}` } };
+    return { code: "invalid_request", message: `unsupported message type: ${type}` };
   }
+  return undefined;
+}
+
+/** Validate the optional `version` field (omitted means the server version). */
+function envelopeVersionError(parsed: Record<string, unknown>): EnvelopeError | undefined {
   const version = parsed.version;
   if (version !== undefined && version !== MESSAGE_VERSION) {
     return {
-      error: {
-        code: "invalid_request",
-        message: `unsupported message version: ${String(version)}`,
-      },
+      code: "invalid_request",
+      message: `unsupported message version: ${String(version)}`,
     };
   }
+  return undefined;
+}
+
+/** Validate the optional `requestId` field. */
+function envelopeRequestIdError(parsed: Record<string, unknown>): EnvelopeError | undefined {
   const requestId = parsed.requestId;
   if (requestId !== undefined && typeof requestId !== "string") {
-    return { error: { code: "invalid_request", message: "requestId must be a string" } };
+    return { code: "invalid_request", message: "requestId must be a string" };
   }
-  let data: Record<string, unknown> = {};
-  if (parsed.data !== undefined) {
-    if (!isRecord(parsed.data)) {
-      return { error: { code: "invalid_request", message: "message data must be a JSON object" } };
-    }
-    data = parsed.data;
+  return undefined;
+}
+
+/** Normalize the optional `data` field into a (possibly empty) record. */
+function envelopeData(parsed: Record<string, unknown>): Record<string, unknown> | EnvelopeError {
+  if (parsed.data === undefined) return {};
+  if (!isRecord(parsed.data)) {
+    return { code: "invalid_request", message: "message data must be a JSON object" };
   }
+  return parsed.data;
+}
+
+export function parseEnvelope(
+  raw: string,
+): { envelope: MessageEnvelope } | { error: EnvelopeError } {
+  const body = parseBodyObject(raw);
+  if (!isRecord(body)) return { error: body };
+  const parsed: Record<string, unknown> = body;
+  const error =
+    envelopeTypeError(parsed) ?? envelopeVersionError(parsed) ?? envelopeRequestIdError(parsed);
+  if (error !== undefined) return { error };
+  const data = envelopeData(parsed);
   return {
     envelope: {
-      type,
-      ...(typeof version === "number" ? { version } : {}),
-      ...(typeof requestId === "string" ? { requestId } : {}),
+      type: parsed.type as string,
+      ...(parsed.version !== undefined ? { version: parsed.version as number } : {}),
+      ...(typeof parsed.requestId === "string" ? { requestId: parsed.requestId } : {}),
       data,
     },
   };
