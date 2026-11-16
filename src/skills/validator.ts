@@ -26,13 +26,11 @@ const NAME_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 /** `true` when `name` is a valid skill name (lowercase, hyphens, 1–64). */
 export function isValidSkillName(name: string): boolean {
-  return (
-    name.length >= MIN_NAME_LENGTH && name.length <= MAX_NAME_LENGTH && NAME_PATTERN.test(name)
-  );
+  return skillNameError(name) === undefined;
 }
 
-/** Return a human-readable reason `name` is invalid, or `undefined`. */
-export function skillNameError(name: string): string | undefined {
+/** First structural reason `name` is invalid (length window, then charset). */
+function nameLengthOrPatternError(name: string): string | undefined {
   if (name.length < MIN_NAME_LENGTH || name.length > MAX_NAME_LENGTH) {
     return `skill name "${name}" must be ${MIN_NAME_LENGTH}-${MAX_NAME_LENGTH} characters`;
   }
@@ -43,6 +41,11 @@ export function skillNameError(name: string): string | undefined {
     );
   }
   return undefined;
+}
+
+/** Return a human-readable reason `name` is invalid, or `undefined`. */
+export function skillNameError(name: string): string | undefined {
+  return nameLengthOrPatternError(name);
 }
 
 /** Separator between a trunk skill and a child skill in a full name. */
@@ -57,9 +60,7 @@ export function splitFullName(fullName: string): [string, string | undefined] {
 
 /** `true` when `fullName` is a valid (optionally namespaced) skill name. */
 export function isValidFullName(fullName: string): boolean {
-  const [trunk, branch] = splitFullName(fullName);
-  if (!isValidSkillName(trunk)) return false;
-  return branch === undefined || isValidSkillName(branch);
+  return splitFullName(fullName).every((part) => part === undefined || isValidSkillName(part));
 }
 
 /**
@@ -78,31 +79,50 @@ export function assertPathWithin(skillDir: string, relative: string): void {
  * when it stays inside `skillDir`, else `undefined`.
  */
 export function resolveWithin(skillDir: string, relative: string): string | undefined {
-  const base = skillDir.replace(/\/+$/, "") || "/";
-  if (relative === "") return base;
+  if (relative === "") return baseDirOf(skillDir);
   if (relative.startsWith("/") || relative.includes("\0")) return undefined;
-  const prefix = base.endsWith("/") ? base : `${base}/`;
-  const resolved = `${prefix}${relative}`;
-  const normalized = normalizePath(resolved);
-  if (normalized !== base && !normalized.startsWith(`${base}/`)) return undefined;
+  const base = baseDirOf(skillDir);
+  const normalized = normalizePath(`${dirPrefix(skillDir)}${relative}`);
+  if (escapesBase(normalized, base)) return undefined;
   return normalized;
+}
+
+/** `true` when `normalized` leaves the `base` directory subtree. */
+function escapesBase(normalized: string, base: string): boolean {
+  if (normalized === base) return false;
+  return !normalized.startsWith(`${base}/`);
+}
+
+/** Base dir with trailing slashes collapsed (empty → the root). */
+function baseDirOf(skillDir: string): string {
+  return skillDir.replace(/\/+$/, "") || "/";
+}
+
+/** Path prefix that keeps a relative child inside `skillDir`. */
+function dirPrefix(skillDir: string): string {
+  return skillDir.endsWith("/") ? skillDir : `${skillDir}/`;
 }
 
 /** Collapse `.`/`..` segments and duplicate slashes in a POSIX path. */
 export function normalizePath(path: string): string {
   const absolute = path.startsWith("/");
   const out: string[] = [];
-  for (const segment of path.split("/")) {
-    if (segment === "" || segment === ".") continue;
-    if (segment === "..") {
-      if (out.length > 0 && out[out.length - 1] !== "..") out.pop();
-      else if (!absolute) out.push("..");
-      continue;
-    }
-    out.push(segment);
-  }
+  for (const segment of path.split("/")) normalizeSegment(out, segment, absolute);
   const joined = out.join("/");
   return absolute ? `/${joined}` : joined || ".";
+}
+
+/** Fold one path segment into the normalized accumulator. */
+function normalizeSegment(out: string[], segment: string, absolute: boolean): void {
+  if (segment === "" || segment === ".") return;
+  if (segment === "..") popOrKeepDotDot(out, absolute);
+  else out.push(segment);
+}
+
+/** One `..` step: pop the previous segment, keep a relative leading `..`. */
+function popOrKeepDotDot(out: string[], absolute: boolean): void {
+  if (out.length > 0 && out[out.length - 1] !== "..") out.pop();
+  else if (!absolute) out.push("..");
 }
 
 /** Well-formedness result for a parsed frontmatter object. */
@@ -119,79 +139,67 @@ export interface FrontmatterCheck {
  */
 export function checkFrontmatterShape(value: Record<string, unknown>): FrontmatterCheck {
   const errors: string[] = [];
-  const disable = value["disable-model-invocation"];
-  if (disable !== undefined && disable !== null && typeof disable !== "boolean") {
-    errors.push(`frontmatter "disable-model-invocation" must be a boolean (got ${typeof disable})`);
-  }
-  const name = value.name;
-  if (name !== undefined && (typeof name !== "string" || name.trim() === "")) {
-    errors.push(`frontmatter "name" must be a non-empty string (got ${JSON.stringify(name)})`);
-  } else if (typeof name === "string") {
-    const err = skillNameError(name.trim());
-    if (err) errors.push(err);
-  }
-  const description = value.description;
-  if (description !== undefined && typeof description !== "string") {
-    errors.push(`frontmatter "description" must be a string (got ${typeof description})`);
-  }
-  const allowed = value["allowed-tools"] ?? value.allowedTools;
-  if (allowed !== undefined) {
-    if (typeof allowed === "string") {
-      if (allowed.trim() === "") errors.push(`frontmatter "allowed-tools" must not be empty`);
-    } else if (!Array.isArray(allowed) || allowed.some((t) => typeof t !== "string")) {
-      errors.push(`frontmatter "allowed-tools" must be a string or an array of strings`);
-    }
-  }
-  const metadata = value.metadata;
-  if (
-    metadata !== undefined &&
-    (metadata === null || typeof metadata !== "object" || Array.isArray(metadata))
-  ) {
-    errors.push(`frontmatter "metadata" must be a mapping`);
-  }
+  for (const check of FIELD_CHECKS) check(value, errors);
   return { ok: errors.length === 0, errors };
+}
+
+/** Metadata must be a plain mapping (`null` and arrays are not). */
+function asMetadata(raw: unknown): Record<string, unknown> | undefined {
+  return raw !== null && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : undefined;
+}
+
+/** Frontmatter keys with a typed slot on {@link SkillFrontmatter}. */
+const KNOWN_FRONTMATTER_KEYS = new Set([
+  "name",
+  "description",
+  "license",
+  "compatibility",
+  "metadata",
+  "allowed-tools",
+  "allowedTools",
+  "disable-model-invocation",
+]);
+
+/** Normalize `allowed-tools` (string CSV or array) to a string array. */
+function parseAllowedTools(raw: unknown): string[] {
+  if (typeof raw === "string")
+    return raw
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+  if (Array.isArray(raw)) return raw.filter((t): t is string => typeof t === "string");
+  return [];
 }
 
 /** Convert a raw frontmatter record into typed {@link SkillFrontmatter}. */
 export function toFrontmatter(value: Record<string, unknown>): SkillFrontmatter {
-  const allowedRaw = value["allowed-tools"] ?? value.allowedTools;
-  let allowedTools: string[] | undefined;
-  if (typeof allowedRaw === "string") {
-    allowedTools = allowedRaw
-      .split(",")
-      .map((t) => t.trim())
-      .filter(Boolean);
-  } else if (Array.isArray(allowedRaw)) {
-    allowedTools = allowedRaw.filter((t): t is string => typeof t === "string");
-  }
-  const metadata =
-    value.metadata !== null && typeof value.metadata === "object" && !Array.isArray(value.metadata)
-      ? (value.metadata as Record<string, unknown>)
-      : undefined;
-  const known = new Set([
-    "name",
-    "description",
-    "license",
-    "compatibility",
-    "metadata",
-    "allowed-tools",
-    "allowedTools",
-    "disable-model-invocation",
-  ]);
-  const extra: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(value)) {
-    if (!known.has(k)) extra[k] = v;
-  }
   return {
     name: typeof value.name === "string" ? value.name.trim() : "",
     description: typeof value.description === "string" ? value.description : "",
     license: typeof value.license === "string" ? value.license : undefined,
     compatibility: typeof value.compatibility === "string" ? value.compatibility : undefined,
-    metadata,
-    allowedTools: allowedTools && allowedTools.length > 0 ? allowedTools : undefined,
+    metadata: asMetadata(value.metadata),
+    allowedTools: allowedToolsOf(value),
     disableModelInvocation: value["disable-model-invocation"] === true,
-    extra,
+    extra: extraFrontmatter(value),
   };
+}
+
+/** Typed `allowedTools` slot: non-empty string array, else undefined. */
+function allowedToolsOf(value: Record<string, unknown>): string[] | undefined {
+  const tools = parseAllowedTools(value["allowed-tools"] ?? value.allowedTools);
+  return tools.length > 0 ? tools : undefined;
+}
+
+/** Frontmatter keys outside the known set (kept for round-tripping). */
+function extraFrontmatter(value: Record<string, unknown>): Record<string, unknown> {
+  const extra: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (!KNOWN_FRONTMATTER_KEYS.has(k)) extra[k] = v;
+  }
+  return extra;
 }
 
 /** Best-effort size stat for the size cap; `-1` when unreadable. */
@@ -210,3 +218,72 @@ export async function fileSize(path: string): Promise<number> {
 export function isModelInvocationDisabled(fm: SkillFrontmatter): boolean {
   return fm.disableModelInvocation === true;
 }
+
+/**
+ * Frontmatter field checks for {@link checkFrontmatterShape}. One function
+ * per field: each validates the raw YAML value and appends a human-readable
+ * error to `errors` when the value's shape is wrong.
+ */
+type FieldCheck = (value: Record<string, unknown>, errors: string[]) => void;
+
+/** `disable-model-invocation` must be a boolean when present. */
+function checkDisableInvocation(value: Record<string, unknown>, errors: string[]): void {
+  const disable = value[DISABLE_MODEL_INVOCATION_KEY];
+  if (disable !== undefined && disable !== null && typeof disable !== "boolean") {
+    errors.push(
+      `frontmatter "${DISABLE_MODEL_INVOCATION_KEY}" must be a boolean (got ${typeof disable})`,
+    );
+  }
+}
+
+/** `name` must be a non-empty string (and a valid skill name when present). */
+function checkNameField(value: Record<string, unknown>, errors: string[]): void {
+  const name = value.name;
+  if (name !== undefined && (typeof name !== "string" || name.trim() === "")) {
+    errors.push(`frontmatter "name" must be a non-empty string (got ${JSON.stringify(name)})`);
+    return;
+  }
+  if (typeof name === "string") {
+    const err = skillNameError(name.trim());
+    if (err) errors.push(err);
+  }
+}
+
+/** `description` must be a string when present. */
+function checkDescriptionField(value: Record<string, unknown>, errors: string[]): void {
+  const description = value.description;
+  if (description !== undefined && typeof description !== "string") {
+    errors.push(`frontmatter "description" must be a string (got ${typeof description})`);
+  }
+}
+
+/** `allowed-tools` must be a non-empty string or an array of strings. */
+function checkAllowedToolsField(value: Record<string, unknown>, errors: string[]): void {
+  const allowed = value["allowed-tools"] ?? value.allowedTools;
+  if (allowed === undefined) return;
+  if (typeof allowed === "string") {
+    if (allowed.trim() === "") errors.push(`frontmatter "allowed-tools" must not be empty`);
+  } else if (!Array.isArray(allowed) || allowed.some((t) => typeof t !== "string")) {
+    errors.push(`frontmatter "allowed-tools" must be a string or an array of strings`);
+  }
+}
+
+/** `metadata` must be a mapping when present. */
+function checkMetadataField(value: Record<string, unknown>, errors: string[]): void {
+  const metadata = value.metadata;
+  if (
+    metadata !== undefined &&
+    (metadata === null || typeof metadata !== "object" || Array.isArray(metadata))
+  ) {
+    errors.push(`frontmatter "metadata" must be a mapping`);
+  }
+}
+
+/** Frontmatter field checks, in report order. */
+const FIELD_CHECKS: readonly FieldCheck[] = [
+  checkDisableInvocation,
+  checkNameField,
+  checkDescriptionField,
+  checkAllowedToolsField,
+  checkMetadataField,
+];
