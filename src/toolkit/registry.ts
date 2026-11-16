@@ -7,8 +7,18 @@ import type {
   ChatCompletionFunctionTool,
   ChatCompletionTool,
 } from "openai/resources/chat/completions/completions.mjs";
-import { type ToolResult, type ToolSpec } from "./types.ts";
+import { type ToolContext, type ToolResult, type ToolSpec } from "./types.ts";
 import { capToolResult } from "./truncation.ts";
+
+/** Whether the turn's abort plumbing has already fired for this call. */
+function isAbortedNow(ctx: ToolExecuteContext): boolean {
+  if (ctx.signal?.aborted === true) return true;
+  try {
+    return ctx.isAborted?.() === true;
+  } catch {
+    return false;
+  }
+}
 
 /** Derive the OpenAI function definition from a tool spec's zod schema. */
 export function toFunctionTool(spec: ToolSpec): ChatCompletionFunctionTool {
@@ -30,33 +40,54 @@ export interface ToolCall {
   args: Record<string, unknown>;
 }
 
+/** The tool rejected with an abort (turn unwind). */
+class ToolAbortError extends Error {
+  constructor() {
+    super("tool call aborted");
+    this.name = "AbortError";
+  }
+}
+
+/** Build the {@link ToolContext} a tool `run` receives: the session id (the
+ *  abort key) plus the explicit persistent-state override, when set. */
+function toolRunContext(ctx: ToolExecuteContext): ToolContext {
+  const out: ToolContext = {};
+  if (ctx.sessionId !== undefined) out.sessionId = ctx.sessionId;
+  if (ctx.stateDir !== undefined) out.stateDir = ctx.stateDir;
+  return out;
+}
+
 /**
- * Optional context for a registry execution. The turn engine passes the
- * engine's abort signal, the owning session id (the tool-level abort key),
- * and start/end hooks so the server can address the tool call that is
- * currently running for a session.
+ * Race the tool's settlement against a turn abort: an abort mid-call
+ * (signal or predicate) rejects so the engine's unwind/heal path runs, and
+ * an already-aborted source rejects immediately — the `abort` event may
+ * have fired before the listener below could attach. A tool that settles
+ * first wins and the (never-listened) poll timer is cleared.
  */
-export interface ToolExecuteContext {
-  /** Already-aborted signal ⇒ the call fails before the tool runs. */
-  signal?: AbortSignal;
-  /**
-   * Abort sentinel polled while the tool runs (same contract as the turn
-   * engine's `isAborted`). When it flips, the call rejects with an
-   * `AbortError` so the engine's unwind/heal path synthetically resolves
-   * the announced call instead of waiting for a tool that may never settle.
-   * Callers that already pass `signal` derived from the same source get
-   * identical behaviour from either mechanism; predicate-only callers
-   * (no `signal`) still unwind mid-tool instead of hanging.
-   */
-  isAborted?: () => boolean;
-  /** Owning session id — forwarded to the tool as the abort key. */
-  sessionId?: string;
-  /** Explicit persistent-state override (bash shell snapshots); the daemon path derives it per session. */
-  stateDir?: string;
-  /** Fired just before the tool runs. */
-  onStart?: (call: ToolCall) => void;
-  /** Fired when the tool settles (result or throw). */
-  onEnd?: (call: ToolCall) => void;
+function raceAgainstAbort(
+  settledP: Promise<ToolResult>,
+  ctx: ToolExecuteContext,
+  isAbortedNow: () => boolean,
+): Promise<ToolResult> {
+  const abortErr = new ToolAbortError();
+  if (isAbortedNow()) throw abortErr;
+  const abortP = new Promise<never>((_resolve, reject) => {
+    ctx.signal?.addEventListener("abort", () => reject(abortErr), { once: true });
+    if (ctx.isAborted) {
+      const timer = setInterval(() => {
+        if (isAbortedNow()) {
+          clearInterval(timer);
+          reject(abortErr);
+        }
+      }, 10);
+      timer.unref?.();
+      void settledP.then(
+        () => clearInterval(timer),
+        () => clearInterval(timer),
+      );
+    }
+  });
+  return Promise.race([settledP, abortP]);
 }
 
 /** Format a zod error the way the harness reports validation failures. */
@@ -76,6 +107,35 @@ export function formatZodError(error: z.ZodError): string {
       return `${path}: ${issue.message}`;
     })
     .join("; ");
+}
+
+/**
+ * Optional context for a registry execution. The turn engine passes the
+ * engine's abort signal, the owning session id (the tool-level abort key),
+ * and start/end hooks so the server can address the tool call that is
+ * currently running for a session.
+ */
+export interface ToolExecuteContext {
+  /** Already-aborted signal ⇒ the call fails before the tool runs. */
+  signal?: AbortSignal;
+  /**
+   * Abort sentinel polled while the tool runs (same contract as the turn
+   * engine's `isAborted`). When it flips, the call rejects with an
+   * `ToolAbortError` so the engine's unwind/heal path synthetically resolves
+   * the announced call instead of waiting for a tool that may never settle.
+   * Callers that already pass `signal` derived from the same source get
+   * identical behaviour from either mechanism; predicate-only callers
+   * (no `signal`) still unwind mid-tool instead of hanging.
+   */
+  isAborted?: () => boolean;
+  /** Owning session id — forwarded to the tool as the abort key. */
+  sessionId?: string;
+  /** Explicit persistent-state override (bash shell snapshots); the daemon path derives it per session. */
+  stateDir?: string;
+  /** Fired just before the tool runs. */
+  onStart?: (call: ToolCall) => void;
+  /** Fired when the tool settles (result or throw). */
+  onEnd?: (call: ToolCall) => void;
 }
 
 /**
@@ -125,20 +185,7 @@ export class ToolRegistry {
     const tool = this.tools.get(name);
     if (!tool) return undefined;
 
-    const makeAbortError = (): Error => {
-      const err = new Error("tool call aborted");
-      err.name = "AbortError";
-      return err;
-    };
-    const isAbortedNow = (): boolean => {
-      if (ctx.signal?.aborted === true) return true;
-      try {
-        return ctx.isAborted?.() === true;
-      } catch {
-        return false;
-      }
-    };
-    if (isAbortedNow()) throw makeAbortError();
+    if (isAbortedNow(ctx)) throw new ToolAbortError();
 
     let parsed: unknown;
     try {
@@ -158,10 +205,7 @@ export class ToolRegistry {
     // huge file read or web fetch can never crash the model's context window.
     // The bash tool already caps its own streams; this covers every tool.
     const runP = tool
-      .run(result.data as Record<string, unknown>, {
-        ...(ctx.sessionId !== undefined ? { sessionId: ctx.sessionId } : {}),
-        ...(ctx.stateDir !== undefined ? { stateDir: ctx.stateDir } : {}),
-      })
+      .run(result.data as Record<string, unknown>, toolRunContext(ctx))
       .then((res) => capToolResult(res));
     // A thrown tool run becomes a failure result (never a turn unwind),
     // matching the no-abort path below. Abort rejections are the only
@@ -170,35 +214,10 @@ export class ToolRegistry {
       tool.failure(err instanceof Error ? (err.message as string) : String(err)),
     );
     void settledP.catch(() => undefined);
+    ctx.onStart?.(call);
     try {
-      ctx.onStart?.(call);
-      if (ctx.signal || ctx.isAborted) {
-        // Turn abort mid-call: reject so the turn engine's unwind/heal path
-        // runs (the announced-but-unanswered call is stubbed there). The
-        // tool's own late settlement is discarded — the turn is unwinding.
-        // An already-aborted signal rejects immediately: the `abort` event
-        // fired before this listener could attach, so check the flag first.
-        const abortErr = makeAbortError();
-        if (isAbortedNow()) throw abortErr;
-        const abortP = new Promise<never>((_resolve, reject) => {
-          if (ctx.signal) {
-            ctx.signal.addEventListener("abort", () => reject(abortErr), { once: true });
-          }
-          if (ctx.isAborted) {
-            const timer = setInterval(() => {
-              if (isAbortedNow()) {
-                clearInterval(timer);
-                reject(abortErr);
-              }
-            }, 10);
-            timer.unref?.();
-            void settledP.then(
-              () => clearInterval(timer),
-              () => clearInterval(timer),
-            );
-          }
-        });
-        return await Promise.race([settledP, abortP]);
+      if (ctx.signal !== undefined || ctx.isAborted !== undefined) {
+        return await raceAgainstAbort(settledP, ctx, () => isAbortedNow(ctx));
       }
       return await settledP;
     } finally {
