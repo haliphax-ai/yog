@@ -35,7 +35,7 @@ export async function runCalibrate(args: readonly string[]): Promise<number> {
     logger.error(usage);
     return 2;
   }
-  const config = await resolveConfig((configPath !== undefined ? { configPath } : {}));
+  const config = await resolveConfig(configPath !== undefined ? { configPath } : {});
   const model = config.model;
   const db = await openSessionsDb(join(config.stateRoot, "sessions.db"));
   const store = new SessionStore(db);
