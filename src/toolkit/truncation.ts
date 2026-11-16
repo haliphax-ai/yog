@@ -39,6 +39,27 @@ export function estimateTokenCountWithProfile(
   return tokenxEstimate(text, profileOptions(profile));
 }
 
+/** The five short escapes `JSON.stringify` emits as two-char sequences
+ *  (\b \t \n \f \r); any other C0 control (and a lone surrogate half)
+ *  \u-escapes 6x. */
+const SHORT_ESCAPE_CODES = new Set([0x08, 0x09, 0x0a, 0x0c, 0x0d]);
+
+/** A UTF-16 surrogate code unit (either half of a code pair). */
+function isSurrogate(c: number): boolean {
+  return c >= 0xd800 && c <= 0xdfff;
+}
+
+/**
+ * Escaped length of the code unit `c` (with its possible pair-mate `next`)
+ * exactly as `JSON.stringify` emits it.
+ */
+function codeUnitCost(c: number, next: number): number {
+  if (c < 0x20) return SHORT_ESCAPE_CODES.has(c) ? 2 : 6;
+  if (c === 0x22 || c === 0x5c) return 2; // "  \
+  if (c >= 0xd800 && c <= 0xdbff) return next >= 0xdc00 && next <= 0xdfff ? 2 : 6;
+  return isSurrogate(c) ? 6 : 1; // lone surrogate (or plain) unit
+}
+
 /**
  * Serialized length of `s` exactly as `JSON.stringify` would emit it — the
  * wrapping quotes included — without building the escaped string. Tool
@@ -58,23 +79,9 @@ export function jsonEscapedLen(s: string): number {
   let n = 2; // wrapping quotes
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);
-    if (c < 0x20) {
-      n += c === 0x09 || c === 0x0a || c === 0x0d || c === 0x08 || c === 0x0c ? 2 : 6;
-    } else if (c === 0x22 || c === 0x5c) {
-      n += 2; // "  \
-    } else if (c >= 0xd800 && c <= 0xdbff) {
-      const next = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        n += 2; // valid pair, emitted raw
-        i++;
-      } else {
-        n += 6; // lone high surrogate → \uXXXX
-      }
-    } else if (c >= 0xdc00 && c <= 0xdfff) {
-      n += 6; // lone low surrogate → \uXXXX
-    } else {
-      n += 1;
-    }
+    const cost = codeUnitCost(c, s.charCodeAt(i + 1));
+    n += cost;
+    if (cost === 2 && c > 0x7f) i++; // high surrogate with its low mate: skip it
   }
   return n;
 }
