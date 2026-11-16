@@ -1,6 +1,7 @@
 # Staged-only mirror of CI (.github/workflows/ci.yml) via nano-staged:
 # oxfmt runs in write mode (no --check) so formatting is fixed in place.
-# CI additionally runs the checks repo-wide, not just staged files.
+# CI additionally runs the checks repo-wide, not just staged files. The
+# qlty smells gate below diffs the changed files against origin/main.
 npx nano-staged
 npm run typecheck
-npm run depcruise
+node .husky/scripts/qlty-smells.mts
