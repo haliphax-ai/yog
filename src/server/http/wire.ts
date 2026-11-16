@@ -61,7 +61,7 @@ export function turnUsageFromEvents(events: unknown[]): Record<string, number> |
 }
 
 /**
- * §4.6 wire shape for one transcript message: the store's snake_case columns
+ * Wire shape for one transcript message: the store's snake_case columns
  * (`tool_call_id`, `tool_calls`) become camelCase (`toolCallId`, `toolCalls`);
  * only the contract's known keys cross the boundary. The store itself stays
  * snake_case — its rows feed the model hydrate (OpenAI message shape) — the

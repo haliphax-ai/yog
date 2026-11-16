@@ -19,9 +19,6 @@ export interface Capabilities {
   [key: string]: unknown;
 }
 
-/** Session record tracked by the adapter (in-memory; store remains injectable). */
-
-/** Session record tracked by the adapter (in-memory; store remains injectable). */
 export interface SessionRecord {
   id: string;
   status: "open" | "dormant";
@@ -30,9 +27,6 @@ export interface SessionRecord {
   detached_at?: number | null;
 }
 
-/** Minimal store boundary the adapter drives (real `SessionStore`). */
-
-/** Minimal store boundary the adapter drives (real `SessionStore`). */
 export interface StoreBoundary {
   createSession(opts?: { title?: string; system?: string }): unknown;
   getSession(id: string): unknown;
@@ -57,7 +51,7 @@ export interface StoreBoundary {
   ): unknown[];
   /** Settle a turn row (status + finished_at + duration). */
   finishTurn?(sessionId: string, turnId: number | null, status?: string, usage?: unknown): unknown;
-  /** Per-turn metrics for the transcript dump (§R1.3). */
+  /** Per-turn metrics for the transcript dump. */
   listTurnUsages?(
     sessionId: string,
   ): Promise<Array<{ turnId: number; usage?: unknown; durationMs?: number }>>;
@@ -66,14 +60,10 @@ export interface StoreBoundary {
 }
 
 /** Handle returned by `orchestrator.runTurn` (see SessionOrchestrator). */
-
-/** Handle returned by `orchestrator.runTurn` (see SessionOrchestrator). */
 export interface TurnHandleLike {
   promise: Promise<unknown>;
   abort: (reason?: unknown) => void;
 }
-
-/** Minimal orchestrator boundary the adapter drives for a turn. */
 
 /** Minimal orchestrator boundary the adapter drives for a turn. */
 export interface OrchestratorBoundary {
@@ -86,14 +76,10 @@ export interface OrchestratorBoundary {
 }
 
 /** Minimal per-daemon event bus boundary (a Node `EventEmitter`). */
-
-/** Minimal per-daemon event bus boundary (a Node `EventEmitter`). */
 export interface EventBusBoundary {
   on(event: string, listener: (ev: SseEnvelope) => void): unknown;
   off(event: string, listener: (ev: SseEnvelope) => void): unknown;
 }
-
-/** Minimal model-provider boundary the adapter drives for a turn. */
 
 /** Minimal model-provider boundary the adapter drives for a turn. */
 export interface ModelBoundary {
@@ -109,10 +95,6 @@ export interface ModelBoundary {
  * the index signature keeps the seam open for store/orchestrator/factory deps.
  */
 
-/**
- * Injected dependencies. Fields are optional so tests can fake any boundary;
- * the index signature keeps the seam open for store/orchestrator/factory deps.
- */
 export interface HttpDeps {
   /** Resolve the context window for an arbitrary model id (models.dev cache). */
   contextWindowFor?: (model: string) => number | undefined;
@@ -140,8 +122,6 @@ export interface HttpDeps {
   [key: string]: unknown;
 }
 
-/** Machine-readable error codes (PLAN §5.5) with HTTP status mapping. */
-
 /**
  * Per-daemon session resolvers for the extracted message handlers: the
  * optional store, the in-memory fallback map, and a bound session lookup
@@ -159,12 +139,6 @@ export interface SessionResolvers {
  * response plus the pre-bound success (`reply`) and failure (`fail`) senders
  * of `dispatchMessage`, so helpers never touch the envelope framing.
  */
-
-/**
- * Per-request reply context for the extracted message handlers: the raw
- * response plus the pre-bound success (`reply`) and failure (`fail`) senders
- * of `dispatchMessage`, so helpers never touch the envelope framing.
- */
 export interface MsgCtx {
   type: string;
   id: string;
@@ -176,14 +150,10 @@ export interface MsgCtx {
 }
 
 /** Per-turn round attribution carried into the transcript dump. */
-
-/** Per-turn round attribution carried into the transcript dump. */
 export interface RoundAttribution {
   usage?: unknown;
   promptDelta?: number;
 }
-
-/** Parse a persisted event payload row into an object ({} when unparseable). */
 
 /**
  * Everything the module-level adapter handlers share from the factory
@@ -207,8 +177,6 @@ export interface AdapterState {
     Array<{ handle?: TurnHandleLike; controller?: AbortController }>
   >;
 }
-
-/** Session channel name on the event bus. */
 
 /**
  * Terminal-synthesis context for `finishTurnError`: the pre-bound persist

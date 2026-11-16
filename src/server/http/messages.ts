@@ -5,7 +5,7 @@ import type { CompactionKind } from "../compaction.ts";
 import type { SkillManager } from "../../skills/index.ts";
 
 /**
- * `session.detach` (§4.5): optional `purge` is an immediate irreversible
+ * `session.detach`: optional `purge` is an immediate irreversible
  * delete — the session row is gone, so subsequent messages all hit 404 —
  * while plain detach is open → dormant with `detached_at` stamped and
  * nothing forfeited; idempotent (a second detach on a dormant session is a
@@ -25,7 +25,7 @@ export async function handleSessionDetach(
   }
   const purge = data.purge === true;
   if (purge) {
-    // Immediate irreversible delete (§4.5). After this the session
+    // Immediate irreversible delete. After this the session
     // row is gone: subsequent messages all hit 404 unknown_session.
     const purged =
       !!store && typeof store.purgeSession === "function"
@@ -35,7 +35,7 @@ export async function handleSessionDetach(
     else ctx.reply(200, { ok: true, deleted: true, id });
     return;
   }
-  // Detach (§4.5): status open → dormant, detached_at stamped,
+  // Detach: status open → dormant, detached_at stamped,
   // nothing forfeited. Idempotent — a second detach on an already
   // dormant session is a no-op that still returns success.
   let detached: SessionRecord = session;
@@ -52,12 +52,6 @@ export async function handleSessionDetach(
   }
   ctx.reply(200, { session: detached });
 }
-
-/**
- * `compaction.run`: run the injected compaction/handoff runner (see
- * compaction.ts); misconfiguration and unknown sessions surface as the
- * mapped error codes, everything else as provider_error.
- */
 
 /**
  * `compaction.run`: run the injected compaction/handoff runner (see
@@ -106,12 +100,6 @@ export async function handleCompactionRun(deps: HttpDeps, ctx: MsgCtx): Promise<
  * shake.ts); misconfiguration surfaces as `internal`, runner failure as an
  * internal error with the runner's message.
  */
-
-/**
- * `transcript.shake`: run the injected transcript shake runner (see
- * shake.ts); misconfiguration surfaces as `internal`, runner failure as an
- * internal error with the runner's message.
- */
 export async function handleTranscriptShake(
   deps: HttpDeps,
   resolvers: SessionResolvers,
@@ -139,12 +127,6 @@ export async function handleTranscriptShake(
 
   return;
 }
-
-/**
- * `skills.*` dispatch: list/status/load/unload against the injected
- * SkillManager (see skills/manager.ts); the daemon's skills session is the
- * default target unless the request names one.
- */
 
 /**
  * `skills.*` dispatch: list/status/load/unload against the injected
@@ -192,7 +174,7 @@ export async function handleSkillsCommand(
 }
 
 /**
- * Reply to `transcript.get` (§4.6): the rehydration dump. Readable while the
+ * Reply to `transcript.get`: the rehydration dump. Readable while the
  * row exists, including dormant sessions within the 30-day retention window
  * (dormancy never blocks reads); store-less fakes get a documented minimal
  * empty dump rather than a crash.

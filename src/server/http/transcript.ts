@@ -20,16 +20,6 @@ export function parseEventPayload(ev: Record<string, unknown>): Record<string, u
     : {};
 }
 
-/** Build one turn's round attribution from a persisted tool.result row. */
-
-/**
- * Round attribution for tool result rows comes from the turns' persisted
- * tool.result events (the live envelope data), so the dump carries the same
- * usage/promptDelta the stream did: one attribution round per turn (all
- * results of a round share it), while per-call resultTokens are keyed by
- * tool call id instead — each result's own estimate rides its own row.
- */
-
 /**
  * Round attribution for tool result rows comes from the turns' persisted
  * tool.result events (the live envelope data), so the dump carries the same
@@ -55,7 +45,13 @@ export async function collectTranscriptAttribution(
   return { attribution, resultTokensByCall };
 }
 
-/** Wire-shape tool result row from a persisted `tool.result` event payload. */
+/**
+ * Round attribution for tool result rows comes from the turns' persisted
+ * tool.result events (the live envelope data), so the dump carries the same
+ * usage/promptDelta the stream did: one attribution round per turn (all
+ * results of a round share it), while per-call resultTokens are keyed by
+ * tool call id instead — each result's own estimate rides its own row.
+ */
 /**
  * In-flight (running) turns have no canonical transcript rows yet: serve.ts
  * only appends `messages.slice(startLen)` at settle time, so a reconnecting
@@ -66,21 +62,6 @@ export async function collectTranscriptAttribution(
  * rehydrates the in-flight turn progressively; settled turns use the real
  * rows and get no synthetic duplicates.
  */
-
-/**
- * Per-turn metrics (usage/duration) ride alongside the dump so a client can
- * rebuild per-turn summaries without replaying events. Each row carries its
- * settle status — `running` for an in-flight (typically lingered) turn, then
- * `finished` / `aborted` / `error` / `interrupted` — so a reconnecting
- * client can tell the session still has an active turn (busy gate,
- * poll-to-settle) and can mark a failed (provider-error) turn distinctly
- * from an aborted one on rehydrate. A running row has no stored
- * usage/duration yet (both are stamped at settle time), so the snapshot
- * from `onUsageFor` fills the usage in: the client's "last known context
- * total" then stays live instead of showing the pre-turn figure until the
- * row settles.
- */
-
 /**
  * Per-turn metrics (usage/duration) ride alongside the dump so a client can
  * rebuild per-turn summaries without replaying events. Each row carries its
@@ -132,7 +113,7 @@ export async function collectTurnSummaries(
 }
 
 /**
- * `session.detach` (§4.5): optional `purge` is an immediate irreversible
+ * `session.detach`: optional `purge` is an immediate irreversible
  * delete — the session row is gone, so subsequent messages all hit 404 —
  * while plain detach is open → dormant with `detached_at` stamped and
  * nothing forfeited; idempotent (a second detach on a dormant session is a
@@ -140,7 +121,7 @@ export async function collectTurnSummaries(
  */
 
 /**
- * Reply to `transcript.get` (§4.6): the rehydration dump. Readable while the
+ * Reply to `transcript.get`: the rehydration dump. Readable while the
  * row exists, including dormant sessions within the 30-day retention window
  * (dormancy never blocks reads); store-less fakes get a documented minimal
  * empty dump rather than a crash.
@@ -175,66 +156,6 @@ export async function replyTranscriptGet(
     return;
   }
   // Store-less fallback (test mode): documented minimal response — an
-  // empty transcript rather than a crash (§4.8).
+  // empty transcript rather than a crash.
   ctx.reply(200, { session, messages: [] });
 }
-
-/** Whether this persisted row is the `turn.started` for the wire turnId. */
-
-/**
- * Recovery match for `turn.get`: the wire turnId (string, from turn.started)
- * usually differs from the row id, so match numerically first, then via the
- * turn.started payload's turnId, then fall back to the session's latest turn.
- */
-
-/**
- * One turn's events for the `turn.get` replay: listEvents returns every
- * turn's events for the session, and replaying all of them would re-render
- * prior turns as if they were this one.
- */
-
-/**
- * Reply to `turn.get`: rebuild the turn from the store (recovery contract).
- * The wire turnId (string, from turn.started) usually differs from the row
- * id, so match numerically and fall back to the session's latest turn;
- * store-less fakes get a 404 (nothing to rebuild from).
- */
-
-/**
- * Reply to `turn.abort`: route through the orchestrator when one is wired,
- * reporting what *was* killed (captured before unwind); with only a model
- * provider there is no live turn handle — nothing to abort.
- */
-
-/**
- * Everything the module-level adapter handlers share from the factory
- * closure: injected boundaries, the derived capability projection, and the
- * per-daemon mutable state (in-memory sessions, bound streams). Handlers
- * take `st` as their first parameter so the transport logic stays
- * module-level and independently smell-checkable.
- */
-
-/**
- * Heal a fallback-path transcript in place: stub every tool call the
- * messages announce but never answer, so the batch persisted on error
- * stays hydratable (the engine heals the orchestrator path the same way;
- * providers reject dangling calls). Prior turns are already answered,
- * so this only stubs this turn's dangling calls.
- */
-
-/** Usage embedded in a stored terminal event payload (recovery fallback). */
-
-/**
- * Build the terminal `error` envelope synthesized when a turn fails without
- * the engine emitting one: the provider error code (or `provider_error`),
- * its message, and the usage reported up to the cut, when any.
- */
-
-/** Stored usage columns on a turn row (numeric and finite), or undefined. */
-
-/**
- * Per-daemon session resolvers for the extracted message handlers: the
- * optional store, the in-memory fallback map, and a bound session lookup
- * (store-preferred, map-fallback) — the state `dispatchMessage` reads and
- * mutates on the handlers' behalf.
- */

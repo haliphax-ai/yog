@@ -16,13 +16,6 @@ import { logger } from "../../log.ts";
  * its own row — creating a second adapter row there would leave a
  * duplicate `running` row (see the former streamTurn comment).
  */
-
-/**
- * Record the fallback path's turn row up front (best effort), returning the
- * row id (or null). The orchestrator path's executeTurn in serve.ts owns
- * its own row — creating a second adapter row there would leave a
- * duplicate `running` row (see the former streamTurn comment).
- */
 export async function recordFallbackTurnRow(
   st: AdapterState,
   session: SessionRecord,
@@ -44,18 +37,6 @@ export async function recordFallbackTurnRow(
   }
 }
 
-/**
- * Terminal-synthesis context for `finishTurnError`: the pre-bound persist
- * and stream emitters, the settle hook, the abort frame, and the usage
- * cut. Built by `startTurn` per turn.
- */
-
-/**
- * Settle a failed orchestrator turn: frame the adapter-synthesized terminal
- * (`turn.aborted` on abort, `provider_error` error otherwise) so
- * `turn.get` replays it even when the engine never emitted, and settle the
- * row as `aborted` / `error`.
- */
 export async function finishTurnError(
   st: AdapterState,
   emit: TurnEmitCtx,
@@ -75,8 +56,6 @@ export async function finishTurnError(
   }
   await emit.settleTurn("error");
 }
-
-/** Frame + fan out the fallback path's client-disconnect terminal. */
 
 /** Frame + fan out the fallback path's client-disconnect terminal. */
 export function emitClientDisconnected(ctx: {
@@ -101,7 +80,6 @@ export function emitClientDisconnected(ctx: {
 
 /** Persist the fallback turn's partial batch after healing (best effort). */
 
-/** Persist the fallback turn's partial batch after healing (best effort). */
 export async function persistFallbackBatch(
   st: AdapterState,
   sessionId: string,
@@ -117,23 +95,6 @@ export async function persistFallbackBatch(
   }
 }
 
-/**
- * Fallback turn driver (no orchestrator): run the model provider directly
- * in the background, persisting each event so terminal state stays
- * recoverable. Hydrates the prior transcript (§4.4) and passes the full
- * message list to the model so context carries across turns; any failure
- * persists the partial batch exactly like an abort (yog#42, parity with
- * serve.ts). Abort settles as `aborted`, provider failure as `error`.
- */
-
-/**
- * Fallback turn driver (no orchestrator): run the model provider directly
- * in the background, persisting each event so terminal state stays
- * recoverable. Hydrates the prior transcript (§4.4) and passes the full
- * message list to the model so context carries across turns; any failure
- * persists the partial batch exactly like an abort (yog#42, parity with
- * serve.ts). Abort settles as `aborted`, provider failure as `error`.
- */
 export async function runFallbackTurn(
   st: AdapterState,
   turn: {
@@ -155,7 +116,7 @@ export async function runFallbackTurn(
   const { session, data, turnRowId, boundStreamId } = turn;
   // Fallback path (no orchestrator): drive the model provider directly
   // in the background, persisting each event so terminal state stays
-  // recoverable. Hydrate the prior transcript (§4.4) and pass the full
+  // recoverable. Hydrate the prior transcript and pass the full
   // message list to the model so context carries across turns.
   const controller = new AbortController();
   if (boundStreamId !== undefined) {
@@ -228,14 +189,10 @@ export async function runFallbackTurn(
   }
 }
 /** Usage as of a terminal cut (abort/error), when the model reported any. */
-
-/** Usage as of a terminal cut (abort/error), when the model reported any. */
 export function cutUsageFor(deps: HttpDeps, sessionId: string): unknown {
   const f = deps.onUsageFor;
   return typeof f === "function" ? f(sessionId) : undefined;
 }
-
-/** Settle-sync the adapter's turn row (best effort). */
 
 /** Settle-sync the adapter's turn row (best effort). */
 export async function settleTurnRow(
@@ -251,8 +208,6 @@ export async function settleTurnRow(
     // settle-sync is best effort
   }
 }
-
-/** Persist one turn event row (best effort). */
 
 /** Persist one turn event row (best effort). */
 export async function persistTurnEvent(
@@ -273,21 +228,6 @@ export async function persistTurnEvent(
   }
 }
 
-/** Revive (§4.5): a turn on a dormant session implicitly reopens it. */
-
-/** Frame + fan out the adapter-synthesized `turn.aborted` terminal. */
-
-/**
- * Orchestrator turn path: bind the turn handle to the abort-on-disconnect
- * stream (when opted in), then settle the row on completion and synthesize
- * the terminal event on failure (`finishTurnError`).
- */
-
-/**
- * Orchestrator turn path: bind the turn handle to the abort-on-disconnect
- * stream (when opted in), then settle the row on completion and synthesize
- * the terminal event on failure (`finishTurnError`).
- */
 export async function runOrchestratorTurn(
   st: AdapterState,
   turn: {
@@ -314,21 +254,6 @@ export async function runOrchestratorTurn(
   );
 }
 
-/**
- * Start a turn in the background: the messages POST returns 202 at once
- * and progress/terminal events arrive on the session stream. The server
- * owns the turn — a stream disconnect detaches, never aborts, unless the
- * turn opted into `abortOnDisconnect` bound to a specific `streamId`
- * (the `stream.hello` id emitted on that stream).
- */
-
-/**
- * Start a turn in the background: the messages POST returns 202 at once
- * and progress/terminal events arrive on the session stream. The server
- * owns the turn — a stream disconnect detaches, never aborts, unless the
- * turn opted into `abortOnDisconnect` bound to a specific `streamId`
- * (the `stream.hello` id emitted on that stream).
- */
 export async function startTurn(
   st: AdapterState,
   res: ServerResponse,
@@ -336,7 +261,7 @@ export async function startTurn(
   data: Record<string, unknown>,
   requestId: string | undefined,
 ): Promise<void> {
-  // Revive (§4.5): a turn on a dormant session implicitly reopens it.
+  // Revive: a turn on a dormant session implicitly reopens it.
   session = await reviveSessionForTurn(st, session);
   const invalid = validateTurnInput(st, session, data);
   if (invalid !== null) {
@@ -399,7 +324,7 @@ export async function startTurn(
   } else {
     // Fallback path (no orchestrator): drive the model provider directly in
     // the background, persisting each event so terminal state stays
-    // recoverable. Hydrate the prior transcript (§4.4) and pass the full
+    // recoverable. Hydrate the prior transcript and pass the full
     // message list to the model so context carries across turns.
     void runFallbackTurn(
       st,

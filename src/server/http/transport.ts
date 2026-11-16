@@ -29,7 +29,7 @@ import { randomUUID } from "node:crypto";
 import { sendJson, sendError, sendErrorWithRequestId, sendMessage, checkAuth } from "./reply.ts";
 import { handleCapabilities, handleAgentCli, handleSessionCreate } from "./routes.ts";
 
-/** Machine-readable error codes (PLAN §5.5) with HTTP status mapping. */
+/** Machine-readable error codes with HTTP status mapping. */
 export const ERROR_STATUS: Record<string, number> = {
   invalid_request: 400,
   unknown_model: 400,
@@ -52,14 +52,10 @@ export async function readBody(req: IncomingMessage, limit = 1_000_000): Promise
 }
 
 /** Split `/v1/...` path into segments (query string stripped). */
-
-/** Split `/v1/...` path into segments (query string stripped). */
 export function segments(url: string): string[] {
   const path = url.split("?")[0] ?? "";
   return path.split("/").filter(Boolean);
 }
-
-/** Coerce a store row (sqlite) into the adapter's session shape. */
 
 /** Coerce a store row (sqlite) into the adapter's session shape. */
 export function normalizeSession(row: unknown): SessionRecord {
@@ -76,7 +72,7 @@ export function normalizeSession(row: unknown): SessionRecord {
 }
 
 /**
- * §4.6 wire shape for one transcript message: the store's snake_case columns
+ * Wire shape for one transcript message: the store's snake_case columns
  * (`tool_call_id`, `tool_calls`) become camelCase (`toolCallId`, `toolCalls`);
  * only the contract's known keys cross the boundary. The store itself stays
  * snake_case — its rows feed the model hydrate (OpenAI message shape) — the
@@ -96,13 +92,6 @@ export function channelFor(id: string): string {
  * (serve.ts/tests). No emit capability means no stream delivery — turns
  * still settle.
  */
-
-/**
- * Publish an event for a session: the bus boundary only exposes on/off;
- * EventEmitter-style emit is used when the injected bus is an EventEmitter
- * (serve.ts/tests). No emit capability means no stream delivery — turns
- * still settle.
- */
 export function publish(st: AdapterState, sessionId: string, ev: SseEnvelope): void {
   (st.bus as unknown as { emit?: (ch: string, ev: SseEnvelope) => void } | undefined)?.emit?.(
     channelFor(sessionId),
@@ -112,7 +101,6 @@ export function publish(st: AdapterState, sessionId: string, ev: SseEnvelope): v
 
 /** Look a session up in the store (preferred) or the in-memory fallback. */
 
-/** Look a session up in the store (preferred) or the in-memory fallback. */
 export async function lookupSession(st: AdapterState, id: string): Promise<SessionRecord | null> {
   if (st.hasStore) {
     const row = await st.store!.getSession(id);
@@ -121,31 +109,6 @@ export async function lookupSession(st: AdapterState, id: string): Promise<Sessi
   return st.sessions.get(id) ?? null;
 }
 
-/** Bearer-token gate for the contract; unset = auth disabled. */
-
-/**
- * Create the v1 messages/stream adapter (PLAN §5.2–§5.5). All boundaries are
- * injected so tests can fake the store, orchestrator, event bus, model
- * provider and turn-engine factory.
- *
- * HTTP surface (four routes only — everything else is a message `type`):
- *   GET  /v1/capabilities               bootstrap discovery
- *   POST /v1/sessions                   bootstrap session creation
- *   GET  /v1/sessions/{id}/stream       long-lived SSE event channel
- *   POST /v1/sessions/{id}/messages     typed message dispatch
- */
-
-/**
- * Create the v1 messages/stream adapter (PLAN §5.2–§5.5). All boundaries are
- * injected so tests can fake the store, orchestrator, event bus, model
- * provider and turn-engine factory.
- *
- * HTTP surface (four routes only — everything else is a message `type`):
- *   GET  /v1/capabilities               bootstrap discovery
- *   POST /v1/sessions                   bootstrap session creation
- *   GET  /v1/sessions/{id}/stream       long-lived SSE event channel
- *   POST /v1/sessions/{id}/messages     typed message dispatch
- */
 export function createHttpServer(deps: HttpDeps): Server {
   // Per-daemon configuration injection (see `config.ts`): the bearer token
   // gate. It lives in this factory's closure — concurrent daemons (tests)
@@ -211,29 +174,6 @@ export function createHttpServer(deps: HttpDeps): Server {
   });
 }
 
-/** Reply envelope: the message type echoes the request's, with requestId. */
-
-/**
- * GET /v1/capabilities — bootstrap discovery. The client may name the model
- * it will use (`?model=`); the server resolves that model's context window
- * from the models.dev cache. A request without `?model=` gets the plain
- * advertisement.
- */
-
-/**
- * POST /v1/agent-cli — CLI command dispatch for the agent shim: parse a
- * `{ command, args }` body, resolve the command through the CLI registry,
- * and answer in plain text (400 invalid, 404 unknown, 200 output, 500
- * execution failure).
- */
-
-/**
- * POST /v1/sessions — bootstrap creation. The body is optional:
- * `{ title?, system? }` (§4.6) — `system` seeds the first transcript
- * message (role `system`) so it is part of every turn's hydrate. Store
- * backed when available, in-memory fallback otherwise.
- */
-
 export async function handle(
   st: AdapterState,
   req: IncomingMessage,
@@ -279,9 +219,6 @@ export async function handle(
   }
 }
 
-/** POST /v1/sessions/{id}/messages — typed dispatch. */
-
-/** POST /v1/sessions/{id}/messages — typed dispatch. */
 export async function dispatchMessage(
   st: AdapterState,
   req: IncomingMessage,

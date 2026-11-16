@@ -49,7 +49,7 @@ export function validateTurnInput(
   return bad === undefined ? null : bad[1];
 }
 
-/** Revive (§4.5): a turn on a dormant session implicitly reopens it. */
+/** Revive: a turn on a dormant session implicitly reopens it. */
 export async function reviveSessionForTurn(
   st: AdapterState,
   session: SessionRecord,

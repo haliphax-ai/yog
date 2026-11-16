@@ -86,7 +86,7 @@ export async function handleAgentCli(req: IncomingMessage, res: ServerResponse):
 
 /**
  * POST /v1/sessions — bootstrap creation. The body is optional:
- * `{ title?, system? }` (§4.6) — `system` seeds the first transcript
+ * `{ title?, system? }` — `system` seeds the first transcript
  * message (role `system`) so it is part of every turn's hydrate. Store
  * backed when available, in-memory fallback otherwise.
  */

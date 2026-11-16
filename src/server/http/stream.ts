@@ -47,8 +47,6 @@ export async function replayRunningTurnEvents(
 }
 
 /** GET /v1/sessions/{id}/stream — the long-lived SSE event channel. */
-
-/** GET /v1/sessions/{id}/stream — the long-lived SSE event channel. */
 export async function streamSession(
   st: AdapterState,
   req: IncomingMessage,
@@ -87,8 +85,6 @@ export async function streamSession(
 }
 
 /** Abort every turn bound to a closed stream (best effort per entry). */
-
-/** Abort every turn bound to a closed stream (best effort per entry). */
 export function abortBoundTurns(
   bound: Array<{ handle?: TurnHandleLike; controller?: AbortController }>,
 ): void {
@@ -108,19 +104,6 @@ export function abortBoundTurns(
   }
 }
 
-/**
- * Wire the stream's live-event plumbing: the bus subscription (dropping
- * writes to a dead socket), the 15s heartbeat, and the close handler that
- * unsubscribes and aborts bound turns. Returns the close handler so the
- * request and response sockets can both register it.
- */
-
-/**
- * Wire the stream's live-event plumbing: the bus subscription (dropping
- * writes to a dead socket), the 15s heartbeat, and the close handler that
- * unsubscribes and aborts bound turns. Returns the close handler so the
- * request and response sockets can both register it.
- */
 export function streamBoundTurns(
   st: AdapterState,
   res: ServerResponse,
