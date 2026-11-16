@@ -116,25 +116,40 @@ export type { TokenProfile };
  * model can see the conversation without inheriting OpenAI chat-history
  * semantics (the summary turn is orphaned — it is not a continuation).
  */
+
+/** Append a `tool_calls: …` JSON line when the row carries tool calls. */
+function appendToolCalls(body: string, row: Record<string, unknown>): string {
+  if (!Array.isArray(row.tool_calls) || row.tool_calls.length === 0) return body;
+  return body + (body === "" ? "" : "\n") + "tool_calls: " + JSON.stringify(row.tool_calls);
+}
+
+/** Append a `tool_call_id: …` line when the row completes a tool call. */
+function appendToolCallId(body: string, row: Record<string, unknown>): string {
+  if (row.tool_call_id === undefined) return body;
+  return `${body}\ntool_call_id: ${String(row.tool_call_id)}`;
+}
+
+/** Prefix the body with the sender's name when the row carries one. */
+function prependName(body: string, row: Record<string, unknown>): string {
+  if (typeof row.name !== "string" || row.name === "") return body;
+  return `${row.name} — ${body}`;
+}
+
+/** Serialize one transcript row as a readable `[n] role: body` line. */
+function serializeRow(index: number, row: Record<string, unknown>): string {
+  const seq = `[${index + 1}] `;
+  const role = String(row.role ?? "?");
+  const content = typeof row.content === "string" ? (row.content as string) : "";
+  let body = appendToolCalls(content, row);
+  body = appendToolCallId(body, row);
+  body = prependName(body, row);
+  const trimmed = body.trim();
+  return `${seq}${role}: ${trimmed === "" ? "(no content)" : trimmed}`;
+}
+
 export function serializeTranscript(rows: Array<Record<string, unknown>>): string {
   if (rows.length === 0) return "(empty session — no transcript rows yet)";
-  const lines: string[] = [];
-  for (const [index, row] of rows.entries()) {
-    const seq = `[${index + 1}] `;
-    const role = String(row.role ?? "?");
-    let body = typeof row.content === "string" ? (row.content as string) : "";
-    if (Array.isArray(row.tool_calls) && row.tool_calls.length > 0) {
-      body += (body === "" ? "" : "\n") + "tool_calls: " + JSON.stringify(row.tool_calls);
-    }
-    if (row.tool_call_id !== undefined) {
-      body += `\ntool_call_id: ${String(row.tool_call_id)}`;
-    }
-    if (typeof row.name === "string" && row.name !== "") {
-      body = `${row.name} — ${body}`;
-    }
-    lines.push(`${seq}${role}: ${body.trim() === "" ? "(no content)" : body.trim()}`);
-  }
-  return lines.join("\n");
+  return rows.map((row, index) => serializeRow(index, row)).join("\n");
 }
 
 /** Marker inserted where the middle of a too-long transcript is dropped
