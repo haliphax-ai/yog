@@ -30,6 +30,8 @@ export interface WorkerPoolRunOptions {
   readonly restore?: Partial<ShellSnapshot>;
   /** Loaded-skill `scripts/` directories prepended to PATH for this run. */
   readonly extraPath?: readonly string[];
+  /** The agent-CLI shim directory (`<mount>/bin`) prepended to PATH first. */
+  readonly cliBin?: string;
 }
 
 /** Resolve the pool size from an explicit option; undefined = CPU default. */
@@ -82,7 +84,13 @@ export class WorkerPool {
     try {
       const client = clients[idx];
       if (!client) throw new Error(`no worker at index ${idx}`);
-      return await client.runBash(script, opts?.stateDir, opts?.restore, opts?.extraPath);
+      return await client.runBash(
+        script,
+        opts?.stateDir,
+        opts?.restore,
+        opts?.extraPath,
+        opts?.cliBin,
+      );
     } finally {
       this.#inFlight[idx] = (this.#inFlight[idx] ?? 1) - 1;
       if (this.#running.get(sessionId) === idx) this.#running.delete(sessionId);

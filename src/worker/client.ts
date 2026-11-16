@@ -27,6 +27,11 @@ export interface AgentSpawnOptions {
   readonly uid?: number;
   readonly gid?: number;
   readonly home?: string;
+  /**
+   * The agent-CLI shim directory (`<mount>/bin`) propagated to every
+   * `bash.run` request (see `BashRunRequest.cliBin`).
+   */
+  readonly cliBin?: string;
 }
 
 /** Current agent-spawn options (set by the composition root). */
@@ -148,6 +153,7 @@ export class WorkerClient {
     stateDir?: string,
     restore?: Partial<ShellSnapshot>,
     extraPath?: readonly string[],
+    cliBin?: string,
   ): Promise<WorkerResponse> {
     if (this.#closed) {
       return Promise.reject(new Error("worker closed"));
@@ -159,6 +165,7 @@ export class WorkerClient {
       ...(stateDir !== undefined ? { stateDir } : {}),
       ...(restore ? { restore } : {}),
       ...(extraPath && extraPath.length > 0 ? { extraPath: [...extraPath] } : {}),
+      ...(cliBin !== undefined ? { cliBin } : {}),
     };
     this.#inFlightIds.add(id);
     return new Promise((resolve, reject) => {
