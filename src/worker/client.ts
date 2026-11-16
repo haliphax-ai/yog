@@ -52,6 +52,16 @@ export function shutdownAllWorkers(): Promise<void> {
   return Promise.all(all.map((c) => c.close().catch(() => {}))).then(() => undefined);
 }
 
+/**
+ * True when the injected agent spawn options ask for a real uid/gid drop:
+ * both ids are set, both are non-root, and at least one differs from the
+ * current process (an equal target would make the drop a no-op).
+ */
+function shouldDropToAgent(opts: AgentSpawnOptions, curUid: number, curGid: number): boolean {
+  const { uid, gid } = opts;
+  return (uid ?? 0) > 0 && (gid ?? 0) > 0 && (uid !== curUid || gid !== curGid);
+}
+
 export class WorkerClient {
   readonly #child: ChildProcess;
   readonly #pending = new Map<
@@ -84,16 +94,9 @@ export class WorkerClient {
     // from the current ids; if the drop is not possible (no privilege), fall
     // back to running the worker as the harness user so local/unprivileged
     // runs keep working.
-    const agentUid = agentSpawnOpts.uid;
-    const agentGid = agentSpawnOpts.gid;
     const curUid = process.getuid?.() ?? -1;
     const curGid = process.getgid?.() ?? -1;
-    const dropToAgent =
-      agentUid !== undefined &&
-      agentGid !== undefined &&
-      agentUid > 0 &&
-      agentGid > 0 &&
-      (agentUid !== curUid || agentGid !== curGid);
+    const dropToAgent = shouldDropToAgent(agentSpawnOpts, curUid, curGid);
 
     let child: ChildProcess;
     if (dropToAgent) {
@@ -104,8 +107,8 @@ export class WorkerClient {
       const agentHome = agentSpawnOpts.home ?? "/home/agent";
       const dropOpts: SpawnOptions = {
         ...baseOpts,
-        uid: agentUid,
-        gid: agentGid,
+        uid: agentSpawnOpts.uid,
+        gid: agentSpawnOpts.gid,
         cwd: agentHome,
         // The worker (and its bash children) see the agent's home so rc
         // sourcing and shell-state files land in the same place regardless
