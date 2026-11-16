@@ -4,7 +4,7 @@ import {
   extractCalibrationSamples,
   fitRate,
   type CalibSample,
-} from "../src/calibrate.ts";
+} from "../src/calibration.ts";
 
 describe("extractCalibrationSamples", () => {
   const toolResult = (turnId: number, usage: unknown, extra: Record<string, unknown> = {}) => ({

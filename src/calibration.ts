@@ -1,6 +1,9 @@
 /**
- * `yog calibrate <sessionId>` — fit a tokenx profile for a session's model
- * from the session's own recorded traffic.
+ * Calibration: fit a tokenx profile from a session's own recorded traffic.
+ *
+ * `yog calibrate <sessionId>` consumes this module from the CLI side
+ * (`src/server/calibrate-cli.ts`); the pure fitting here is pinned by
+ * `test/calibrate.test.ts`.
  *
  * Offline and DB-only: reads the sessions store, fits
  * `tokens = intercept + rate x chars` over *trustworthy* rounds, writes
@@ -43,29 +46,78 @@ export interface CalibrationFit {
  * construction), rounds with `cached_tokens` 0/absent, and reconciled
  * `native_tokens_prompt` overrides when the event log carries them.
  */
+
+/**
+ * Per-turn usage recorded on `tool.result` events: the reported
+ * `prompt_tokens`, the cached-token count from the details blob, and the
+ * reconciled `native_tokens_prompt` override (L2) when present.
+ */
+interface RoundUsage {
+  prompt?: number;
+  cached?: number;
+  native?: number;
+}
+
+/** Remove one usage field (e.g. `native_tokens_prompt`) from a tool.result payload. */
+function dropPayloadField(payload: Record<string, unknown>, field: string): void {
+  delete payload[field];
+}
+
+/** Coerce a payload member that should be a finite number to `number | undefined`. */
+function payloadNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** Extract the `(prompt, cached, native)` usage triple from a tool.result event. */
+function roundUsageFromEvent(ev: {
+  turn_id: number;
+  payload: Record<string, unknown>;
+}): RoundUsage | undefined {
+  const usage = ev.payload.usage as Record<string, unknown> | undefined;
+  if (usage === undefined) return undefined;
+  const details = usage.prompt_tokens_details as Record<string, unknown> | undefined;
+  return {
+    prompt: payloadNumber(usage.prompt_tokens),
+    cached: payloadNumber(details?.cached_tokens),
+    native: payloadNumber(ev.payload.native_tokens_prompt),
+  };
+}
+
+/** Index `tool.result` events by turn for per-round attribution. */
+function usageByTurn(
+  events: ReadonlyArray<{ turn_id: number; type: string; payload: Record<string, unknown> }>,
+): Map<number, RoundUsage> {
+  const byTurn = new Map<number, RoundUsage>();
+  for (const ev of events) {
+    if (ev.type !== "tool.result") continue;
+    // L2 reconciliation carries native counts at the payload top level;
+    // extract them before dropping the field from the shared object.
+    const native = payloadNumber(ev.payload.native_tokens_prompt);
+    dropPayloadField(ev.payload, "native_tokens_prompt");
+    const usage = roundUsageFromEvent(ev);
+    if (native === undefined && usage === undefined) continue;
+    const merged: RoundUsage = usage ?? {};
+    if (native !== undefined && merged.native === undefined) merged.native = native;
+    byTurn.set(ev.turn_id, { ...merged, ...byTurn.get(ev.turn_id) });
+  }
+  return byTurn;
+}
+
+/**
+ * Extract calibration samples from one session's event log.
+ *
+ * Rounds are reconstructed exactly as the incident analysis did: cumulative
+ * `content + tool_calls_json` length of all transcript rows *before* each
+ * assistant round, paired with the `usage.prompt_tokens` that round's
+ * `tool.result` events carried. Trust filter: round 1 of any turn (cold by
+ * construction), rounds with `cached_tokens` 0/absent, and reconciled
+ * `native_tokens_prompt` overrides when the event log carries them.
+ */
 export function extractCalibrationSamples(
   rows: Array<Record<string, unknown>>,
   events: Array<{ turn_id: number; type: string; payload: Record<string, unknown> }>,
 ): CalibSample[] {
-  // tool.result events by turn: (prompt_tokens, cached, nativeOverride)
-  type RoundUsage = { prompt?: number; cached?: number; native?: number };
-  const byTurn = new Map<number, RoundUsage>();
-  for (const ev of events) {
-    if (ev.type !== "tool.result") continue;
-    const usage = ev.payload.usage as Record<string, unknown> | undefined;
-    if (usage === undefined) continue;
-    const cur: RoundUsage = byTurn.get(ev.turn_id) ?? {};
-    const p = usage.prompt_tokens;
-    if (typeof p === "number" && cur.prompt === undefined) cur.prompt = p;
-    const details = usage.prompt_tokens_details as Record<string, unknown> | undefined;
-    const cached = details?.cached_tokens;
-    if (typeof cached === "number" && cur.cached === undefined) cur.cached = cached;
-    // L2 reconciliation writes native counts under a known key when present.
-    const native = (ev.payload as Record<string, unknown>).native_tokens_prompt;
-    if (typeof native === "number" && cur.native === undefined) cur.native = native;
-    byTurn.set(ev.turn_id, cur);
-  }
-
+  const byTurn = usageByTurn(events);
   // Cumulative chars; the usage recorded on turn T's tool.result events
   // measures the request that *preceded* the round — i.e. all rows before
   // turn T's assistant row. Snapshot the size at the boundary, then add the
@@ -76,29 +128,38 @@ export function extractCalibrationSamples(
   for (const row of rows) {
     const role = String(row.role ?? "");
     const turnId = typeof row.turn_id === "number" ? row.turn_id : undefined;
-    if (role === "assistant" && turnId !== undefined) {
-      const u = byTurn.get(turnId);
-      if (u !== undefined) {
-        const tokens = u.native ?? u.prompt;
-        // Cold-round filter: cached 0/absent (or native override, which is
-        // the real total by construction). Warm rounds are skipped — they
-        // report only the uncached tail and would poison the fit.
-        const cold = u.native !== undefined || u.cached === undefined || u.cached === 0;
-        if (tokens !== undefined && cold) {
-          samples.push({ chars, tokens, tier: u.native !== undefined ? "native" : "reported" });
-        }
-      }
-    }
-    const content = typeof row.content === "string" ? (row.content as string) : "";
-    const calls =
-      row.tool_calls_json !== undefined && row.tool_calls_json !== null
-        ? String(row.tool_calls_json)
-        : Array.isArray(row.tool_calls)
-          ? JSON.stringify(row.tool_calls)
-          : "";
-    chars += content.length + calls.length;
+    const usage = role === "assistant" && turnId !== undefined ? byTurn.get(turnId) : undefined;
+    const sample = calibrationSample(usage, chars);
+    if (sample !== undefined) samples.push(sample);
+    chars += rowChars(row);
   }
   return samples;
+}
+
+/** Serialized request size of one transcript row, in characters. */
+function rowChars(row: Record<string, unknown>): number {
+  const content = typeof row.content === "string" ? row.content : "";
+  const calls =
+    row.tool_calls_json !== undefined && row.tool_calls_json !== null
+      ? String(row.tool_calls_json)
+      : Array.isArray(row.tool_calls)
+        ? JSON.stringify(row.tool_calls)
+        : "";
+  return content.length + calls.length;
+}
+
+/**
+ * One calibration sample from an assistant round's usage record: reported
+ * tokens win unless a reconciled native count exists, and cache-warm rounds
+ * are skipped (they report only the uncached tail and would poison the fit).
+ * Returns `undefined` when the round carries no trustworthy usage.
+ */
+function calibrationSample(usage: RoundUsage | undefined, chars: number): CalibSample | undefined {
+  if (usage === undefined) return undefined;
+  const tokens = usage.native ?? usage.prompt;
+  const cold = usage.native !== undefined || usage.cached === undefined || usage.cached === 0;
+  if (tokens === undefined || !cold) return undefined;
+  return { chars, tokens, tier: usage.native !== undefined ? "native" : "reported" };
 }
 
 /** Least-squares fit of `tokens = intercept + rate x chars` over samples. */

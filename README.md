@@ -43,7 +43,7 @@ src/
                     and tools to touch the host filesystem and subprocesses
                     (direct node:fs / node:child_process imports elsewhere
                     are blocked by dependency-cruiser).
-  calibrate.ts      Offline token-profile fitting (pure; pinned by tests).
+  calibration.ts    Offline token-profile fitting (pure; pinned by tests).
   log.ts            pino loggers (server to stdout, client to stderr).
   fuse-native.d.ts  Ambient typings for the untyped fuse-native package.
   server/           The long-lived HTTP/SSE daemon: composition root

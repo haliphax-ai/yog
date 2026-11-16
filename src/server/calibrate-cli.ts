@@ -3,7 +3,7 @@
  * resolve config paths, open the sessions store, extract cold-round
  * samples, fit, gate, and write `profiles/<slug>.json`. Lives in the
  * server domain because it composes the store + config like the daemon
- * does; the pure fit lives in src/calibrate.ts (pinned by tests).
+ * does; the pure fit lives in src/calibration.ts (pinned by tests).
  */
 import { resolveConfig } from "../config.ts";
 import { overlaySlug } from "../toolkit/index.ts";
@@ -11,7 +11,7 @@ import {
   calibrateFromSamples,
   extractCalibrationSamples,
   type CalibrateOutcome,
-} from "../calibrate.ts";
+} from "../calibration.ts";
 import { SessionStore, openSessionsDb } from "./store/sessions.ts";
 import { logger } from "../log.ts";
 import { join } from "node:path";
@@ -35,7 +35,7 @@ export async function runCalibrate(args: readonly string[]): Promise<number> {
     logger.error(usage);
     return 2;
   }
-  const config = await resolveConfig({ ...(configPath !== undefined ? { configPath } : {}) });
+  const config = await resolveConfig(configPath !== undefined ? { configPath } : {});
   const model = config.model;
   const db = await openSessionsDb(join(config.stateRoot, "sessions.db"));
   const store = new SessionStore(db);
