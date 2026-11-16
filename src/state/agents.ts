@@ -39,24 +39,22 @@ export function harnessStateRoot(root: string = "/var/lib/yog"): string {
 }
 
 /**
+ * True when `sessionId` cannot serve as a single, safe path segment: empty,
+ * a dot-segment, or containing a path separator / NUL.
+ */
+function isUnsafeSessionId(s: string): boolean {
+  return ["", ".", ".."].includes(s) || /[/\\]/.test(s) || s.includes("\0");
+}
+
+/**
  * Derive the harness (persistent-shell) state directory for a session:
- * `<root>/harness/<sessionId>`.
- *
- * The session id becomes a single path segment, so it must be a plain
- * file-name token: the store's UUIDs, base62 ids, and the `daemon`
- * fallback all qualify, while separators or dot-segments (which would
- * escape the harness root) are rejected loudly instead of being
- * sanitized into a different session's directory.
+ * `<root>/harness/<sessionId>`. The session id must be a plain file-name
+ * token; separators or dot-segments (which would escape the harness root)
+ * are rejected loudly instead of being sanitized into a different
+ * session's directory.
  */
 export function harnessStateDir(sessionId: string, root: string = "/var/lib/yog"): string {
-  if (
-    sessionId === "" ||
-    sessionId === "." ||
-    sessionId === ".." ||
-    sessionId.includes("/") ||
-    sessionId.includes("\\") ||
-    sessionId.includes("\0")
-  ) {
+  if (isUnsafeSessionId(sessionId)) {
     throw new Error(`invalid session id for harness state dir: ${JSON.stringify(sessionId)}`);
   }
   return `${harnessStateRoot(root)}/${sessionId}`;
