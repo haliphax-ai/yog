@@ -211,17 +211,36 @@ export function resolveRateLimitPolicy(
 export function isRateLimitError(err: unknown): boolean {
   if (err === null || typeof err !== "object") return false;
   const rec = err as Record<string, unknown>;
-  if (rec.status === 429 || rec.statusCode === 429) return true;
-  const code = typeof rec.code === "string" ? rec.code : undefined;
-  if (code === "rate_limit_exceeded" || code === "rate_limited") return true;
+  if (hasRateLimitStatus(rec)) return true;
+  if (isRateLimitCode(topLevelCodeOf(rec))) return true;
   if (err instanceof Error && err.name === "RateLimitError") return true;
-  // Some SDK/proxy errors nest the body: { error: { code, type } }.
+  return isRateLimitCode(innerCodeOf(rec));
+}
+
+/** `true` when `code` names a provider rate limit. */
+function isRateLimitCode(code: string | undefined): boolean {
+  return code === "rate_limit_exceeded" || code === "rate_limited";
+}
+
+/** The top-level `code` field (string) or undefined. */
+function topLevelCodeOf(rec: Record<string, unknown>): string | undefined {
+  return typeof rec.code === "string" ? rec.code : undefined;
+}
+
+/** `true` when the error record carries a 429 in any known shape. */
+function hasRateLimitStatus(rec: Record<string, unknown>): boolean {
+  return rec.status === 429 || rec.statusCode === 429;
+}
+
+/**
+ * The rate-limit code nested inside a provider body (`error.code`), when
+ * the body exists and carries a string code; undefined otherwise.
+ */
+function innerCodeOf(rec: Record<string, unknown>): string | undefined {
   const inner = rec.error;
-  if (inner !== null && typeof inner === "object") {
-    const innerCode = (inner as Record<string, unknown>).code;
-    if (innerCode === "rate_limit_exceeded" || innerCode === "rate_limited") return true;
-  }
-  return false;
+  if (inner === null || typeof inner !== "object") return undefined;
+  const code = (inner as Record<string, unknown>).code;
+  return typeof code === "string" ? code : undefined;
 }
 
 type HeaderGetter = (name: string) => string | undefined;
