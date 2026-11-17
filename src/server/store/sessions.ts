@@ -2,6 +2,8 @@ import knex from "knex";
 import { randomUUID } from "node:crypto";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import type { TurnUsage } from "../../turn/sink.ts";
+import { transcriptRows, type PagingOptions, type TranscriptOptions } from "./transcript.ts";
+import { eventUsageMap, turnUsageEntry } from "./usage.ts";
 import { logger } from "../../log.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -22,7 +24,7 @@ export class SessionStore {
    * Compose a store over an already-open knex handle (as built by
    * {@link openSessionsDb}, which runs the startup migration chain).
    * Prefer {@link SessionStore.open} — it is the only supported way to
-   * turn a filename into a usable store (§4.1: knex migrations own schema
+   * turn a filename into a usable store (knex migrations own schema
    * truth; there is no second DDL path).
    */
   constructor(db: knex.Knex) {
@@ -32,7 +34,7 @@ export class SessionStore {
   /**
    * Open the sessions database at `filename` and return a usable store.
    *
-   * The single open path (§4.1): knex handle → startup migrations
+   * The single open path: knex handle → startup migrations
    * (`migrate.latest()`, adopting fresh and pre-existing volumes alike) →
    * startup recovery (prune past-retention dormant sessions, interrupt
    * turns left running by a crash). Everything schema-related happens
@@ -60,7 +62,7 @@ export class SessionStore {
       detached_at: null,
     });
     // `system` seeds the first transcript message (role `system`) so it is
-    // part of every turn's hydrate (§4.6). Written here so the seed is
+    // part of every turn's hydrate. Written here so the seed is
     // present before any turn runs and is itself a persisted transcript row.
     if (opts.system !== undefined && opts.system !== null) {
       await this.appendMessages(id, [{ role: "system", content: String(opts.system) }], null);
@@ -78,7 +80,7 @@ export class SessionStore {
   }
 
   /**
-   * Detach a session (§4.5): advisory "done for now". Status `open` →
+   * Detach a session: advisory "done for now". Status `open` →
    * `dormant`, `detached_at` stamped. Nothing is forfeited — transcript,
    * turns, events, and agentfs shell state all stay. Idempotent: a second
    * call on an already-dormant session is a no-op (the row is already
@@ -97,7 +99,7 @@ export class SessionStore {
   }
 
   /**
-   * Revive a dormant session (§4.5): status `dormant` → `open`,
+   * Revive a dormant session: status `dormant` → `open`,
    * `detached_at` cleared. Retention clock resets (a pruned session is the
    * only truly terminal state). Idempotent on an already-open session.
    */
@@ -109,7 +111,7 @@ export class SessionStore {
   }
 
   /**
-   * Immediate irreversible delete (§4.5 `?purge=true`). Removes the session
+   * Immediate irreversible delete (`?purge=true`). Removes the session
    * row and cascades to turns, turn_events, and session_messages. The
    * `session_messages` FK has ON DELETE CASCADE; the other tables do not, so
    * they are deleted explicitly. Returns the number of session rows deleted
@@ -147,7 +149,7 @@ export class SessionStore {
       finished_at: finished,
       duration_ms: finished === null ? null : finished - now,
     });
-    // Implicit revive (§4.5): a turn on a dormant session flips it back to
+    // Implicit revive: a turn on a dormant session flips it back to
     // `open` and clears `detached_at` (retention clock reset). Store-owned,
     // best-effort (a missing/detached row must not fail the turn), and
     // idempotent — on an already-open session the guarded UPDATE matches
@@ -217,7 +219,7 @@ export class SessionStore {
   }
 
   /**
-   * Append a batch of messages to a session's canonical transcript (§4.2).
+   * Append a batch of messages to a session's canonical transcript.
    *
    * `seq` is assigned per message from `MAX(seq)+1` for the session and
    * **never resets** — it continues across dormancy and revival, so a
@@ -225,7 +227,7 @@ export class SessionStore {
    * All inserts run in a single transaction: either every row lands or
    * none does, and the caller-visible rows carry the assigned seqs.
    *
-   * NOTE (§4.8): unlike `addEvent`, which infers the turn as "the latest
+   * NOTE: unlike `addEvent`, which infers the turn as "the latest
    * turn of the session", transcript rows are addressed by explicit ids
    * and seqs — do not copy the infer-latest-turn pattern here. A turn that
    * rehydrates a dormant session still appends with the session's next seq
@@ -284,7 +286,7 @@ export class SessionStore {
   }
 
   /**
-   * Replace a session's transcript with a fresh message batch (§compaction).
+   * Replace a session's transcript with a fresh message batch (compaction).
    * Used by compaction/handoff: after the summary artifact is produced, the
    * prior history is discarded and the new transcript starts from the
    * artifact. Runs in one transaction; `seq` restarts at 1 for the fresh
@@ -335,7 +337,7 @@ export class SessionStore {
   }
 
   /**
-   * Patch one transcript row in place (§shake). Used by `/shake` rewrite: a
+   * Patch one transcript row in place (shake). Used by `/shake` rewrite: a
    * tool-call's arguments or a tool result's content may be truncated after
    * the fact. Only the columns in `patch` change; seq/turnId/created_at are
    * untouched so the display timeline remains stable.
@@ -353,7 +355,7 @@ export class SessionStore {
   }
 
   /**
-   * Read a session's canonical transcript (§4.2).
+   * Read a session's canonical transcript.
    *
    * Returns ordered rows mapped to `ChatCompletionMessageParam`-shaped
    * objects, plus metadata (`seq`, `turnId`, `ts`) so callers can address
@@ -370,57 +372,38 @@ export class SessionStore {
    */
   async getTranscript(
     sessionId: string,
-    opts: {
-      afterSeq?: number;
-      limit?: number;
-      roundAttribution?: Map<number, { usage?: unknown; promptDelta?: number }>;
-      resultTokensByCall?: Map<string, number>;
-    } = {},
+    opts: TranscriptOptions & PagingOptions = {},
+  ): Promise<any[]> {
+    const rows = await this.readTranscriptRows(sessionId, opts);
+    return transcriptRows(rows, opts);
+  }
+
+  /**
+   * Page the transcript rows: `afterSeq` pages forward from a
+   * known seq, `limit` caps the batch. Pass neither for the full
+   * transcript from the start.
+   */
+  private async readTranscriptRows(
+    sessionId: string,
+    opts: Pick<PagingOptions, "afterSeq" | "limit">,
   ): Promise<any[]> {
     const afterSeq = opts.afterSeq ?? 0;
     const limit = opts.limit;
-    const attribution = opts.roundAttribution;
-    const resultTokensByCall = opts.resultTokensByCall;
     const query = this.db("session_messages")
       .where("session_id", sessionId)
       .where("seq", ">", afterSeq)
       .orderBy("seq", "asc");
-    const rows: any[] = limit !== undefined ? await query.limit(limit) : await query;
-    return rows.map((row: any) => {
-      const msg: any = { role: row.role };
-      if (row.content !== null) msg.content = row.content;
-      if (row.tool_call_id !== null) msg.tool_call_id = row.tool_call_id;
-      if (row.name !== null) msg.name = row.name;
-      if (row.tool_calls_json !== null) msg.tool_calls = JSON.parse(row.tool_calls_json);
-      const round = attribution?.get(row.turn_id);
-      if (row.role === "tool" && round !== undefined) {
-        if (round.usage !== undefined) msg.usage = round.usage;
-        if (round.promptDelta !== undefined) msg.promptDelta = round.promptDelta;
-      }
-      if (
-        row.role === "tool" &&
-        typeof row.tool_call_id === "string" &&
-        resultTokensByCall?.has(row.tool_call_id)
-      ) {
-        msg.resultTokens = resultTokensByCall.get(row.tool_call_id);
-      }
-      return {
-        ...msg,
-        seq: row.seq,
-        turnId: row.turn_id,
-        ts: row.created_at,
-      };
-    });
+    return limit !== undefined ? await query.limit(limit) : await query;
   }
 
   /**
-   * Prune dormant sessions past the retention window (§4.5).
+   * Prune dormant sessions past the retention window.
    *
    * The 30-day clock is keyed on `detached_at` (the last detach), not
    * `created_at`: a session that was detached and then revived clears
    * `detached_at`, resetting the clock. A pruned session is the only
    * truly terminal state (`unknown_session` 404 thereafter). Cascade
-   * includes `session_messages` (§4.2).
+   * includes `session_messages`.
    */
   async pruneOldSessions(): Promise<void> {
     const cutoff = Date.now() - RETENTION_DAYS * DAY_MS;
@@ -440,7 +423,7 @@ export class SessionStore {
           await trx("turn_events").where("turn_id", turn.id).del();
         }
         await trx("turns").where("session_id", id).del();
-        // Cascade to the canonical transcript (§4.2): a pruned session
+        // Cascade to the canonical transcript: a pruned session
         // forfeits its messages along with its turns and events.
         await trx("session_messages").where("session_id", id).del();
         await trx("sessions").where("id", id).del();
@@ -484,68 +467,20 @@ export class SessionStore {
   }
 
   /**
-   * Per-turn metrics for the transcript dump (§R1.3): ordered by turn id,
-   * each entry carries the persisted usage when known — falling back to the
-   * stored terminal event usage for turns completed before usage
-   * columns existed (recovery replay) — plus the settled duration when the
-   * turn finished. Best-effort: turns with neither usage nor duration are
-   * omitted, so old volumes simply show no per-turn metrics.
+   * Per-turn metrics for the transcript dump, assembled by
+   * {@link turnUsageEntry} (usage/usage-event parsing lives there): one
+   * entry per turn row, ordered by turn id. See usage.ts for the fallback
+   * and best-effort semantics.
    */
   async listTurnUsages(
     sessionId: string,
   ): Promise<Array<{ turnId: number; usage?: TurnUsage; durationMs?: number }>> {
     const rows = await this.db("turns").where("session_id", sessionId).orderBy("id");
-    // Fallback source: usage embedded in the stored terminal event
-    // payloads (pre-column sessions and the model-provider fallback path,
-    // which never settles turn rows).
-    const events = await this.listEvents(sessionId);
-    const eventUsage = new Map<number, TurnUsage>();
-    for (const ev of events) {
-      if (ev.type !== "turn.finished" && ev.type !== "turn.aborted" && ev.type !== "error")
-        continue;
-      // Event payloads are stored double-encoded (addEvent receives the
-      // JSON string of the event data and stringifies it again), so the
-      // parsed row payload may itself be a JSON string — unwrap it.
-      let payloadObj: unknown = ev.payload;
-      if (typeof payloadObj === "string") {
-        try {
-          payloadObj = JSON.parse(payloadObj);
-        } catch {
-          continue;
-        }
-      }
-      const u = (payloadObj as { usage?: unknown }).usage;
-      if (u === null || typeof u !== "object" || Array.isArray(u)) continue;
-      const rec = u as Record<string, unknown>;
-      const normalized: TurnUsage = {};
-      let has = false;
-      for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"] as const) {
-        const n = rec[key];
-        if (typeof n === "number" && Number.isFinite(n)) {
-          normalized[key] = n;
-          has = true;
-        }
-      }
-      if (has) eventUsage.set(ev.turn_id, normalized);
-    }
+    const eventUsage = eventUsageMap(await this.listEvents(sessionId));
     const out: Array<{ turnId: number; usage?: TurnUsage; durationMs?: number }> = [];
     for (const row of rows) {
-      const colUsage: TurnUsage = {};
-      let hasCol = false;
-      for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"] as const) {
-        const n = row[key];
-        if (typeof n === "number" && Number.isFinite(n)) {
-          colUsage[key] = n;
-          hasCol = true;
-        }
-      }
-      const usage = hasCol ? colUsage : eventUsage.get(row.id);
-      const entry: { turnId: number; usage?: TurnUsage; durationMs?: number } = {
-        turnId: row.id,
-      };
-      if (usage !== undefined) entry.usage = usage;
-      if (typeof row.duration_ms === "number") entry.durationMs = row.duration_ms;
-      if (entry.usage !== undefined || entry.durationMs !== undefined) out.push(entry);
+      const entry = turnUsageEntry(row, eventUsage);
+      if (entry !== undefined) out.push(entry);
     }
     return out;
   }
@@ -573,8 +508,8 @@ function hydrateTurn(row: any): any {
  * Open the sessions database via knex (better-sqlite3 driver).
  *
  * Constructs the knex instance with the configured driver, pool, and
- * migrations directory, then wires the slow-query tripwire (§4.1) and runs
- * the startup migration chain (§4.1: `knex.migrate.latest()` at daemon
+ * migrations directory, then wires the slow-query tripwire and runs
+ * the startup migration chain (`knex.migrate.latest()` at daemon
  * startup — schema truth lives in `src/server/store/migrations/` 001–003,
  * which adopt fresh and pre-existing volumes alike). Resolves with the
  * migrated handle, ready for {@link SessionStore}.
@@ -620,7 +555,7 @@ export async function openSessionsDb(
 }
 
 /**
- * Wire the slow-query tripwire on a knex instance (§4.1).
+ * Wire the slow-query tripwire on a knex instance.
  *
  * Attaches `query` / `query-response` listeners, correlates them by a
  * per-query UUID stamped on the query info at `query` time, computes the
