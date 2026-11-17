@@ -1017,13 +1017,20 @@ export function clearActiveToolCall(sessionId: string): void {
  * stdout sink; the composition root uses `TurnEngine` directly so the sink
  * is explicit.
  */
-export function runTurn(
-  client: OpenAI,
-  modelId: string,
-  messages: ChatCompletionMessageParam[],
-  tools: ToolRegistry,
-  opts: TurnOptions = {},
-  sink?: TurnSink,
-): Promise<void> {
-  return new TurnEngine(sink ?? new StdoutSink()).run(client, modelId, messages, tools, opts);
+export function runTurn(args: {
+  client: OpenAI;
+  modelId: string;
+  messages: ChatCompletionMessageParam[];
+  tools: ToolRegistry;
+  opts?: TurnOptions;
+  sink?: TurnSink;
+}): Promise<void> {
+  const { client, modelId, messages, tools } = args;
+  return new TurnEngine(args.sink ?? new StdoutSink()).run(
+    client,
+    modelId,
+    messages,
+    tools,
+    args.opts ?? {},
+  );
 }
