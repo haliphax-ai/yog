@@ -14,6 +14,7 @@ import {
   toFrontmatter,
 } from "../src/skills/validator.ts";
 import { SkillManager } from "../src/skills/manager.ts";
+import { getInstructions } from "../src/skills/format.ts";
 import { availableSkillsBlock, dispatchSkillsCommand } from "../src/skills/commands.ts";
 import { getCommand, registerCommand, type CliCommand } from "../src/server/cli.ts";
 import { parseYamlSubset } from "../src/skills/parser.ts";
@@ -183,12 +184,12 @@ describe("SkillManager", () => {
     expect(await mgr.load("demo", "s")).toMatchObject({ ok: true, status: "loaded" });
     expect(mgr.getScriptPathsFor("s")).toEqual([join(dir, ".yog", "skills", "demo", "scripts")]);
     expect(mgr.getScriptPathsFor("other")).toEqual([]);
-    const instructions = await mgr.getInstructions("s");
+    const instructions = getInstructions(mgr.getLoaded("s"));
     expect(instructions).toContain("demo");
-    expect(await mgr.getInstructions("other")).toBe("");
+    expect(getInstructions(mgr.getLoaded("other"))).toBe("");
     expect(await mgr.unload("demo", "s")).toMatchObject({ ok: true });
     expect(mgr.getScriptPathsFor("s")).toEqual([]);
-    expect(await mgr.getInstructions("s")).toBe("");
+    expect(getInstructions(mgr.getLoaded("s"))).toBe("");
   });
 
   it("loading twice is a no-op", async () => {

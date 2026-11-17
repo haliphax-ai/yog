@@ -15,5 +15,6 @@ export * from "./validator.ts";
 export * from "./parser.ts";
 export * from "./package.ts";
 export * from "./discover.ts";
+export * from "./format.ts";
 export * from "./manager.ts";
 export * from "./commands.ts";

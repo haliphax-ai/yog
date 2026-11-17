@@ -21,7 +21,8 @@
  */
 import { logger } from "../log.ts";
 import { readSkillFile } from "./parser.ts";
-import { discoverSkills, isAgentVisible, type DiscoverOptions } from "./discover.ts";
+import { getInstructions, isAgentVisible } from "./format.ts";
+import { discoverSkills, type DiscoverOptions } from "./discover.ts";
 import { isValidFullName, skillNameError, splitFullName } from "./validator.ts";
 import type {
   LoadedSkillState,
@@ -122,8 +123,7 @@ export class SkillManager {
 
   /** Currently loaded skills for a session (in load order). */
   getLoaded(sessionId: string = this.sessionId): Skill[] {
-    const map = this.#loaded.get(sessionId);
-    return map ? [...map.values()].map((e) => e.skill) : [];
+    return [...(this.#loaded.get(sessionId)?.values() ?? [])].map((e) => e.skill);
   }
 
   /** Loaded-state records for a session (for persistence / status). */
@@ -162,16 +162,7 @@ export class SkillManager {
 
   /** Concatenated `SKILL.md` bodies of a session's loaded skills. */
   async getInstructions(sessionId: string = this.sessionId): Promise<string> {
-    const map = this.#loaded.get(sessionId);
-    const sections: string[] = [];
-    if (map) {
-      for (const entry of map.values()) {
-        const s = entry.skill;
-        const desc = s.frontmatter.description ? `\n\n> ${s.frontmatter.description}` : "";
-        sections.push(`## ${s.fullName}${desc}\n\n${s.body}`);
-      }
-    }
-    return sections.join("\n\n---\n\n");
+    return getInstructions(this.getLoaded(sessionId));
   }
 
   /** `yog skills list` rows (available + loaded state). */
@@ -242,7 +233,7 @@ export class SkillManager {
         message: `skill "${ref}" is not available to this agent (use \`yog skills list\` to see available skills)`,
       };
     }
-    if (!skill) {
+    if (skill === undefined) {
       return {
         ok: false,
         name: ref,
@@ -346,23 +337,9 @@ export class SkillManager {
     const map = this.#sessionLoaded(sessionId);
     for (const name of names) {
       const skill = available.find((s) => s.fullName === name);
-      if (!skill) {
-        logger.warn(`[skills] persisted skill "${name}" is no longer available; skipping`);
-        continue;
-      }
-      if (map.has(name)) continue;
+      if (skill === undefined || map.has(name)) continue;
       map.set(name, { skill, loadedAt: Date.now() });
     }
     if (names.length > 0) this.#onChange?.(sessionId, this.getLoadedStates(sessionId));
   }
-}
-
-/** Format a skills command result as human-readable text (CLI). */
-export function formatCommandResult(result: SkillCommandResult): string {
-  const lines: string[] = [];
-  if (!result.ok) lines.push(`error: ${result.message}`);
-  else if (result.status === "loaded") lines.push(`loaded ${result.name}`);
-  else if (result.status === "unloaded") lines.push(`unloaded ${result.name}`);
-  else lines.push(result.message);
-  return lines.join("\n");
 }
