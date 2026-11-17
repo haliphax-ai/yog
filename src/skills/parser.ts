@@ -62,64 +62,87 @@ export function splitFrontmatter(raw: string): { frontmatter: string | undefined
   };
 }
 
+/** The YAML double-quote escape table (YAML 1.1 subset). */
+const ESCAPES = new Map<string, string>([
+  ['"', '"'],
+  ["\\", "\\"],
+  ["/", "/"],
+  ["b", "\b"],
+  ["f", "\f"],
+  ["n", "\n"],
+  ["r", "\r"],
+  ["t", "\t"],
+]);
+
+/** Minimal double-quoted escape handling (unknown escapes pass through). */
+function unescapeDouble(inner: string): string {
+  return inner.replace(/\\(["\\/bfnrt])/g, (_m, c: string) => ESCAPES.get(c) ?? c);
+}
+
+/** Keyword scalars: `""`/`~`/`null` → null, `true`/`false` → bool. */
+const KEYWORD_SCALARS = new Map<string, unknown>([
+  ["", null],
+  ["~", null],
+  ["null", null],
+  ["true", true],
+  ["false", false],
+]);
+
+/** Strip one pair of matching quotes; unescape the inner text. */
+function quotedScalar(t: string): string {
+  const inner = t.slice(1, -1);
+  return t.startsWith('"') ? unescapeDouble(inner) : inner.replace(/''/g, "'");
+}
+
+/** `true` when the token opens and closes with a matching quote pair. */
+function isQuoted(t: string): boolean {
+  if (t.length < 2) return false;
+  if (t.startsWith('"')) return t.endsWith('"');
+  if (t.startsWith("'")) return t.endsWith("'");
+  return false;
+}
+
+/** A decimal (optionally signed, optionally fractional) number token. */
+function isNumberToken(t: string): boolean {
+  return /^-?\d+(\.\d+)?$/.test(t);
+}
+
 /** Coerce a scalar YAML token to a JS value (string / number / bool / null). */
 function parseScalar(token: string): unknown {
   const t = token.trim();
-  if (t === "" || t === "~" || t === "null") return null;
-  if (t === "true") return true;
-  if (t === "false") return false;
-  if (
-    (t.startsWith('"') && t.endsWith('"') && t.length >= 2) ||
-    (t.startsWith("'") && t.endsWith("'") && t.length >= 2)
-  ) {
-    const inner = t.slice(1, -1);
-    return t.startsWith('"') ? unescapeDouble(inner) : inner.replace(/''/g, "'");
-  }
-  if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t);
+  if (KEYWORD_SCALARS.has(t)) return KEYWORD_SCALARS.get(t);
+  if (isQuoted(t)) return quotedScalar(t);
+  if (isNumberToken(t)) return Number(t);
   return t;
 }
 
-/** Minimal double-quoted escape handling. */
-function unescapeDouble(inner: string): string {
-  return inner.replace(/\\(["\\/bfnrt])/g, (_m, c: string) => {
-    switch (c) {
-      case '"':
-        return '"';
-      case "\\":
-        return "\\";
-      case "b":
-        return "\b";
-      case "f":
-        return "\f";
-      case "n":
-        return "\n";
-      case "r":
-        return "\r";
-      case "t":
-        return "\t";
-      default:
-        return c;
-    }
-  });
+/**
+ * A quoted run: `"…"` with `\x` escapes, or `'…'` with `''` doubling. An
+ * unterminated run swallows the rest of the line (the scan state after an
+ * unclosed quote never leaves the string).
+ */
+const QUOTED_RUN = /"(?:\\.|[^"\\])*(?:"|$)|'(?:''|[^'])*(?:'|$)/g;
+
+/**
+ * Blank out quoted runs so comment scanning can ignore their contents. Runs
+ * are replaced with a non-whitespace filler so a run's end does not make the
+ * next char look comment-start (preceded-by-space).
+ */
+function maskQuoted(line: string): string {
+  return line.replace(QUOTED_RUN, (run) => "x".repeat(run.length));
+}
+
+/** The index of the first `#` that starts a comment, else `undefined`. */
+function commentHash(masked: string): number | undefined {
+  const at = masked.search(/(^|\s)#/);
+  if (at === -1) return undefined;
+  return masked[at] === "#" ? at : at + 1;
 }
 
 /** Strip an inline `# comment` that sits outside quotes. */
 function stripComment(line: string): string {
-  let quote: string | undefined;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i]!;
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = undefined;
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      quote = c;
-      continue;
-    }
-    if (c === "#" && (i === 0 || /\s/.test(line[i - 1]!))) return line.slice(0, i);
-  }
-  return line;
+  const hash = commentHash(maskQuoted(line));
+  return hash === undefined ? line : line.slice(0, hash);
 }
 
 /** Split a `key: value` line; returns `undefined` for non-mapping lines. */
@@ -145,80 +168,136 @@ function parseBlockItem(content: string): unknown {
   return parseScalar(rest);
 }
 
+/** A mapping frame on the indent stack. */
+interface MappingFrame {
+  readonly indent: number;
+  readonly map: Record<string, unknown>;
+}
+
+/** Split the frontmatter source into comment-stripped, non-blank lines. */
+function yamlLines(source: string): string[] {
+  return source
+    .split("\n")
+    .map((l) => stripComment(l).replace(/\s+$/, ""))
+    .filter((l) => l.trim() !== "");
+}
+
+/**
+ * The line loop: nested mappings by indentation, `[a, b]` inline lists,
+ * `- item` block lists, and scalars. A key with an empty value pushes a
+ * child frame; a following list item at deeper indent is promoted to a
+ * list on the parent key.
+ */
+function parseYamlLines(lines: readonly string[]): Record<string, unknown> {
+  const root: Record<string, unknown> = {};
+  // Stack of (indent, mapping) — the root is at indent -1.
+  const stack: MappingFrame[] = [{ indent: -1, map: root }];
+  for (const line of lines) parseYamlLine(stack, line);
+  return root;
+}
+
+/** Dispatch one source line to its handler (list item, key/value, error). */
+function parseYamlLine(stack: MappingFrame[], line: string): void {
+  const indent = line.length - line.trimStart().length;
+  const content = line.trim();
+  while (stack.length > 1 && indent <= stack[stack.length - 1]!.indent) stack.pop();
+  const frame = stack[stack.length - 1]!;
+  if (isBlockItem(content)) parseBlockListItem(stack, frame, content);
+  else parseMappingLine(stack, frame, indent, content);
+}
+
 /**
  * Parse a (small) YAML subset into a record. Supports nested mappings (by
  * indentation), inline `[a, b]` lists, block `- item` lists, and scalars.
  */
 export function parseYamlSubset(source: string): Record<string, unknown> {
-  const root: Record<string, unknown> = {};
-  const lines = source
-    .split("\n")
-    .map((l) => stripComment(l).replace(/\s+$/, ""))
-    .filter((l) => l.trim() !== "");
-  // Stack of (indent, mapping) — the root is at indent -1.
-  const stack: Array<{ indent: number; map: Record<string, unknown> }> = [
-    { indent: -1, map: root },
-  ];
-  for (const line of lines) {
-    const indent = line.length - line.trimStart().length;
-    const content = line.trim();
-    while (stack.length > 1 && indent <= stack[stack.length - 1]!.indent) stack.pop();
-    const map = stack[stack.length - 1]!.map;
-    if (content === "-" || content.startsWith("- ")) {
-      // Block list item belonging to the previous key.
-      const lastKey = Object.keys(map).at(-1);
-      if (lastKey === undefined) {
-        throw new SkillParseError(`frontmatter list item without a key: ${content}`);
-      }
-      const prev = map[lastKey];
-      const item = parseBlockItem(content);
-      if (Array.isArray(prev)) prev.push(item);
-      else if (prev === null || prev === undefined) {
-        const top = stack[0]!;
-        const key = Object.keys(top.map).at(-1);
-        if (key !== undefined && top.map[key] === null) top.map[key] = [item];
-        else map[lastKey] = [item];
-      } else {
-        throw new SkillParseError(`frontmatter key "${lastKey}" is not a list`);
-      }
-      continue;
-    }
-    const kv = splitKeyValue(content);
-    if (!kv) throw new SkillParseError(`invalid frontmatter line: ${content}`);
-    const [key, rawValue] = kv;
-    const value = rawValue.trim();
-    if (value === "") {
-      // Could be a nested mapping, a block list, or empty — decide on the
-      // next line. The child frame collects keys; a following list item at
-      // deeper indent is promoted to a list on the parent key.
-      const child: Record<string, unknown> = {};
-      map[key] = child;
-      stack.push({ indent, map: child });
-    } else if (value.startsWith("[") && value.endsWith("]")) {
-      map[key] = parseInlineList(value);
-    } else {
-      map[key] = parseScalar(value);
-    }
+  return normalizeEmptyMaps(parseYamlLines(yamlLines(source)));
+}
+
+/** `true` when the line is a `- item` block-list entry. */
+function isBlockItem(content: string): boolean {
+  return content === "-" || content.startsWith("- ");
+}
+
+/** Append an item to a list value (creating the list when absent/null). */
+function appendListItem(map: Record<string, unknown>, key: string, item: unknown): void {
+  const prev = map[key];
+  if (Array.isArray(prev)) {
+    prev.push(item);
+    return;
   }
-  // Convert empty nested maps back to null (no children followed).
-  return normalizeEmptyMaps(root);
+  if (prev === null || prev === undefined) {
+    map[key] = [item];
+    return;
+  }
+  throw new SkillParseError(`frontmatter key "${key}" is not a list`);
+}
+
+/** Apply one `- item` line to the current frame (or promote a null key). */
+function parseBlockListItem(stack: MappingFrame[], frame: MappingFrame, content: string): void {
+  const lastKey = Object.keys(frame.map).at(-1);
+  if (lastKey === undefined) {
+    throw new SkillParseError(`frontmatter list item without a key: ${content}`);
+  }
+  appendListItem(frame.map, lastKey, parseBlockItem(content));
+}
+
+/** Apply one `key: value` line to the current frame. */
+function parseMappingLine(
+  stack: MappingFrame[],
+  frame: MappingFrame,
+  indent: number,
+  content: string,
+): void {
+  const kv = splitKeyValue(content);
+  if (!kv) throw new SkillParseError(`invalid frontmatter line: ${content}`);
+  const [key, rawValue] = kv;
+  const value = rawValue.trim();
+  if (value === "") openChildFrame(stack, frame, indent, key);
+  else frame.map[key] = parseMappingValue(value);
+}
+
+/** A key with no value: nested mapping, block list, or empty — decided later. */
+function openChildFrame(
+  stack: MappingFrame[],
+  frame: MappingFrame,
+  indent: number,
+  key: string,
+): void {
+  // The child frame collects keys; a following list item at deeper indent
+  // is promoted to a list on the parent key.
+  const child: Record<string, unknown> = {};
+  frame.map[key] = child;
+  stack.push({ indent, map: child });
+}
+
+/** The scalar or inline-list value of a `key: value` line. */
+function parseMappingValue(value: string): unknown {
+  if (value.startsWith("[") && value.endsWith("]")) return parseInlineList(value);
+  return parseScalar(value);
+}
+
+/** A plain mapping value (not null, not an array). */
+function isMapping(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /** Replace empty objects with `null` (a key with no children). */
 function normalizeEmptyMaps(value: unknown): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
-      const nested = normalizeEmptyMaps(v);
-      out[k] = Object.keys(nested).length === 0 ? null : nested;
-    } else {
-      out[k] = v;
-    }
-  }
-  return out;
+  if (!isMapping(value)) return value as Record<string, unknown>;
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, normalizedChild(v)]));
+}
+
+/** One normalized entry value: recursed, and nulled when it empties out. */
+function normalizedChild(value: unknown): unknown {
+  if (!isMapping(value)) return value;
+  const nested = normalizeEmptyMaps(value);
+  return isEmptyMapping(nested) ? null : nested;
+}
+
+/** `true` when a mapping has no keys. */
+function isEmptyMapping(value: Record<string, unknown>): boolean {
+  return Object.keys(value).length === 0;
 }
 
 /**
@@ -228,26 +307,49 @@ function normalizeEmptyMaps(value: unknown): Record<string, unknown> {
  */
 export function parseSkillMarkdown(raw: string): ParsedSkillDoc {
   const sizeBytes = Buffer.byteLength(raw, "utf8");
-  if (sizeBytes > MAX_SKILL_MD_BYTES) {
-    throw new SkillParseError(`SKILL.md too large (${sizeBytes} bytes; max ${MAX_SKILL_MD_BYTES})`);
-  }
+  assertSizeWithin(
+    sizeBytes,
+    MAX_SKILL_MD_BYTES,
+    `SKILL.md too large (${sizeBytes} bytes; max ${MAX_SKILL_MD_BYTES})`,
+  );
   const { frontmatter, body } = splitFrontmatter(raw);
   if (frontmatter === undefined) {
     throw new SkillParseError("SKILL.md must start with a YAML frontmatter block ('---')");
   }
-  if (Buffer.byteLength(body, "utf8") > MAX_SKILL_BODY_BYTES) {
-    throw new SkillParseError(
-      `SKILL.md body too large (${Buffer.byteLength(body, "utf8")} bytes; max ${MAX_SKILL_BODY_BYTES})`,
-    );
-  }
-  let record: Record<string, unknown>;
+  assertBodySize(body);
+  const record = frontmatterRecord(frontmatter);
+  assertShape(record);
+  return { frontmatter: toFrontmatter(record), body, sizeBytes };
+}
+
+/** Reject a byte size over `max` with `message`. */
+function assertSizeWithin(sizeBytes: number, max: number, message: string): void {
+  if (sizeBytes > max) throw new SkillParseError(message);
+}
+
+/** Reject an oversized markdown body. */
+function assertBodySize(body: string): void {
+  const bodyBytes = Buffer.byteLength(body, "utf8");
+  assertSizeWithin(
+    bodyBytes,
+    MAX_SKILL_BODY_BYTES,
+    `SKILL.md body too large (${bodyBytes} bytes; max ${MAX_SKILL_BODY_BYTES})`,
+  );
+}
+
+/** Parse the frontmatter block, rethrowing parser errors with context. */
+function frontmatterRecord(frontmatter: string): Record<string, unknown> {
   try {
-    record = parseYamlSubset(frontmatter);
+    return parseYamlSubset(frontmatter);
   } catch (err) {
     throw new SkillParseError(
       `invalid frontmatter: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+}
+
+/** Validate the parsed record's shape and required fields. */
+function assertShape(record: Record<string, unknown>): void {
   const check = checkFrontmatterShape(record);
   if (!check.ok) {
     throw new SkillParseError(`invalid frontmatter: ${check.errors.join("; ")}`);
@@ -258,7 +360,6 @@ export function parseSkillMarkdown(raw: string): ParsedSkillDoc {
   if (typeof record.description !== "string") {
     throw new SkillParseError('frontmatter must define a "description"');
   }
-  return { frontmatter: toFrontmatter(record), body, sizeBytes };
 }
 
 /** Read and parse a `SKILL.md` from disk. */
