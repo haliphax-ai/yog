@@ -2,6 +2,8 @@ import knex from "knex";
 import { randomUUID } from "node:crypto";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import type { TurnUsage } from "../../turn/sink.ts";
+import { transcriptRows, type PagingOptions, type TranscriptOptions } from "./transcript.ts";
+import { eventUsageMap, turnUsageEntry } from "./usage.ts";
 import { logger } from "../../log.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -370,47 +372,28 @@ export class SessionStore {
    */
   async getTranscript(
     sessionId: string,
-    opts: {
-      afterSeq?: number;
-      limit?: number;
-      roundAttribution?: Map<number, { usage?: unknown; promptDelta?: number }>;
-      resultTokensByCall?: Map<string, number>;
-    } = {},
+    opts: TranscriptOptions & PagingOptions = {},
+  ): Promise<any[]> {
+    const rows = await this.readTranscriptRows(sessionId, opts);
+    return transcriptRows(rows, opts);
+  }
+
+  /**
+   * Page the transcript rows (§4.2): `afterSeq` pages forward from a
+   * known seq, `limit` caps the batch. Pass neither for the full
+   * transcript from the start.
+   */
+  private async readTranscriptRows(
+    sessionId: string,
+    opts: Pick<PagingOptions, "afterSeq" | "limit">,
   ): Promise<any[]> {
     const afterSeq = opts.afterSeq ?? 0;
     const limit = opts.limit;
-    const attribution = opts.roundAttribution;
-    const resultTokensByCall = opts.resultTokensByCall;
     const query = this.db("session_messages")
       .where("session_id", sessionId)
       .where("seq", ">", afterSeq)
       .orderBy("seq", "asc");
-    const rows: any[] = limit !== undefined ? await query.limit(limit) : await query;
-    return rows.map((row: any) => {
-      const msg: any = { role: row.role };
-      if (row.content !== null) msg.content = row.content;
-      if (row.tool_call_id !== null) msg.tool_call_id = row.tool_call_id;
-      if (row.name !== null) msg.name = row.name;
-      if (row.tool_calls_json !== null) msg.tool_calls = JSON.parse(row.tool_calls_json);
-      const round = attribution?.get(row.turn_id);
-      if (row.role === "tool" && round !== undefined) {
-        if (round.usage !== undefined) msg.usage = round.usage;
-        if (round.promptDelta !== undefined) msg.promptDelta = round.promptDelta;
-      }
-      if (
-        row.role === "tool" &&
-        typeof row.tool_call_id === "string" &&
-        resultTokensByCall?.has(row.tool_call_id)
-      ) {
-        msg.resultTokens = resultTokensByCall.get(row.tool_call_id);
-      }
-      return {
-        ...msg,
-        seq: row.seq,
-        turnId: row.turn_id,
-        ts: row.created_at,
-      };
-    });
+    return limit !== undefined ? await query.limit(limit) : await query;
   }
 
   /**
@@ -484,68 +467,20 @@ export class SessionStore {
   }
 
   /**
-   * Per-turn metrics for the transcript dump (§R1.3): ordered by turn id,
-   * each entry carries the persisted usage when known — falling back to the
-   * stored terminal event usage for turns completed before usage
-   * columns existed (recovery replay) — plus the settled duration when the
-   * turn finished. Best-effort: turns with neither usage nor duration are
-   * omitted, so old volumes simply show no per-turn metrics.
+   * Per-turn metrics for the transcript dump (§R1.3), assembled by
+   * {@link turnUsageEntry} (usage/usage-event parsing lives there): one
+   * entry per turn row, ordered by turn id. See usage.ts for the fallback
+   * and best-effort semantics.
    */
   async listTurnUsages(
     sessionId: string,
   ): Promise<Array<{ turnId: number; usage?: TurnUsage; durationMs?: number }>> {
     const rows = await this.db("turns").where("session_id", sessionId).orderBy("id");
-    // Fallback source: usage embedded in the stored terminal event
-    // payloads (pre-column sessions and the model-provider fallback path,
-    // which never settles turn rows).
-    const events = await this.listEvents(sessionId);
-    const eventUsage = new Map<number, TurnUsage>();
-    for (const ev of events) {
-      if (ev.type !== "turn.finished" && ev.type !== "turn.aborted" && ev.type !== "error")
-        continue;
-      // Event payloads are stored double-encoded (addEvent receives the
-      // JSON string of the event data and stringifies it again), so the
-      // parsed row payload may itself be a JSON string — unwrap it.
-      let payloadObj: unknown = ev.payload;
-      if (typeof payloadObj === "string") {
-        try {
-          payloadObj = JSON.parse(payloadObj);
-        } catch {
-          continue;
-        }
-      }
-      const u = (payloadObj as { usage?: unknown }).usage;
-      if (u === null || typeof u !== "object" || Array.isArray(u)) continue;
-      const rec = u as Record<string, unknown>;
-      const normalized: TurnUsage = {};
-      let has = false;
-      for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"] as const) {
-        const n = rec[key];
-        if (typeof n === "number" && Number.isFinite(n)) {
-          normalized[key] = n;
-          has = true;
-        }
-      }
-      if (has) eventUsage.set(ev.turn_id, normalized);
-    }
+    const eventUsage = eventUsageMap(await this.listEvents(sessionId));
     const out: Array<{ turnId: number; usage?: TurnUsage; durationMs?: number }> = [];
     for (const row of rows) {
-      const colUsage: TurnUsage = {};
-      let hasCol = false;
-      for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"] as const) {
-        const n = row[key];
-        if (typeof n === "number" && Number.isFinite(n)) {
-          colUsage[key] = n;
-          hasCol = true;
-        }
-      }
-      const usage = hasCol ? colUsage : eventUsage.get(row.id);
-      const entry: { turnId: number; usage?: TurnUsage; durationMs?: number } = {
-        turnId: row.id,
-      };
-      if (usage !== undefined) entry.usage = usage;
-      if (typeof row.duration_ms === "number") entry.durationMs = row.duration_ms;
-      if (entry.usage !== undefined || entry.durationMs !== undefined) out.push(entry);
+      const entry = turnUsageEntry(row, eventUsage);
+      if (entry !== undefined) out.push(entry);
     }
     return out;
   }
