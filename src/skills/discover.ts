@@ -19,17 +19,11 @@
  * *loaded* skill is validated loudly.
  */
 import { logger } from "../log.ts";
-import { exists, readdir, stat } from "../host.ts";
-import { readSkillFile } from "./parser.ts";
+import { readdir, stat } from "../host.ts";
 import { packageDir } from "./package.ts";
-import {
-  isModelInvocationDisabled,
-  isValidSkillName,
-  normalizePath,
-  skillNameError,
-  splitFullName,
-} from "./validator.ts";
-import type { Skill, SkillFrontmatter, SkillMetadata, SkillSource } from "./types.ts";
+import { isValidSkillName, skillNameError, normalizePath } from "./validator.ts";
+
+import type { SkillMetadata, SkillSource } from "./types.ts";
 
 /** Default source directories, in priority order. */
 export const DEFAULT_SKILL_SOURCES: ReadonlyArray<{ source: SkillSource; dir: string }> = [
@@ -40,17 +34,12 @@ export const DEFAULT_SKILL_SOURCES: ReadonlyArray<{ source: SkillSource; dir: st
 
 /** Options for {@link discoverSkills}. */
 export interface DiscoverOptions {
+  /** Return child (namespaced) skills (default true). */
+  readonly cwd?: string;
   /** Override the source directories (tests, programmatic callers). */
   readonly sources?: ReadonlyArray<{ source: SkillSource; dir: string }>;
-  /** Working directory used to resolve relative source dirs (default cwd). */
-  readonly cwd?: string;
   /** Also return child (namespaced) skills (default true). */
   readonly includeChildren?: boolean;
-}
-
-/** One discovered skill entry plus its source. */
-export interface DiscoveredSkill {
-  readonly metadata: SkillMetadata;
 }
 
 /** Resolve the absolute path of a source directory (relative to `cwd`). */
@@ -63,8 +52,8 @@ export function resolveSourceDir(dir: string, cwd: string, home: string | undefi
   return normalizePath(`${cwd.replace(/\/+$/, "")}/${dir}`);
 }
 
-/** `true` when `path` is an existing directory. */
-async function isDir(path: string): Promise<boolean> {
+/** `true` when `path` exists as a directory. */
+async function dirExists(path: string): Promise<boolean> {
   try {
     return (await stat(path)).isDirectory();
   } catch {
@@ -72,8 +61,8 @@ async function isDir(path: string): Promise<boolean> {
   }
 }
 
-/** `true` when `path` is an existing regular file. */
-async function isFile(path: string): Promise<boolean> {
+/** `true` when `path` exists as a regular file. */
+async function fileExists(path: string): Promise<boolean> {
   try {
     return (await stat(path)).isFile();
   } catch {
@@ -90,7 +79,7 @@ async function discoverBare(
   if (file === "SKILL.md") return undefined;
   if (!file.endsWith(".md")) return undefined;
   const name = file.slice(0, -".md".length);
-  if (skillNameError(name) !== undefined) {
+  if (!isValidSkillName(name)) {
     logger.warn(`[skills] ignoring bare skill file with invalid name: ${sourceDir}/${file}`);
     return undefined;
   }
@@ -120,9 +109,9 @@ async function discoverPackage(
   parent?: SkillMetadata,
 ): Promise<SkillMetadata | undefined> {
   const skillFile = `${parentDir.replace(/\/+$/, "")}/SKILL.md`;
-  if (!(await isFile(skillFile))) return undefined;
+  if (!(await fileExists(skillFile))) return undefined;
   const name = parentDir.split("/").filter(Boolean).at(-1) ?? "";
-  if (skillNameError(name) !== undefined) {
+  if (!isValidSkillName(name)) {
     logger.warn(`[skills] ignoring skill directory with invalid name: ${parentDir}`);
     return undefined;
   }
@@ -159,8 +148,8 @@ async function discoverChildNames(dir: string): Promise<string[]> {
   for (const entry of entries.sort()) {
     if (entry.startsWith(".")) continue;
     const childDir = `${dir.replace(/\/+$/, "")}/${entry}`;
-    if (!(await isDir(childDir))) continue;
-    if (!(await isFile(`${childDir}/SKILL.md`))) continue;
+    if (!(await dirExists(childDir))) continue;
+    if (!(await fileExists(`${childDir}/SKILL.md`))) continue;
     if (skillNameError(entry) !== undefined) {
       logger.warn(`[skills] ignoring child skill with invalid name: ${childDir}`);
       continue;
@@ -168,6 +157,46 @@ async function discoverChildNames(dir: string): Promise<string[]> {
     out.push(entry);
   }
   return out;
+}
+
+/** Extract one source-dir entry as metadata (undefined when not a skill). */
+async function discoverEntry(
+  entryPath: string,
+  entry: string,
+  dir: string,
+  source: SkillSource,
+  options: DiscoverOptions,
+): Promise<SkillMetadata | undefined> {
+  if (entry.endsWith(".md")) {
+    // Bare skill document at the top level of a source directory.
+    return discoverBare(dir, source, entry);
+  }
+  if (!(await dirExists(entryPath))) return undefined;
+  // Package skill: <dir>/SKILL.md plus optional child packages.
+  return discoverPackage(entryPath, source, options);
+}
+
+/** Record `meta` (and its children) in `found`; skips when already seen. */
+async function recordSkill(
+  found: Map<string, SkillMetadata>,
+  meta: SkillMetadata,
+  options: DiscoverOptions,
+): Promise<void> {
+  if (found.has(meta.fullName)) {
+    logger.warn(`[skills] duplicate skill name "${meta.fullName}"; keeping the first`);
+    return;
+  }
+  found.set(meta.fullName, meta);
+  for (const childName of meta.childNames) {
+    const childMeta = await discoverPackage(
+      `${meta.path}/${childName}`,
+      meta.source,
+      options,
+      meta,
+    );
+    if (childMeta === undefined || found.has(childMeta.fullName)) continue;
+    found.set(childMeta.fullName, childMeta);
+  }
 }
 
 /**
@@ -179,133 +208,44 @@ async function discoverChildNames(dir: string): Promise<string[]> {
  */
 export async function discoverSkills(options: DiscoverOptions = {}): Promise<SkillMetadata[]> {
   const cwd = options.cwd ?? process.cwd();
-  const home = process.env.HOME;
   const sources = (options.sources ?? DEFAULT_SKILL_SOURCES).map((s) => ({
     source: s.source,
-    dir: resolveSourceDir(s.dir, cwd, home),
+    dir: resolveSourceDir(s.dir, cwd, process.env.HOME),
   }));
   const found = new Map<string, SkillMetadata>();
   for (const { source, dir } of sources) {
-    if (!(await isDir(dir))) continue;
-    let entries: string[];
-    try {
-      entries = await readdir(dir);
-    } catch (err) {
-      logger.warn(`[skills] cannot read ${dir}: ${(err as Error).message}`);
-      continue;
-    }
-    for (const entry of entries.sort()) {
-      if (entry.startsWith(".")) continue;
-      const entryPath = `${dir.replace(/\/+$/, "")}/${entry}`;
-      if (entry.endsWith(".md")) {
-        // Bare skill document at the top level of a source directory.
-        const meta = await discoverBare(dir, source, entry);
-        if (!meta) continue;
-        if (found.has(meta.fullName)) {
-          logger.warn(
-            `[skills] duplicate skill name "${meta.fullName}" in ${dir}; keeping the first`,
-          );
-          continue;
-        }
-        found.set(meta.fullName, meta);
-        continue;
-      }
-      if (!(await isDir(entryPath))) continue;
-      // Package skill: <dir>/SKILL.md plus optional child packages.
-      const meta = await discoverPackage(entryPath, source, options);
-      if (!meta) continue;
-      if (found.has(meta.fullName)) {
-        logger.warn(
-          `[skills] duplicate skill name "${meta.fullName}" in ${dir}; keeping the first`,
-        );
-        continue;
-      }
-      found.set(meta.fullName, meta);
-      for (const childName of meta.childNames) {
-        const childMeta = await discoverPackage(`${entryPath}/${childName}`, source, options, meta);
-        if (!childMeta) continue;
-        if (found.has(childMeta.fullName)) {
-          logger.warn(`[skills] duplicate child skill "${childMeta.fullName}"; keeping the first`);
-          continue;
-        }
-        found.set(childMeta.fullName, childMeta);
-      }
+    for (const meta of await scanSourceDir(dir, source, options)) {
+      await recordSkill(found, meta, options);
     }
   }
   return [...found.values()];
 }
 
-/** Discover and fully load (parse `SKILL.md`) every available skill. */
-export async function loadSkills(options: DiscoverOptions = {}): Promise<Skill[]> {
-  const metas = await discoverSkills(options);
-  const out: Skill[] = [];
-  for (const meta of metas) {
-    try {
-      const doc = await readSkillFile(meta.skillFile);
-      out.push({ ...meta, ...doc });
-    } catch (err) {
-      logger.warn(
-        `[skills] skipping ${meta.fullName}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+/** Read one source dir (sorted entries); undefined when unreadable. */
+async function listSourceDir(dir: string): Promise<string[] | undefined> {
+  if (!(await dirExists(dir))) return undefined;
+  try {
+    return (await readdir(dir)).sort();
+  } catch (err) {
+    logger.warn(`[skills] cannot read ${dir}: ${(err as Error).message}`);
+    return undefined;
   }
-  return out;
 }
 
-/** Split a `trunk:branch` reference; validates the trunk part. */
-export function parseSkillRef(ref: string): { trunk: string; branch: string | undefined } {
-  const [trunk, branch] = splitFullName(ref);
-  if (!isValidSkillName(trunk)) {
-    throw new Error(`invalid skill reference "${ref}": ${skillNameError(trunk) ?? "bad trunk"}`);
+/** Scan one source dir: metadata for each top-level entry, in name order. */
+async function scanSourceDir(
+  dir: string,
+  source: SkillSource,
+  options: DiscoverOptions,
+): Promise<SkillMetadata[]> {
+  const entries = await listSourceDir(dir);
+  if (entries === undefined) return [];
+  const metas: SkillMetadata[] = [];
+  for (const entry of entries) {
+    if (entry.startsWith(".")) continue;
+    const entryPath = `${dir.replace(/\/+$/, "")}/${entry}`;
+    const meta = await discoverEntry(entryPath, entry, dir, source, options);
+    if (meta) metas.push(meta);
   }
-  if (branch !== undefined && !isValidSkillName(branch)) {
-    throw new Error(`invalid skill reference "${ref}": ${skillNameError(branch) ?? "bad branch"}`);
-  }
-  return { trunk, branch };
-}
-
-/** Whether a skill reference is a child (namespaced) reference. */
-export function isChildRef(ref: string): boolean {
-  return splitFullName(ref)[1] !== undefined;
-}
-
-/** `true` when a discovered skill must be hidden from the agent. */
-export function isAgentVisible(s: Skill): boolean {
-  return !isModelInvocationDisabled(s.frontmatter);
-}
-
-/** Build the system prompt section listing available (unloaded) skills.
- *
- * One bullet per skill with its frontmatter description; a generic pointer
- * to `yog skills help` follows (the agent learns the command surface from
- * the help doc, not from per-skill load lines).
- */
-export function formatAvailableSkills(
-  metas: readonly (SkillMetadata & Pick<SkillFrontmatter, "description">)[],
-): string {
-  if (metas.length === 0) return "";
-  const bullets = metas.map((m) => {
-    const desc = m.isChild ? `${m.fullName} (child skill)` : m.fullName;
-    const summary = m.description || "(no description)";
-    return `- **${desc}** — ${summary}`;
-  });
-  return [
-    "# Available skills",
-    "",
-    ...bullets,
-    "",
-    "Interact with skills using `yog skills help` (list, load, unload, status).",
-  ].join("\\n");
-}
-
-/** Build the system prompt section for loaded skills (instructions). */
-export function formatLoadedSkills(loaded: readonly Skill[]): string {
-  if (loaded.length === 0) return "";
-  const sections = loaded.map((s) => `## Skill: ${s.fullName}\n\n${s.body}`);
-  return `# Loaded skill instructions\n\n${sections.join("\n\n---\n\n")}`;
-}
-
-/** Type guard: does a path exist at all (used by tests / CLI). */
-export async function pathExists(path: string): Promise<boolean> {
-  return exists(path);
+  return metas;
 }

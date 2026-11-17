@@ -14,7 +14,7 @@ function usageResult(command: "load" | "unload"): SkillsCommandResult {
  * returns a structured result; formatting for humans happens in `cli.ts`
  * (or the HTTP adapter), never here.
  */
-import { formatAvailableSkills, isAgentVisible } from "./discover.ts";
+import { formatAvailableSkills, getInstructions, isAgentVisible } from "./format.ts";
 import type { SkillManager } from "./manager.ts";
 import type { SkillCommandResult, SkillsCommandResult } from "./types.ts";
 
@@ -141,7 +141,7 @@ function withNameOrUsage(
 }
 /** Instructions block for the system prompt (loaded skills), if any. */
 export async function skillInstructions(manager: SkillManager): Promise<string> {
-  const loaded = await manager.getInstructions();
+  const loaded = getInstructions(manager.getLoaded());
   if (loaded === "") return "";
   return `# Loaded skill instructions\n\n${loaded}`;
 }
