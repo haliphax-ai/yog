@@ -8,7 +8,7 @@ export interface TranscriptOptions {
   readonly resultTokensByCall?: Map<string, number>;
 }
 
-/** Paging options for {@link SessionStore.getTranscript} (§4.2). */
+/** Paging options for {@link SessionStore.getTranscript}. */
 export interface PagingOptions {
   /** Page forward from a known seq (exclusive). */
   readonly afterSeq?: number;
@@ -70,7 +70,7 @@ function transcriptMsg(row: Record<string, unknown>): ChatCompletionMessageParam
 }
 
 /**
- * Map stored transcript rows (§4.2) to message-shaped objects plus
+ * Map stored transcript rows to message-shaped objects plus
  * metadata (`seq`, `turnId`, `ts`) so callers can address rows explicitly.
  * See {@link transcriptMsg}, {@link attachRoundAttribution}, and
  * {@link attachResultTokens} for the per-row mapping rules.
