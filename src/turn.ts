@@ -277,28 +277,63 @@ function headerGetterFrom(err: unknown): HeaderGetter | undefined {
   return undefined;
 }
 
-/** Parse an OpenAI `x-ratelimit-reset-*` duration ("20ms", "1m20s", "2h0s0ms") to ms. */
-export function parseRateLimitResetMs(value: string): number | undefined {
-  const v = value.trim();
-  if (v === "") return undefined;
-  // Composite duration: sequence of <int><unit> where unit is h|m|s|ms.
-  if (/^(?:\d+(?:ms|h|m|s))+$/.test(v)) {
-    let total = 0;
-    for (const m of v.matchAll(/(\d+)(ms|h|m|s)/g)) {
-      const n = Number(m[1]);
-      const unit = m[2];
-      total +=
-        unit === "h" ? n * 3_600_000 : unit === "m" ? n * 60_000 : unit === "s" ? n * 1_000 : n;
-    }
-    return total;
+/**
+ * One `<int><unit>` segment of a composite reset duration: the segment
+ * count and its unit (h|m|s|ms; the composite grammar is a sequence of
+ * these segments).
+ */
+interface ResetSegment {
+  n: number;
+  unit: string;
+}
+
+/** Milliseconds for one duration segment (h -> ms, m -> ms, s -> ms, ms). */
+function resetSegmentMs(segment: ResetSegment): number {
+  if (segment.unit === "h") return segment.n * 3_600_000;
+  if (segment.unit === "m") return segment.n * 60_000;
+  if (segment.unit === "s") return segment.n * 1_000;
+  return segment.n;
+}
+
+/**
+ * Composite form: a sequence of `<int><unit>` tokens (unit h|m|s|ms),
+ * e.g. `1m20s` or `2h0s0ms`. Summed; undefined when the shape does not
+ * match.
+ */
+function compositeResetMs(v: string): number | undefined {
+  if (!/^(?:\d+(?:ms|h|m|s))+$/.test(v)) return undefined;
+  let total = 0;
+  for (const m of v.matchAll(/(\d+)(ms|h|m|s)/g)) {
+    total += resetSegmentMs({ n: Number(m[1]), unit: m[2] ?? "" });
   }
-  const n = Number(v);
-  if (!Number.isFinite(n)) return undefined;
-  // Bare numbers: epoch timestamps are implausibly large for a wait, so
-  // treat huge values as epoch ms/s, everything else as seconds.
+  return total;
+}
+
+/**
+ * Bare-number reset values: epoch timestamps are implausibly large for a
+ * wait, so huge values are treated as epoch ms/s (a relative wait is
+ * derived from now); everything else is seconds.
+ */
+function bareNumberResetMs(v: string, n: number): number {
   if (n > 1e14) return n - Date.now();
   if (n > 1e10) return n * 1000 - Date.now();
   return n * 1_000 - (v.includes(".") ? 0 : 0);
+}
+
+/**
+ * Parse an OpenAI x-ratelimit-reset-* duration ("20ms", "1m20s",
+ * "2h0s0ms", or a bare number) to milliseconds. Composite int+unit
+ * sequences are summed; bare numbers are interpreted by magnitude in
+ * bareNumberResetMs; anything else is not a wait (undefined).
+ */
+export function parseRateLimitResetMs(value: string): number | undefined {
+  const v = value.trim();
+  if (v === "") return undefined;
+  const composite = compositeResetMs(v);
+  if (composite !== undefined) return composite;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return undefined;
+  return bareNumberResetMs(v, n);
 }
 
 function parseRetryAfterMs(value: string, now: number): number | undefined {
