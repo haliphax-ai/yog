@@ -46,5 +46,10 @@
       "oxfmt --no-error-on-unmatched-pattern",
       "oxlint --fix --no-error-on-unmatched-pattern"
     ]
+  },
+  "allowScripts": {
+    "@swc/core@1.16.20": true,
+    "better-sqlite3@13.0.3": true,
+    "fuse-native@2.2.6": true
   }
 }
