@@ -3,39 +3,12 @@ import type { AdapterState, TurnEmitCtx } from "./types.ts";
 import type { HttpDeps, SessionRecord } from "./types.ts";
 import { channelFor, publish } from "./helpers.ts";
 import { sendErrorWithRequestId, sendMessage } from "./reply.ts";
-import { healFallbackMessages, providerErrorEnvelope } from "./wire.ts";
-import { reviveSessionForTurn, validateTurnInput, emitTurnAbortedEvent } from "./turn-setup.ts";
-import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
+import { providerErrorEnvelope } from "./wire.ts";
+import { emitTurnAbortedEvent, reviveSessionForTurn, validateTurnInput } from "./turn-setup.ts";
+
 import type { ServerResponse } from "node:http";
 import type { SseEnvelope } from "../sse.ts";
 import { logger } from "../../log.ts";
-
-/**
- * Record the fallback path's turn row up front (best effort), returning the
- * row id (or null). The orchestrator path's executeTurn in serve.ts owns
- * its own row — creating a second adapter row there would leave a
- * duplicate `running` row (see the former streamTurn comment).
- */
-export async function recordFallbackTurnRow(
-  st: AdapterState,
-  session: SessionRecord,
-  data: Record<string, unknown>,
-): Promise<number | null> {
-  if (!st.store?.addTurn || st.hasOrchestrator) return null;
-  try {
-    const row = await st.store.addTurn(session.id, {
-      role: "user",
-      content: typeof data.prompt === "string" ? data.prompt : "",
-      status: "running",
-      ...(typeof data.model === "string" ? { model: data.model } : {}),
-    });
-    return row && typeof (row as { id?: number }).id === "number"
-      ? ((row as { id?: number }).id as number)
-      : null;
-  } catch {
-    return null; // persistence is best effort
-  }
-}
 
 export async function finishTurnError(
   st: AdapterState,
@@ -57,138 +30,6 @@ export async function finishTurnError(
   await emit.settleTurn("error");
 }
 
-/** Frame + fan out the fallback path's client-disconnect terminal. */
-export function emitClientDisconnected(ctx: {
-  cutUsage: () => unknown;
-  persistEvent: (ev: SseEnvelope) => Promise<void>;
-  emitToStream: (ev: SseEnvelope) => Promise<void>;
-}): Promise<void> {
-  const envelope = {
-    id: 0,
-    type: "turn.aborted",
-    version: 1,
-    ts: Date.now(),
-    data: {
-      reason: "client disconnected",
-      ...(ctx.cutUsage() !== undefined ? { usage: ctx.cutUsage() } : {}),
-    },
-  } as SseEnvelope;
-  return Promise.all([ctx.persistEvent(envelope), ctx.emitToStream(envelope)]).then(
-    () => undefined,
-  );
-}
-
-/** Persist the fallback turn's partial batch after healing (best effort). */
-
-export async function persistFallbackBatch(
-  st: AdapterState,
-  sessionId: string,
-  fallbackMessages: ChatCompletionMessageParam[],
-  fallbackStartLen: number,
-  turnRowId: number | null,
-): Promise<void> {
-  if (!st.store?.appendMessages || fallbackMessages.length <= fallbackStartLen) return;
-  try {
-    await st.store.appendMessages(sessionId, fallbackMessages.slice(fallbackStartLen), turnRowId);
-  } catch {
-    // persistence is best effort
-  }
-}
-
-export async function runFallbackTurn(
-  st: AdapterState,
-  turn: {
-    session: SessionRecord;
-    data: Record<string, unknown>;
-    turnRowId: number | null;
-    boundStreamId: string | undefined;
-  },
-  ctx: {
-    track: (ev: SseEnvelope) => void;
-    persistEvent: (ev: SseEnvelope) => Promise<void>;
-    emitToStream: (ev: SseEnvelope) => Promise<void>;
-    settleTurn: (status: string) => Promise<void>;
-    cutUsage: () => unknown;
-    sawError: () => boolean;
-    turnStarted: () => boolean;
-  },
-): Promise<void> {
-  const { session, data, turnRowId, boundStreamId } = turn;
-  // Fallback path (no orchestrator): drive the model provider directly
-  // in the background, persisting each event so terminal state stays
-  // recoverable. Hydrate the prior transcript and pass the full
-  // message list to the model so context carries across turns.
-  const controller = new AbortController();
-  if (boundStreamId !== undefined) {
-    const list = st.turnsByStream.get(boundStreamId) ?? [];
-    list.push({ controller });
-    st.turnsByStream.set(boundStreamId, list);
-  }
-  // Any failure persists the partial batch exactly like an abort
-  // (yog#42, fallback parity with serve.ts): heal dangling tool
-  // calls, then persist the user prompt and every completed round so
-  // `transcript.get` shows the turn instead of rewinding. Abort
-  // settles as `aborted`, provider failure as `error`.
-  const settleFallbackFailure = async (
-    err: unknown,
-    fallbackMessages: ChatCompletionMessageParam[],
-    fallbackStartLen: number,
-    controller: AbortController,
-  ): Promise<void> => {
-    // Any failure persists the partial batch exactly like an abort
-    // (yog#42, fallback parity with serve.ts): heal dangling tool
-    // calls, then persist the user prompt and every completed
-    // round so `transcript.get` shows the turn instead of
-    // rewinding. Abort settles as `aborted`, provider failure as
-    // `error`.
-    const isAbort =
-      controller.signal.aborted || (err instanceof Error && err.name === "AbortError");
-    healFallbackMessages(fallbackMessages);
-    await persistFallbackBatch(st, session.id, fallbackMessages, fallbackStartLen, turnRowId);
-    await ctx.settleTurn(isAbort ? "aborted" : "error");
-    if (controller.signal.aborted && ctx.turnStarted()) {
-      await emitClientDisconnected(ctx);
-    } else if (!ctx.sawError() && !controller.signal.aborted) {
-      const envelope = providerErrorEnvelope(err, ctx.cutUsage());
-      // Persist the synthesized terminal event (like `turn.aborted`)
-      // so `turn.get` replays it even when no `error` was emitted.
-      await ctx.persistEvent(envelope);
-      await ctx.emitToStream(envelope);
-    }
-  };
-
-  const fallbackPrior = (await (st.store?.getTranscript
-    ? st.store.getTranscript(session.id)
-    : [])) as ChatCompletionMessageParam[];
-  const fallbackMessages: ChatCompletionMessageParam[] = [
-    ...fallbackPrior,
-    { role: "user", content: typeof data.prompt === "string" ? data.prompt : "" },
-  ];
-  const fallbackStartLen = fallbackPrior.length;
-  const fallbackReq = { ...data, messages: fallbackMessages };
-  try {
-    await st.deps.model!.runTurn(session.id, fallbackReq, {
-      emit: async (ev: SseEnvelope) => {
-        ctx.track(ev);
-        await ctx.persistEvent(ev);
-        await ctx.emitToStream(ev);
-      },
-      signal: controller.signal,
-    });
-    // A model that emits a terminal `error` but returns normally
-    // (the engine always rethrows instead) still failed: settle
-    // as `error`, not `finished`, so the row never contradicts
-    // its stored terminal event.
-    healFallbackMessages(fallbackMessages);
-    await persistFallbackBatch(st, session.id, fallbackMessages, fallbackStartLen, turnRowId);
-    await ctx.settleTurn(ctx.sawError() ? "error" : "finished");
-  } catch (err) {
-    await settleFallbackFailure(err, fallbackMessages, fallbackStartLen, controller);
-  } finally {
-    st.bus?.off(channelFor(session.id), (ev) => ctx.track(ev));
-  }
-}
-/** Usage as of a terminal cut (abort/error), when the model reported any. */
 export function cutUsageFor(deps: HttpDeps, sessionId: string): unknown {
   const f = deps.onUsageFor;
   return typeof f === "function" ? f(sessionId) : undefined;
@@ -228,6 +69,13 @@ export async function persistTurnEvent(
   }
 }
 
+/**
+ * Run one turn through the orchestrator and settle the adapter-side row:
+ * the orchestrator's executeTurn (serve.ts) owns the turn row and
+ * transcript persistence; the adapter only frames terminal states on the
+ * wire (the engine emits no terminal event on abort) and never writes a
+ * second `running` row.
+ */
 export async function runOrchestratorTurn(
   st: AdapterState,
   turn: {
@@ -254,6 +102,7 @@ export async function runOrchestratorTurn(
   );
 }
 
+/** `turn.start`: revive, validate, then hand the turn to the orchestrator. */
 export async function startTurn(
   st: AdapterState,
   res: ServerResponse,
@@ -293,53 +142,27 @@ export async function startTurn(
     publish(st, session.id, ev);
   };
 
-  // Record the turn row up front on the fallback path only (best effort).
-  // On the orchestrator path the composed executeTurn in serve.ts owns the
-  // turn row — creating a second adapter row here would leave a duplicate
-  // `running` row (see the former streamTurn comment).
-  const turnRowId = await recordFallbackTurnRow(st, session, data);
+  const settleTurn = (status: string): Promise<void> => settleTurnRow(st, session.id, null, status);
+  const emitTurnAborted = (err: unknown, usage: unknown): Promise<void> =>
+    emitTurnAbortedEvent(persistEvent, emitToStream, err, usage);
 
   const linger = data.abortOnDisconnect !== true;
   const boundStreamId = !linger && typeof data.streamId === "string" ? data.streamId : undefined;
 
-  const settleTurn = (status: string): Promise<void> =>
-    settleTurnRow(st, session.id, turnRowId, status);
-  const emitTurnAborted = (err: unknown, usage: unknown): Promise<void> =>
-    emitTurnAbortedEvent(persistEvent, emitToStream, err, usage);
-  if (st.hasOrchestrator) {
-    await runOrchestratorTurn(
-      st,
-      { session, data, turnRowId, boundStreamId },
-      {
-        persistEvent,
-        emitToStream,
-        settleTurn,
-        emitTurnAborted,
-        cutUsage,
-        sawError: () => sawError,
-        turnStarted: () => turnStarted,
-        untrack,
-      },
-    );
-  } else {
-    // Fallback path (no orchestrator): drive the model provider directly in
-    // the background, persisting each event so terminal state stays
-    // recoverable. Hydrate the prior transcript and pass the full
-    // message list to the model so context carries across turns.
-    void runFallbackTurn(
-      st,
-      { session, data, turnRowId, boundStreamId },
-      {
-        track,
-        persistEvent,
-        emitToStream,
-        settleTurn,
-        cutUsage,
-        sawError: () => sawError,
-        turnStarted: () => turnStarted,
-      },
-    );
-  }
+  await runOrchestratorTurn(
+    st,
+    { session, data, turnRowId: null, boundStreamId },
+    {
+      persistEvent,
+      emitToStream,
+      settleTurn,
+      emitTurnAborted,
+      cutUsage,
+      sawError: () => sawError,
+      turnStarted: () => turnStarted,
+      untrack,
+    },
+  );
 
   sendMessage(res, 202, "turn.start", { accepted: true }, requestId);
 }

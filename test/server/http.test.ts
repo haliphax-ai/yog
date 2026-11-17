@@ -1,97 +1,78 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { EventEmitter } from "node:events";
-import { createDaemon, type DaemonOptions } from "../../src/server/serve.ts";
-import type { Daemon } from "../../src/server/serve.ts";
+import { createDaemon, type Daemon, type DaemonOptions } from "../../src/server/serve.ts";
 import { createHttpServer } from "../../src/server/http.ts";
 import { SessionStore } from "../../src/server/store/sessions.ts";
+import { tools } from "../../src/register.ts";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { openStream, sendMessage } from "../messages-helper.ts";
+import {
+  openStream,
+  orchestratorFromModel,
+  scriptedClient,
+  sendMessage,
+} from "../messages-helper.ts";
 
 /** `Response.json()` with a loose type: assertions do the checking. */
 async function json(res: Response): Promise<any> {
   return (await res.json()) as any;
 }
 
-/** Fake model injected through daemon deps: scripted turn behaviour. */
-function fakeModel(script: "happy" | "provider-error") {
+/**
+ * Scripted turn client: a prose round, a bash tool round, a closing prose
+ * round — the same wire shape the old scripted fake model emitted. The
+ * `provider-error` script rejects `create()` immediately (nothing
+ * streamed; the adapter synthesizes the terminal error envelope).
+ */
+function happyClientFactory(): (sid: string) => any {
+  return () =>
+    scriptedClient([
+      [
+        { content: "hello " },
+        {
+          tool_calls: [
+            { index: 0, id: "c1", function: { name: "bash", arguments: '{"command":"echo hi"}' } },
+          ],
+        },
+      ],
+      [{ content: "world" }],
+    ]);
+}
+
+function providerErrorClientFactory(): (sid: string) => any {
+  return () => scriptedClient([], { failOn: 0, failMessage: "upstream exploded" });
+}
+
+/**
+ * A minimal store-shaped no-op for store-less daemons: the engine fake's
+ * executeTurn persists best effort — with nothing to persist to, the turn
+ * still runs and every event still reaches the bus.
+ */
+function noopStore(): Parameters<typeof orchestratorFromModel>[1]["store"] {
   return {
-    async runTurn(
-      _sessionId: string,
-      req: any,
-      ctx: { emit: (ev: any) => Promise<void>; signal?: AbortSignal },
-    ) {
-      if (script === "provider-error") {
-        await ctx.emit({
-          id: 1,
-          type: "error",
-          version: 1,
-          ts: Date.now(),
-          code: "provider_error",
-          data: { code: "provider_error", message: "upstream exploded" },
-        });
-        return;
-      }
-      const turnId = `turn-${Date.now()}`;
-      await ctx.emit({
-        id: 1,
-        type: "turn.started",
-        version: 1,
-        ts: Date.now(),
-        data: { turnId, model: req.model ?? "fake", ts: Date.now() },
-      });
-      await ctx.emit({
-        id: 2,
-        type: "message.delta",
-        version: 1,
-        ts: Date.now(),
-        data: { text: "hello " },
-      });
-      await ctx.emit({
-        id: 3,
-        type: "tool.call",
-        version: 1,
-        ts: Date.now(),
-        data: { id: "c1", name: "bash", args: "{}" },
-      });
-      await ctx.emit({
-        id: 4,
-        type: "tool.result",
-        version: 1,
-        ts: Date.now(),
-        data: { id: "c1", name: "bash", ok: true, result: "ok" },
-      });
-      await ctx.emit({
-        id: 5,
-        type: "message.delta",
-        version: 1,
-        ts: Date.now(),
-        data: { text: "world" },
-      });
-      // Short synthetic drain so the happy path finishes within the test
-      // timeout; the abort listener lets the abort-on-disconnect test end early.
-      await new Promise<void>((resolve) => {
-        const t = setTimeout(resolve, 40);
-        ctx.signal?.addEventListener("abort", () => {
-          clearTimeout(t);
-          resolve();
-        });
-      });
-      await ctx.emit({
-        id: 6,
-        type: "turn.finished",
-        version: 1,
-        ts: Date.now(),
-        data: { turnId, durationMs: 1 },
-      });
-    },
+    addTurn: async () => ({}),
+    addEvent: async () => ({}),
+    appendMessages: async () => [],
+    finishTurn: async () => undefined,
+    getTranscript: async () => [],
   };
 }
 
 let daemon: Daemon;
 let base: string;
 
+let fake: ReturnType<typeof orchestratorFromModel>;
+
 beforeAll(async () => {
+  const bus = new EventEmitter();
+  bus.setMaxListeners(0);
+  fake = orchestratorFromModel(happyClientFactory(), {
+    store: noopStore(),
+    bus,
+    registry: tools,
+    modelId: "fake-model",
+    rateLimit: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0 },
+  });
   const opts: DaemonOptions = {
     host: "127.0.0.1",
     port: 0,
@@ -103,7 +84,8 @@ beforeAll(async () => {
         features: ["messages", "stream"],
       },
       contextWindowFor: (model: string) => (model === "fake-model" ? 64000 : undefined),
-      model: fakeModel("happy"),
+      orchestrator: fake.orchestrator,
+      bus,
     },
   };
   daemon = await createDaemon(opts);
@@ -193,16 +175,24 @@ describe("turn on the session stream", () => {
 
   it("provider error → error event, and the failed turn persists marked `error` (yog#42)", async () => {
     const store = await SessionStore.open(join(tmpdir(), `yog-provider-${Date.now()}.db`));
-    const opts: DaemonOptions = {
+    const bus = new EventEmitter();
+    bus.setMaxListeners(0);
+    const pfake = orchestratorFromModel(providerErrorClientFactory(), {
+      store,
+      bus,
+      registry: tools,
+      modelId: "fake-model",
+    });
+    const d = await createDaemon({
       host: "127.0.0.1",
       port: 0,
       deps: {
         capabilities: { contractVersion: "v1", models: [], tools: [], features: [] },
-        model: fakeModel("provider-error"),
+        orchestrator: pfake.orchestrator,
+        bus,
         store,
       },
-    };
-    const d = await createDaemon(opts);
+    });
     try {
       const { session } = await json(await fetch(`${d.url}/v1/sessions`, { method: "POST" }));
       const sid = session.id as string;
@@ -274,12 +264,21 @@ describe("turn on the session stream", () => {
     // Own sqlite store: the recovery endpoint is store-backed, and this
     // daemon has none injected by default.
     const store = await SessionStore.open(join(tmpdir(), `yog-linger-${Date.now()}.db`));
+    const bus = new EventEmitter();
+    bus.setMaxListeners(0);
+    const lfake = orchestratorFromModel(happyClientFactory(), {
+      store,
+      bus,
+      registry: tools,
+      modelId: "fake-model",
+    });
     const d = await createDaemon({
       host: "127.0.0.1",
       port: 0,
       deps: {
         capabilities: { contractVersion: "v1", models: [], tools: [], features: [] },
-        model: fakeModel("happy"),
+        orchestrator: lfake.orchestrator,
+        bus,
         store,
       },
     });

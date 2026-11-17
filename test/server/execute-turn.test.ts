@@ -2,70 +2,67 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createDaemon, type DaemonOptions } from "../../src/server/serve.ts";
-import type { Daemon } from "../../src/server/serve.ts";
+import { EventEmitter } from "node:events";
+import { createDaemon, type Daemon, type DaemonOptions } from "../../src/server/serve.ts";
 import { SessionStore } from "../../src/server/store/sessions.ts";
-import { newSessionId } from "../../src/state/index.ts";
-import { openStream, runTurnToEnd, sendMessage } from "../messages-helper.ts";
+import { tools } from "../../src/register.ts";
+import {
+  openStream,
+  orchestratorFromModel,
+  runTurnToEnd,
+  scriptedClient,
+  sendMessage,
+} from "../messages-helper.ts";
 
-/** Fake model that captures the `messages` argument it receives. */
-function capturingModel() {
-  const captured: { messages: any[]; prompt: string; model: string }[] = [];
-  return {
-    captured,
-    async runTurn(
-      _sessionId: string,
-      req: any,
-      ctx: { emit: (ev: any) => Promise<void>; signal?: AbortSignal },
-    ) {
-      captured.push({
-        messages: req.messages ?? [],
-        prompt: req.prompt,
-        model: req.model ?? "fake",
-      });
-      const turnId = newSessionId();
-      await ctx.emit({
-        id: 1,
-        type: "turn.started",
-        version: 1,
-        ts: Date.now(),
-        data: { turnId, model: req.model ?? "fake", ts: Date.now() },
-      });
-      await ctx.emit({
-        id: 2,
-        type: "message.delta",
-        version: 1,
-        ts: Date.now(),
-        data: { text: "ack" },
-      });
-      await new Promise<void>((resolve) => {
-        const t = setTimeout(resolve, 30);
-        ctx.signal?.addEventListener("abort", () => {
-          clearTimeout(t);
-          resolve();
-        });
-      });
-      await ctx.emit({
-        id: 3,
-        type: "turn.finished",
-        version: 1,
-        ts: Date.now(),
-        data: { turnId, durationMs: 1 },
-      });
-    },
-  };
+/**
+ * Scripted turn client whose every round streams a single "ack" delta —
+ * the hydrate/persist cases. The orchestrator fake captures the hydrated
+ * message array per turn at the model boundary (see `fake.calls`).
+ */
+function ackClientFactory(): (sid: string) => any {
+  return () => scriptedClient([[{ content: "ack" }]]);
+}
+
+/**
+ * Scripted failure client: the turn announces a tool call (assistant row
+ * lands in the engine's `messages`), then the round-2 `create()` rejects
+ * with a rate_limited error — the mid-turn 429 whose healed partial batch
+ * must survive (yog#42).
+ */
+function failClientFactory(): (sid: string) => any {
+  return () =>
+    scriptedClient(
+      [
+        [
+          {
+            tool_calls: [
+              { index: 0, id: "call_fail", function: { name: "bash", arguments: "{}" } },
+            ],
+          },
+        ],
+      ],
+      { failOn: 1, failCode: "rate_limited", failMessage: "429 rate limited" },
+    );
 }
 
 let daemon: Daemon;
 let base: string;
 let dir: string;
 let store: SessionStore;
-let model: ReturnType<typeof capturingModel>;
+let fake: ReturnType<typeof orchestratorFromModel>;
 
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), "yog-exec-"));
   store = await SessionStore.open(join(dir, "sessions.db"));
-  model = capturingModel();
+  const bus = new EventEmitter();
+  bus.setMaxListeners(0);
+  fake = orchestratorFromModel(ackClientFactory(), {
+    store,
+    bus,
+    registry: tools,
+    modelId: "fake-model",
+    rateLimit: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0 },
+  });
   const opts: DaemonOptions = {
     host: "127.0.0.1",
     port: 0,
@@ -76,8 +73,9 @@ beforeAll(async () => {
         tools: ["bash"],
         features: ["messages", "stream"],
       },
-      store: store as any,
-      model: model as any,
+      store,
+      orchestrator: fake.orchestrator,
+      bus,
     },
   };
   daemon = await createDaemon(opts);
@@ -108,13 +106,8 @@ describe("executeTurn (http fallback hydrate/persist path — model dep, no orch
     r2.abort();
     expect(r2.startRes.status).toBe(202);
 
-    const captured = model.captured as {
-      messages: any[];
-      prompt: string;
-      model: string;
-    }[];
-    expect(captured).toHaveLength(2);
-    const turn2Messages = captured[1]!.messages;
+    expect(fake.calls).toHaveLength(2);
+    const turn2Messages = fake.calls[1]!.messages;
     const userMsgs = turn2Messages.filter((m) => m.role === "user");
     expect(userMsgs.some((m) => m.content === "hello")).toBe(true);
     expect(userMsgs.some((m) => m.content === "world")).toBe(true);
@@ -160,31 +153,15 @@ describe("executeTurn (http fallback hydrate/persist path — model dep, no orch
 
     // A realistic 429 mid-turn: promise rejection, no terminal emit first
     // (the synthesized `error` envelope is the adapter's job).
-    const failModel = {
-      async runTurn(_sessionId: string, req: any, ctx: { emit: (ev: any) => Promise<void> }) {
-        await ctx.emit({
-          id: 1,
-          type: "turn.started",
-          version: 1,
-          ts: Date.now(),
-          data: { turnId: "t-fail-1", model: "fake", ts: Date.now() },
-        });
-        // Simulate a partial tool round landing in the transcript before
-        // the failure: an assistant row announcing a call that never
-        // gets its `tool` answer (the heal path must stub it).
-        const messages = Array.isArray(req?.messages) ? req.messages : [];
-        messages.push({
-          role: "assistant",
-          content: null,
-          tool_calls: [
-            { id: "call_fail", type: "function", function: { name: "bash", arguments: "{}" } },
-          ],
-        });
-        const err = new Error("429 rate limited") as Error & { code?: string };
-        err.code = "rate_limited";
-        throw err;
-      },
-    };
+    const bus = new EventEmitter();
+    bus.setMaxListeners(0);
+    const ffake = orchestratorFromModel(failClientFactory(), {
+      store,
+      bus,
+      registry: tools,
+      modelId: "fake-model",
+      rateLimit: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0 },
+    });
     const failDaemon = await createDaemon({
       host: "127.0.0.1",
       port: 0,
@@ -195,8 +172,9 @@ describe("executeTurn (http fallback hydrate/persist path — model dep, no orch
           tools: ["bash"],
           features: ["messages", "stream"],
         },
-        store: store as any,
-        model: failModel as any,
+        store,
+        orchestrator: ffake.orchestrator,
+        bus,
       },
     });
     try {

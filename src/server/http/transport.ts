@@ -74,10 +74,7 @@ export function createHttpServer(deps: HttpDeps): Server {
   const hasOrchestrator = !!orchestrator && typeof orchestrator.runTurn === "function";
 
   /** Turns started with `abortOnDisconnect: true`, keyed by stream id. */
-  const turnsByStream = new Map<
-    string,
-    Array<{ handle?: TurnHandleLike; controller?: AbortController }>
-  >();
+  const turnsByStream = new Map<string, Array<{ handle?: TurnHandleLike }>>();
   const st: AdapterState = {
     deps,
     apiToken,
@@ -211,11 +208,3 @@ export async function dispatchMessage(
     fail("invalid_request", `unsupported message type: ${type}`);
   }
 }
-
-/**
- * Validate a `turn.start` request beyond the session lookup: an open
- * session, a non-empty string `prompt`, string `model`/`streamId` and
- * boolean `abortOnDisconnect` when present, and a turn driver (orchestrator
- * or model provider) wired in. Returns the mapped error to send, or null
- * when the turn may proceed.
- */

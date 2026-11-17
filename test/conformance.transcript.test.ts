@@ -8,17 +8,27 @@
  *   POST   /v1/sessions        { title?, system? } (system seeds the transcript)
  *
  * Boot: `createDaemon` with injected deps + a real `SessionStore` on a tmp
- * sqlite file (same pattern as `test/conformance.test.ts`). The fake model
- * captures the hydrated upstream `messages` so resume semantics are asserted
- * at the model boundary, and appends its final assistant message to the
- * caller's array (engine contract, §4.3) so the transcript gets populated.
+ * sqlite file (same pattern as `test/conformance.test.ts`). Turns run
+ * through the real `TurnEngine` inside an orchestrator fake (see
+ * messages-helper), which captures the hydrated upstream `messages` so
+ * resume semantics are asserted at the model boundary; the engine appends
+ * its final assistant message to the caller's array (§4.3) so the
+ * transcript gets populated.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDaemon, type Daemon, type DaemonOptions } from "../src/server/serve.ts";
+import { EventEmitter } from "node:events";
+import { createDaemon, type Daemon } from "../src/server/serve.ts";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SessionStore } from "../src/server/store/sessions.ts";
-import { runTurnToEnd, sendMessage } from "./messages-helper.ts";
+import { tools } from "../src/register.ts";
+import {
+  orchestratorFromModel,
+  runTurnToEnd,
+  scriptedClient,
+  sendMessage,
+  type Round,
+} from "./messages-helper.ts";
 
 /** `Response.json()` with a loose type: assertions do the checking. */
 async function json(res: Response): Promise<any> {
@@ -39,18 +49,12 @@ const CAPABILITIES = {
   features: ["messages", "stream", "transcript"],
 };
 
-function optsWith(model: ReturnType<typeof confModel>, store: SessionStore): DaemonOptions {
-  return {
-    host: "127.0.0.1",
-    port: 0,
-    deps: { capabilities: CAPABILITIES, model, store },
-  };
-}
-
 let daemon: Daemon;
 let base: string;
 let store: SessionStore;
 let storePath: string;
+let bus: EventEmitter;
+let fake: ReturnType<typeof orchestratorFromModel>;
 
 afterAll(async () => {
   await daemon?.close();
@@ -58,63 +62,46 @@ afterAll(async () => {
 });
 
 /**
- * Fake model capturing the hydrated upstream `messages` per turn (so resume
- * semantics are assertable at the model boundary) and appending the final
- * assistant message to the caller's array (TurnEngine contract, §4.3) so the
- * transcript is populated. Emitted events mirror the real engine's shapes.
+ * Scripted turn clients at the model boundary (see messages-helper). The
+ * happy script streams one prose round per turn; the flaky script (its own
+ * daemon + store) succeeds on calls 1 and 3, and on call 2 announces a
+ * tool call then 429s mid-turn — the healed-stub resume case. The
+ * orchestrator fake captures the hydrated message array per turn (see
+ * `fake.calls`), so resume semantics stay assertable.
  */
-function confModel() {
-  const seen: any[][] = [];
+function confClientFactory(): (sid: string) => any {
   const counts = new Map<string, number>();
-  return {
-    seen,
-    async runTurn(
-      sessionId: string,
-      req: any,
-      ctx: { emit: (ev: any) => Promise<void>; signal?: AbortSignal },
-    ) {
-      const messages = Array.isArray(req?.messages) ? req.messages : [];
-      seen.push(messages);
-      // Turn numbering is per session (sessions are independent, §6): the
-      // first turn of every session answers "answer 1".
-      const n = (counts.get(sessionId) ?? 0) + 1;
-      counts.set(sessionId, n);
-      const turnId = `turn-conf-${n}`;
-      await ctx.emit({
-        id: 1,
-        type: "turn.started",
-        version: 1,
-        ts: Date.now(),
-        data: { turnId, model: req.model ?? "conf-transcript-model", ts: Date.now() },
-      });
-      const text = `answer ${n}`;
-      await ctx.emit({
-        id: 2,
-        type: "message.delta",
-        version: 1,
-        ts: Date.now(),
-        data: { text },
-      });
-      await ctx.emit({
-        id: 3,
-        type: "turn.finished",
-        version: 1,
-        ts: Date.now(),
-        data: { turnId, durationMs: 1 },
-      });
-      // §4.3: leave the caller's array complete before turn.finished.
-      messages.push({ role: "assistant", content: text });
-    },
+  return (sid) => {
+    // Turn numbering is per session (sessions are independent, §6): the
+    // first turn of every session answers "answer 1".
+    const n = (counts.get(sid) ?? 0) + 1;
+    counts.set(sid, n);
+    return scriptedClient([[{ content: `answer ${n}` }]]);
   };
 }
-
-let model: ReturnType<typeof confModel>;
 
 beforeAll(async () => {
   storePath = join(tmpdir(), `yog-conf-tr-${Date.now()}.db`);
   store = await SessionStore.open(storePath);
-  model = confModel();
-  daemon = await createDaemon(optsWith(model, store));
+  bus = new EventEmitter();
+  bus.setMaxListeners(0);
+  fake = orchestratorFromModel(confClientFactory(), {
+    store,
+    bus,
+    registry: tools,
+    modelId: "conf-transcript-model",
+    rateLimit: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0 },
+  });
+  daemon = await createDaemon({
+    host: "127.0.0.1",
+    port: 0,
+    deps: {
+      capabilities: CAPABILITIES,
+      orchestrator: fake.orchestrator,
+      store,
+      bus,
+    },
+  });
   base = daemon.url;
 });
 
@@ -191,14 +178,14 @@ describe("conformance: transcript (server-owned conversation)", () => {
 
     // The model demonstrably saw turn 1's context: the second upstream call
     // contains turn 1's messages, hydrated by the server, not the client.
-    expect(model.seen.length).toBeGreaterThanOrEqual(2);
-    const second = model.seen[model.seen.length - 1]!;
-    expect(second[0].role).toBe("user");
-    expect(second[0].content).toBe("remember the word 'mistwood'");
-    expect(second[1].role).toBe("assistant");
-    expect(second[1].content).toBe("answer 1");
-    expect(second[2].role).toBe("user");
-    expect(second[2].content).toBe("what word?");
+    expect(fake.calls.length).toBeGreaterThanOrEqual(2);
+    const second = fake.calls[fake.calls.length - 1]!.messages;
+    expect(second[0]?.role).toBe("user");
+    expect(second[0]?.content).toBe("remember the word 'mistwood'");
+    expect(second[1]?.role).toBe("assistant");
+    expect(second[1]?.content).toBe("answer 1");
+    expect(second[2]?.role).toBe("user");
+    expect(second[2]?.content).toBe("what word?");
   });
 
   it("dormancy lifecycle: detach → transcript readable (dormant) → POST revives → detach again → retention prunes", async () => {
@@ -301,56 +288,50 @@ describe("conformance: transcript (server-owned conversation)", () => {
     // 429s mid-turn on turn 2 after announcing a tool call it never
     // answers (the heal path must stub it), and succeeds again on
     // turn 3 (proving the failed turn hydrates cleanly).
-    const seen: any[][] = [];
-    let calls = 0;
-    const flakyModel = {
-      async runTurn(_sessionId: string, req: any, ctx: { emit: (ev: any) => Promise<void> }) {
-        calls += 1;
-        const messages = Array.isArray(req?.messages) ? req.messages : [];
-        seen.push(messages);
-        const turnId = `turn-flaky-${calls}`;
-        await ctx.emit({
-          id: 1,
-          type: "turn.started",
-          version: 1,
-          ts: Date.now(),
-          data: { turnId, model: "conf-transcript-model", ts: Date.now() },
+    // The flaky script: call 1 streams prose, call 2 announces a tool call
+    // then 429s (the heal path must stub it), call 3 streams prose again —
+    // proving the failed turn hydrates cleanly. Post-failure calls also
+    // fail so the engine's bounded retry exhausts instead of completing.
+    const flakyTurn = { n: 0 };
+    const flakyClientFactory = () => () => {
+      flakyTurn.n += 1;
+      const call = flakyTurn.n;
+      const toolCall: Round = [
+        {
+          tool_calls: [{ index: 0, id: "call_429", function: { name: "bash", arguments: "{}" } }],
+        },
+      ];
+      // Turn 1 and turn 3: one prose round (the turn ends). Turn 2: a tool
+      // round then a 429 (the heal path stubs the announced call); the
+      // retried create() also fails so the bounded retry exhausts.
+      if (call === 2) {
+        return scriptedClient([toolCall], {
+          failOn: 1,
+          failCode: "rate_limited",
+          failMessage: "429 rate limited",
         });
-        if (calls === 2) {
-          messages.push({
-            role: "assistant",
-            content: null,
-            tool_calls: [
-              { id: "call_429", type: "function", function: { name: "bash", arguments: "{}" } },
-            ],
-          });
-          const err = new Error("429 rate limited") as Error & { code?: string };
-          err.code = "rate_limited";
-          throw err;
-        }
-        const text = `answer ${calls}`;
-        await ctx.emit({
-          id: 2,
-          type: "message.delta",
-          version: 1,
-          ts: Date.now(),
-          data: { text },
-        });
-        await ctx.emit({
-          id: 3,
-          type: "turn.finished",
-          version: 1,
-          ts: Date.now(),
-          data: { turnId, durationMs: 1 },
-        });
-        messages.push({ role: "assistant", content: text });
-      },
+      }
+      return scriptedClient([[{ content: `answer ${call}` }]]);
     };
     const flakyStore = await SessionStore.open(join(tmpdir(), `yog-conf-flaky-${Date.now()}.db`));
+    const flakyBus = new EventEmitter();
+    flakyBus.setMaxListeners(0);
+    const flakyFake = orchestratorFromModel(flakyClientFactory(), {
+      store: flakyStore,
+      bus: flakyBus,
+      registry: tools,
+      modelId: "conf-transcript-model",
+      rateLimit: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0 },
+    });
     const flaky = await createDaemon({
       host: "127.0.0.1",
       port: 0,
-      deps: { capabilities: CAPABILITIES, model: flakyModel as any, store: flakyStore },
+      deps: {
+        capabilities: CAPABILITIES,
+        orchestrator: flakyFake.orchestrator,
+        store: flakyStore,
+        bus: flakyBus,
+      },
     });
     try {
       const created = await fetch(`${flaky.url}/v1/sessions`, { method: "POST" });
@@ -403,8 +384,8 @@ describe("conformance: transcript (server-owned conversation)", () => {
       // Turn 3: the next hydrate replays the failed turn's rows (stub
       // included) — providers never see a dangling tool call.
       await run("third");
-      expect(seen.length).toBe(3);
-      const thirdHydrate = seen[2]!;
+      expect(flakyFake.calls.length).toBe(3);
+      const thirdHydrate = flakyFake.calls[2]!.messages;
       expect(
         thirdHydrate.some((m: any) => m.role === "tool" && m.tool_call_id === "call_429"),
       ).toBe(true);

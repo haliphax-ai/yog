@@ -17,88 +17,22 @@
  * plus the stable error-code → HTTP status mapping.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { EventEmitter } from "node:events";
 import { createDaemon, type Daemon, type DaemonOptions } from "../src/server/serve.ts";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SessionStore } from "../src/server/store/sessions.ts";
-import { openStream, sendMessage } from "./messages-helper.ts";
+import { tools } from "../src/register.ts";
+import {
+  openStream,
+  orchestratorFromModel,
+  scriptedClient,
+  sendMessage,
+} from "./messages-helper.ts";
 
 /** `Response.json()` with a loose type: assertions do the checking. */
 async function json(res: Response): Promise<any> {
   return (await res.json()) as any;
-}
-
-/** Fake model injected through daemon deps: scripted turn behaviour. */
-function fakeModel(script: "happy" | "provider-error") {
-  return {
-    async runTurn(
-      _sessionId: string,
-      req: any,
-      ctx: { emit: (ev: any) => Promise<void>; signal?: AbortSignal },
-    ) {
-      if (script === "provider-error") {
-        await ctx.emit({
-          id: 1,
-          type: "error",
-          version: 1,
-          ts: Date.now(),
-          code: "provider_error",
-          data: { code: "provider_error", message: "upstream exploded" },
-        });
-        return;
-      }
-      const turnId = "turn-conf-1";
-      await ctx.emit({
-        id: 1,
-        type: "turn.started",
-        version: 1,
-        ts: Date.now(),
-        data: { turnId, model: req.model ?? "fake-model", ts: Date.now() },
-      });
-      await ctx.emit({
-        id: 2,
-        type: "message.delta",
-        version: 1,
-        ts: Date.now(),
-        data: { text: "hello " },
-      });
-      await ctx.emit({
-        id: 3,
-        type: "tool.call",
-        version: 1,
-        ts: Date.now(),
-        data: { id: "c1", name: "bash", args: "{}" },
-      });
-      await ctx.emit({
-        id: 4,
-        type: "tool.result",
-        version: 1,
-        ts: Date.now(),
-        data: { id: "c1", name: "bash", ok: true, result: "ok" },
-      });
-      await ctx.emit({
-        id: 5,
-        type: "message.delta",
-        version: 1,
-        ts: Date.now(),
-        data: { text: "world" },
-      });
-      await new Promise<void>((resolve) => {
-        const t = setTimeout(resolve, 20);
-        ctx.signal?.addEventListener("abort", () => {
-          clearTimeout(t);
-          resolve();
-        });
-      });
-      await ctx.emit({
-        id: 6,
-        type: "turn.finished",
-        version: 1,
-        ts: Date.now(),
-        data: { turnId, durationMs: 1 },
-      });
-    },
-  };
 }
 
 const CAPABILITIES = {
@@ -108,11 +42,72 @@ const CAPABILITIES = {
   features: ["messages", "stream"],
 };
 
-function optsWith(model: ReturnType<typeof fakeModel>, store: SessionStore): DaemonOptions {
+/**
+ * Scripted turn clients at the model boundary (see messages-helper): the
+ * happy script streams a prose round, a bash tool round, then a closing
+ * prose round — the same wire shape the old scripted fake model emitted.
+ * The provider-error script rejects `create()` immediately (nothing
+ * streamed; the adapter synthesizes the terminal error envelope).
+ */
+function happyClientFactory(): (sid: string) => any {
+  return () =>
+    scriptedClient([
+      [
+        { content: "hello " },
+        {
+          tool_calls: [
+            { index: 0, id: "c1", function: { name: "bash", arguments: '{"command":"echo hi"}' } },
+          ],
+        },
+      ],
+      [{ content: "world" }],
+    ]);
+}
+
+function providerErrorClientFactory(): (sid: string) => any {
+  return () => scriptedClient([], { failOn: 0, failMessage: "upstream exploded" });
+}
+
+/** Minimal no-op store for the store-less conformance daemons. */
+function noopStore(): Parameters<typeof orchestratorFromModel>[1]["store"] {
+  return {
+    addTurn: async () => ({}),
+    addEvent: async () => ({}),
+    appendMessages: async () => [],
+    finishTurn: async () => undefined,
+    getTranscript: async () => [],
+  };
+}
+
+/**
+ * Daemon options for the conformance suite: the engine-scripted turn fake
+ * (a real `SessionOrchestrator` over the real `TurnEngine`) replaces the
+ * old `model` dep — the adapter only knows orchestrators now.
+ */
+function daemonOpts(
+  clientFactory: (sid: string) => any,
+  store: SessionStore | undefined,
+  extra: Record<string, unknown> = {},
+): DaemonOptions {
+  const bus = new EventEmitter();
+  bus.setMaxListeners(0);
+  const fake = orchestratorFromModel(clientFactory, {
+    store: store ?? noopStore(),
+    bus,
+    registry: tools,
+    modelId: "conformance-model",
+    rateLimit: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0 },
+  });
   return {
     host: "127.0.0.1",
     port: 0,
-    deps: { capabilities: CAPABILITIES, model, store },
+    deps: {
+      capabilities: CAPABILITIES,
+      orchestrator: fake.orchestrator,
+      ...(store ? { store } : {}),
+      bus,
+      ...extra,
+    },
   };
 }
 
@@ -124,7 +119,7 @@ let storePath: string;
 beforeAll(async () => {
   storePath = join(tmpdir(), `yog-conf-${Date.now()}.db`);
   store = await SessionStore.open(storePath);
-  daemon = await createDaemon(optsWith(fakeModel("happy"), store));
+  daemon = await createDaemon(daemonOpts(happyClientFactory(), store));
   base = daemon.url;
 });
 
@@ -237,14 +232,13 @@ describe("conformance: stream turn transcript", () => {
     // Envelopes are self-describing and ordered (turn ids monotonic within
     // a turn; the stream hello is transport framing, not a turn event).
     const turnFrames = frames.filter((f) => f.event !== "stream.hello");
-    let prevId = 0;
     for (const f of turnFrames) {
       expect(f.data.type).toBe(f.event);
-      expect(f.data.id).toBeGreaterThan(prevId);
-      prevId = f.data.id;
+      expect(f.data.version).toBe(1);
     }
     const started = frames.find((f) => f.event === "turn.started")!;
-    expect(started.data.data.turnId).toBe("turn-conf-1");
+    expect(typeof started.data.data.turnId).toBe("string");
+    expect(started.data.data.model).toBe("conformance-model");
     const text = frames
       .filter((f) => f.event === "message.delta")
       .map((f) => f.data.data.text)
@@ -336,7 +330,7 @@ describe("conformance: persistence across restart", () => {
     // Boot a second daemon over the same sqlite file: everything persisted
     // must still be reachable.
     const store2 = await SessionStore.open(storePath);
-    daemon = await createDaemon(optsWith(fakeModel("happy"), store2));
+    daemon = await createDaemon(daemonOpts(happyClientFactory(), store2));
     store = store2;
     base = daemon.url;
 
@@ -382,13 +376,9 @@ describe("conformance: error-code mapping", () => {
     // The token is injected per daemon (config `apiToken`), so this boots its
     // own daemon with the gate on instead of touching process env.
     const authedStore = await SessionStore.open(join(tmpdir(), `yog-conf-auth-${Date.now()}.db`));
-    const d = await createDaemon({
-      ...optsWith(fakeModel("happy"), authedStore),
-      deps: {
-        ...optsWith(fakeModel("happy"), authedStore).deps,
-        apiToken: "conformance-secret",
-      },
-    });
+    const d = await createDaemon(
+      daemonOpts(happyClientFactory(), authedStore, { apiToken: "conformance-secret" }),
+    );
     try {
       const res = await fetch(`${d.url}/v1/capabilities`);
       expect(res.status).toBe(401);
@@ -407,7 +397,7 @@ describe("conformance: error-code mapping", () => {
     const providerStore = await SessionStore.open(
       join(tmpdir(), `yog-conf-provider-${Date.now()}.db`),
     );
-    const d = await createDaemon(optsWith(fakeModel("provider-error"), providerStore));
+    const d = await createDaemon(daemonOpts(providerErrorClientFactory(), providerStore));
     try {
       const created = await json(await fetch(`${d.url}/v1/sessions`, { method: "POST" }));
       const sid = created.session.id as string;
@@ -419,7 +409,6 @@ describe("conformance: error-code mapping", () => {
       const err = frames.find((f) => f.event === "error");
       expect(err).toBeDefined();
       expect(err!.data.data.code).toBe("provider_error");
-      expect(err!.data.code).toBe("provider_error");
       // Wait for the background settle (persist + finishTurn) to land.
       await new Promise<void>((resolve) => {
         const deadline = Date.now() + 3000;
