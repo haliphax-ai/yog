@@ -45,7 +45,6 @@ function orUsageDetails(raw: Record<string, unknown>): {
   return out;
 }
 import {
-  StdoutSink,
   TURN_EVENT_VERSION,
   type TurnEventDataMap,
   type TurnEvent,
@@ -446,7 +445,8 @@ async function sleepBackoff(
  * without tools. This is the loop every agent run funnels through as the
  * harness grows. Every observable moment — deltas, tool activity, terminal
  * states — is emitted as a typed `TurnEvent` on a transport-agnostic
- * `TurnSink`; the default `StdoutSink` reproduces the original stdout bytes.
+ * `TurnSink`. The composition root supplies its own sink (the engine never
+ * writes stdout itself; see `StdoutSink` in turn/sink.ts for the CLI shape).
  */
 export interface TurnOptions {
   /** Abort the in-flight model stream (used for graceful SIGINT/SIGTERM). */
@@ -1010,27 +1010,4 @@ export function activeToolCallFor(
  */
 export function clearActiveToolCall(sessionId: string): void {
   activeToolCalls.delete(sessionId);
-}
-
-/**
- * Convenience wrapper for callers that just want a turn run with the default
- * stdout sink; the composition root uses `TurnEngine` directly so the sink
- * is explicit.
- */
-export function runTurn(args: {
-  client: OpenAI;
-  modelId: string;
-  messages: ChatCompletionMessageParam[];
-  tools: ToolRegistry;
-  opts?: TurnOptions;
-  sink?: TurnSink;
-}): Promise<void> {
-  const { client, modelId, messages, tools } = args;
-  return new TurnEngine(args.sink ?? new StdoutSink()).run(
-    client,
-    modelId,
-    messages,
-    tools,
-    args.opts ?? {},
-  );
 }
