@@ -6,6 +6,7 @@
  * (depcruise `worker-entry-only`).
  */
 export {
+  agentSpawnOptions,
   onAgentSpawn,
   shutdownAllWorkers,
   WorkerClient,

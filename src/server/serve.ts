@@ -24,10 +24,8 @@ import {
   TOOL_OUTPUT_LIMIT_CHARS,
   TOOL_OUTPUT_GRACE_CHARS,
 } from "../toolkit/index.ts";
-import { onAgentSpawn } from "../worker/index.ts";
 import { logger } from "../log.ts";
 import { resolveConfig, type YogConfig, type PartialYogConfig } from "../config.ts";
-import { setDescriptorOwnership } from "../vfs/index.ts";
 import { createCompactionRunner, type CompactionBoundary } from "./compaction.ts";
 import { createShakeRunner, type ShakeOutcome } from "./shake.ts";
 import { createRuntime } from "./daemon/runtime.ts";
@@ -115,22 +113,6 @@ async function composeDaemon(
   host: string,
   port: number,
 ): Promise<Daemon> {
-  // --- agent-user split: descriptor ownership follows the agent split
-  // (config agentUid/Gid); unset (local dev) keeps the process ids. ---
-  setDescriptorOwnership(
-    config.agentUid ?? process.getuid?.() ?? 0,
-    config.agentGid ?? process.getgid?.() ?? 0,
-  );
-  // WorkerPool spawns its worker processes in the constructor, so uid/gid
-  // drops only engage if the opts are already registered. Injecting after
-  // construction silently produced workers running as the daemon user
-  // with the daemon's HOME (bash children then inherited /home/yog).
-  onAgentSpawn({
-    ...(config.agentUid !== undefined ? { uid: config.agentUid } : {}),
-    ...(config.agentGid !== undefined ? { gid: config.agentGid } : {}),
-    ...(config.agentHome !== undefined ? { home: config.agentHome } : {}),
-  });
-
   // --- the bash tool's seams: executor (+ persistent shell snapshots),
   // abort kill switch, and the skill-PATH provider ---
   wireBashTool(config, runtime);
