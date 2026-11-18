@@ -6,10 +6,13 @@
  * from the skills domain (`dispatchSkillsCommand`). This module adapts the
  * structured result to the CLI's line-oriented output contract.
  */
-import type { SkillManager } from "../../skills/index.ts";
-import { dispatchSkillsCommand } from "../../skills/commands.ts";
+import {
+  dispatchSkillsCommand,
+  type SkillListEntry,
+  type SkillManager,
+  type SkillStatusEntry,
+} from "../../skills/index.ts";
 import { registerCommand, type CliCommand } from "../cli.ts";
-import type { SkillListEntry, SkillStatusEntry } from "../../skills/types.ts";
 
 /** Render one `skills list` / `skills status` entry as a CLI row. */
 function entryRow(entry: SkillListEntry | SkillStatusEntry): string {
