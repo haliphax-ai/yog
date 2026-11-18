@@ -15,7 +15,7 @@
  *    started) turn is skipped when its slot in the queue comes around.
  */
 
-import type { SessionStore } from "./store/sessions.ts";
+import type { SessionStore } from "./store/index.ts";
 import type { WorkerPool } from "./workpool.ts";
 
 /**

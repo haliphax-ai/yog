@@ -25,8 +25,8 @@ import { fileURLToPath } from "node:url";
 import { readFile } from "../host.ts";
 import type OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
-import { TurnEngine, type TurnOptions } from "../turn.ts";
-import type { TurnSink } from "../turn/sink.ts";
+import { TurnEngine, type TurnOptions } from "../turn/index.ts";
+import type { TurnSink } from "../turn/index.ts";
 import { ToolRegistry, TRUNCATION_IDENTIFIER } from "../toolkit/index.ts";
 /** Which summary artifact a client is asking for. */
 export type CompactionKind = "compact" | "handoff";
@@ -73,7 +73,7 @@ export interface CompactionRunnerDeps {
    */
   profile?: TokenProfile;
   /** 429 retry policy for the summary turn (see `TurnOptions.rateLimit`). */
-  rateLimit?: Partial<import("../turn.ts").RateLimitPolicy>;
+  rateLimit?: Partial<import("../turn/index.ts").RateLimitPolicy>;
 }
 
 /** Name of the markdown template file, relative to this module. */

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { createDaemon, type Daemon, type DaemonOptions } from "../../src/server/serve.ts";
-import { SessionStore } from "../../src/server/store/sessions.ts";
+import { SessionStore } from "../../src/server/store/index.ts";
 import { tools } from "../../src/register.ts";
 import {
   openStream,

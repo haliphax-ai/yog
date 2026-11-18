@@ -26,7 +26,8 @@
    accurate; warm values are billing-relevant, not occupancy-relevant.
 2. **OpenRouter reports native-tokenizer usage on every response** — always, both APIs,
    no flag (the `usage:{include:true}` family is a documented deprecated no-op). yog
-   merges three summary fields in `turn.ts` and discards `prompt_tokens_details`,
+ *   merges three summary fields in `turn/index.ts` and discards
+ *   `prompt_tokens_details`,
    `cost`, and the `gen-…` id.
 3. **Estimator accuracy is content-class-dependent and model-dependent.** Measured
    native rates on agent-transcript classes: tool results 2.56 c/t (nemotron-3-ultra),

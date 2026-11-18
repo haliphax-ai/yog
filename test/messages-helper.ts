@@ -14,8 +14,8 @@
  */
 
 import { SessionOrchestrator, type TurnRequest } from "../src/server/orchestrator.ts";
-import { TurnEngine, type TurnOptions } from "../src/turn.ts";
-import type { TurnEvent, TurnSink, TurnUsage } from "../src/turn/sink.ts";
+import { TurnEngine, type TurnOptions } from "../src/turn/index.ts";
+import type { TurnEvent, TurnSink, TurnUsage } from "../src/turn/index.ts";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import type OpenAI from "openai";
 import type { ToolRegistry } from "../src/toolkit/index.ts";

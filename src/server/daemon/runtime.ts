@@ -26,7 +26,7 @@ import { descriptors } from "../../register.ts";
 import { SkillManager } from "../../skills/index.ts";
 import { logger } from "../../log.ts";
 import { mkdir } from "../../host.ts";
-import { SessionStore } from "../store/sessions.ts";
+import { SessionStore } from "../store/index.ts";
 import { WorkerPool } from "../workpool.ts";
 import { onAgentSpawn } from "../../worker/index.ts";
 import { setDescriptorOwnership } from "../../vfs/index.ts";

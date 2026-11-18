@@ -1,7 +1,7 @@
 import knex from "knex";
 import { randomUUID } from "node:crypto";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
-import type { TurnUsage } from "../../turn/sink.ts";
+import type { TurnUsage } from "../../turn/index.ts";
 import { transcriptRows, type PagingOptions, type TranscriptOptions } from "./transcript.ts";
 import { eventUsageMap, turnUsageEntry } from "./usage.ts";
 import { logger } from "../../log.ts";

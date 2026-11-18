@@ -8,8 +8,10 @@
  *   src/config.ts     runtime configuration — zod schema + file loader;
  *                     loaded only at composition (index.ts, server/serve.ts);
  *                     every other layer receives plain values via injection
- *   src/turn.ts       orchestration — knows the ToolRegistry, never the VFS/entry
+ *   src/turn/         orchestration domain — engine barrel (index.ts) knows
+ *                     the ToolRegistry, never the VFS/entry
  *   src/turn/sink.ts  transport-agnostic TurnEvent envelope + sink impls
+
  *   src/mount.ts      pure FUSE bridge — no internal dependencies
  *   src/host.ts      host proxy — the ONLY module allowed to touch node:fs
  *                     and node:child_process
@@ -25,9 +27,12 @@
  *   - src/register.ts is composed only at the composition points: the CLI
  *     entry and the server domain (manifest-composition-only).
  *   - The turn layer never imports the server domain — compaction/handoff
- *     orchestration sits on top of turn.ts, never beneath it
+ *     orchestration sits on top of the turn domain, never beneath it
  *     (turn-no-server).
- *   - Every domain (vfs, toolkit, worker, state, server, skills) exposes a
+ *   - Every domain (vfs, toolkit, worker, state, server, skills, turn)
+ *     exposes a single public door: modules outside a domain may only import
+ *     its index.ts barrel (domain-entry-only:*), and leaf domains never
+ *     reach up into orchestration/infra (the *-leaf rule family).
  *     single public door: modules outside a domain may only import its
  *     index.ts barrel (domain-entry-only:*), and leaf domains never reach
  *     up into orchestration/infra (the *-leaf rule family).
@@ -64,7 +69,7 @@
 // in one generic regex (no backreferences), so the entry-only rule family is
 // generated per domain from this list; adding a new domain here extends the
 // same guarantee to it automatically.
-const DOMAINS = ["vfs", "toolkit", "worker", "state", "server", "skills"];
+const DOMAINS = ["vfs", "toolkit", "worker", "state", "server", "skills", "turn"];
 
 module.exports = {
   options: {
@@ -125,7 +130,7 @@ module.exports = {
     {
       name: "turn-not-manifest",
       severity: "error",
-      from: { path: "^src/turn(\\.ts|/)" },
+      from: { path: "^src/turn/" },
       to: { path: "^src/(index\\.ts|register\\.ts)$" },
     },
 
@@ -264,11 +269,11 @@ module.exports = {
 
     // The turn layer sits below the server domain: it runs turns, it does
     // not know about sessions, HTTP, or orchestration. The compaction/handoff
-    // runners live ABOVE turn.ts (src/server/), never beneath it.
+    // runners live ABOVE the turn domain (src/server/), never beneath it.
     {
       name: "turn-no-server",
       severity: "error",
-      from: { path: "^src/turn(\\.ts|/)" },
+      from: { path: "^src/turn/" },
       to: { path: "^src/server/" },
     },
     // The turn engine is likewise a leaf: injected registries and client,
@@ -278,7 +283,7 @@ module.exports = {
     {
       name: "turn-leaf",
       severity: "error",
-      from: { path: "^src/turn(\\.ts|/)" },
+      from: { path: "^src/turn/" },
       to: {
         path: "^src/(worker/|server/|index\\.ts|register\\.ts|mount\\.ts|config\\.ts)",
       },

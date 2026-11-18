@@ -8,9 +8,9 @@
  */
 import type OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
-import type { SessionStore } from "../store/sessions.ts";
-import { TurnEngine, type TurnOptions } from "../../turn.ts";
-import type { TurnEvent, TurnSink, TurnUsage } from "../../turn/sink.ts";
+import type { SessionStore } from "../store/index.ts";
+import { TurnEngine, type TurnOptions } from "../../turn/index.ts";
+import type { TurnEvent, TurnSink, TurnUsage } from "../../turn/index.ts";
 import type { SseEnvelope } from "../sse.ts";
 import { tools } from "../../register.ts";
 import { availableSkillsBlock, type SkillManager } from "../../skills/index.ts";

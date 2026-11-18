@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openSessionsDb, SessionStore } from "../src/server/store/sessions.ts";
+import { openSessionsDb, SessionStore } from "../src/server/store/index.ts";
 
 let dir: string;
 
