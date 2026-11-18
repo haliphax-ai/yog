@@ -5,8 +5,11 @@
  * daemon needs: the session store, the agent state db, the worker pool, the
  * FUSE mount, and the skills registry. Every boundary degrades
  * independently — a failure is logged and the daemon continues without it
- * (no store = no audit trail; no mount = the VFS stays virtual). Nothing
- * here wires the toolkit's global seams: that is `bash-wiring.ts`'s job,
+ * (no store = no audit trail; no mount = the VFS stays virtual). The
+ * agent-user split (descriptor ownership + the worker spawn drop) is
+ * registered here, inside openPool: the pool spawns its workers in its
+ * constructor, which is the hard deadline for that registration. Nothing
+ * here wires the toolkit's global seams: that is bash-wiring.ts's job,
  * once the runtime exists.
  */
 import { join } from "node:path";
@@ -25,6 +28,8 @@ import { logger } from "../../log.ts";
 import { mkdir } from "../../host.ts";
 import { SessionStore } from "../store/sessions.ts";
 import { WorkerPool } from "../workpool.ts";
+import { onAgentSpawn } from "../../worker/index.ts";
+import { setDescriptorOwnership } from "../../vfs/index.ts";
 import { ModelInfoCache } from "../modelInfo.ts";
 import type { YogConfig } from "../../config.ts";
 import { registerSkillsCliCommand } from "./skills-cli.ts";
@@ -137,12 +142,39 @@ async function openModelInfo(config: YogConfig): Promise<ModelInfoCache | undefi
 }
 
 /**
- * Build the worker pool. Construction spawns the workers, so callers must
- * have registered the agent-spawn options (`onAgentSpawn`) BEFORE calling
- * this — injecting after construction silently produced workers running as
- * the daemon user with the daemon's HOME.
+ * Register the agent-user split from the runtime configuration: descriptor
+ * ownership (the uid/gid served descriptors default to) and the worker
+ * spawn drop (the bash workers uid/gid and HOME).
+ *
+ * This must land before the worker pool is constructed: the pool spawns
+ * its worker processes in the constructor, and options registered after
+ * construction silently produced workers running as the daemon user with
+ * the daemon HOME (bash children then inherited /home/yog). The call
+ * therefore lives in openPool, immediately before the constructor, so the
+ * deadline is structural rather than call-site ordering: the createDaemon
+ * decomposition (PR #78) had moved the registration into composeDaemon,
+ * which runs after createRuntime had already spawned every worker without
+ * the drop.
+ */
+function registerAgentUserSplit(config: YogConfig): void {
+  setDescriptorOwnership(
+    config.agentUid ?? process.getuid?.() ?? 0,
+    config.agentGid ?? process.getgid?.() ?? 0,
+  );
+  onAgentSpawn({
+    ...(config.agentUid !== undefined ? { uid: config.agentUid } : {}),
+    ...(config.agentGid !== undefined ? { gid: config.agentGid } : {}),
+    ...(config.agentHome !== undefined ? { home: config.agentHome } : {}),
+  });
+}
+
+/**
+ * Build the worker pool. The agent-user split is registered here (not by
+ * the caller) immediately before construction: see
+ * registerAgentUserSplit for why the call lives inside openPool.
  */
 async function openPool(config: YogConfig): Promise<WorkerPool | undefined> {
+  registerAgentUserSplit(config);
   return bestEffort(
     async () => new WorkerPool(config.workers !== undefined ? { size: config.workers } : undefined),
     "worker pool unavailable",

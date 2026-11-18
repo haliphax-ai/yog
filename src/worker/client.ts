@@ -45,6 +45,15 @@ export function onAgentSpawn(opts: AgentSpawnOptions): void {
   agentSpawnOpts = opts;
 }
 
+/**
+ * Read-only view of the current agent-spawn options (set via
+ * {@link onAgentSpawn}; the latest call wins). Exposed so the composition
+ * roots registration is observable in tests and diagnostics.
+ */
+export function agentSpawnOptions(): Readonly<AgentSpawnOptions> {
+  return agentSpawnOpts;
+}
+
 /** Kill every worker spawned by this process (used at teardown). */
 export function shutdownAllWorkers(): Promise<void> {
   const all = [...liveClients];
