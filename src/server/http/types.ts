@@ -81,15 +81,6 @@ export interface EventBusBoundary {
   off(event: string, listener: (ev: SseEnvelope) => void): unknown;
 }
 
-/** Minimal model-provider boundary the adapter drives for a turn. */
-export interface ModelBoundary {
-  runTurn(
-    sessionId: string,
-    req: Record<string, unknown>,
-    ctx: { emit: (ev: SseEnvelope) => Promise<void>; signal?: AbortSignal },
-  ): Promise<unknown>;
-}
-
 /**
  * Injected dependencies. Fields are optional so tests can fake any boundary;
  * the index signature keeps the seam open for store/orchestrator/factory deps.
@@ -99,14 +90,12 @@ export interface HttpDeps {
   /** Resolve the context window for an arbitrary model id (models.dev cache). */
   contextWindowFor?: (model: string) => number | undefined;
   capabilities?: Capabilities;
-  model?: ModelBoundary;
   store?: StoreBoundary | unknown;
   orchestrator?: OrchestratorBoundary | unknown;
   /** Usage captured as of a terminal cut, keyed by session id. */
   onUsageFor?: (sessionId: string) => unknown;
   /** Per-daemon event bus: executeTurn publishes, this adapter subscribes. */
   bus?: EventBusBoundary | unknown;
-  createTurnEngine?: unknown;
   /** Bearer token gate (config `apiToken`); unset = auth disabled. */
   apiToken?: string;
   /** Compaction/handoff runner (see `compaction.ts`). */
@@ -172,10 +161,7 @@ export interface AdapterState {
   readonly bus: EventBusBoundary;
   readonly hasStore: boolean;
   readonly hasOrchestrator: boolean;
-  readonly turnsByStream: Map<
-    string,
-    Array<{ handle?: TurnHandleLike; controller?: AbortController }>
-  >;
+  readonly turnsByStream: Map<string, Array<{ handle?: TurnHandleLike }>>;
 }
 
 /**

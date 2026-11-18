@@ -1,6 +1,4 @@
-import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
 import type { SseEnvelope } from "../sse.ts";
-import { toolStubMessage, unansweredToolCallIds } from "../../turn.ts";
 /**
  * Build the terminal `error` envelope synthesized when a turn fails without
  * the engine emitting one: the provider error code (or `provider_error`),
@@ -81,18 +79,4 @@ export function toWireMessage(m: unknown): Record<string, unknown> {
   if (row.promptDelta !== undefined) out.promptDelta = row.promptDelta;
   if (row.resultTokens !== undefined) out.resultTokens = row.resultTokens;
   return out;
-}
-
-/**
- * Heal a fallback-path transcript in place: stub every tool call the
- * messages announce but never answer, so the batch persisted on error
- * stays hydratable (the engine heals the orchestrator path the same way;
- * providers reject dangling calls). Prior turns are already answered,
- * so this only stubs this turn's dangling calls.
- */
-export function healFallbackMessages(messages: ChatCompletionMessageParam[]): void {
-  const heal: ChatCompletionMessageParam[] = [...unansweredToolCallIds(messages)].map(
-    (toolCallId) => toolStubMessage(toolCallId),
-  );
-  if (heal.length > 0) messages.push(...heal);
 }

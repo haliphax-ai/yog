@@ -1,9 +1,16 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDaemon, type Daemon } from "../../src/server/serve.ts";
+import { EventEmitter } from "node:events";
+import { createDaemon, type Daemon, type DaemonOptions } from "../../src/server/serve.ts";
 import { SessionStore } from "../../src/server/store/sessions.ts";
+import { tools } from "../../src/register.ts";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runTurnToEnd, sendMessage } from "../messages-helper.ts";
+import {
+  orchestratorFromModel,
+  runTurnToEnd,
+  scriptedClient,
+  sendMessage,
+} from "../messages-helper.ts";
 
 /** `Response.json()` with a loose type: assertions do the checking. */
 async function json(res: Response): Promise<any> {
@@ -18,75 +25,30 @@ const CAPABILITIES = {
   features: ["messages", "stream", "transcript"],
 };
 
-/** Fake model (fallback path) that emits usage and round usage on tool results. */
-function usageModel() {
-  return {
-    async runTurn(
-      _sessionId: string,
-      req: any,
-      ctx: { emit: (ev: any) => Promise<void>; signal?: AbortSignal },
-    ) {
-      const messages = Array.isArray(req?.messages) ? req.messages : [];
-      const turnId = "turn-usage";
-      await ctx.emit({
-        id: 1,
-        type: "turn.started",
-        version: 1,
-        ts: Date.now(),
-        data: { turnId, model: req.model ?? "usage-model", ts: Date.now() },
-      });
-      await ctx.emit({
-        id: 2,
-        type: "message.delta",
-        version: 1,
-        ts: Date.now(),
-        data: { text: "checking" },
-      });
-      await ctx.emit({
-        id: 3,
-        type: "tool.call",
-        version: 1,
-        ts: Date.now(),
-        data: { id: "c1", name: "bash", args: "{}" },
-      });
-      await ctx.emit({
-        id: 4,
-        type: "tool.result",
-        version: 1,
-        ts: Date.now(),
-        data: {
-          id: "c1",
-          name: "bash",
-          ok: true,
-          result: { exitCode: 0 },
+/**
+ * Engine script (one turn): a bash tool round whose final chunk carries the
+ * round's real usage (it lands on tool.result AND the running total), then
+ * a bare round whose usage chunk closes the turn on turn.finished — the
+ * transcript ends with exactly (user, assistant tool_calls, tool). The
+ * client is built per turn (the factory runs once per executeTurn call).
+ */
+function usageClientFactory() {
+  return () =>
+    scriptedClient([
+      [
+        {
+          tool_calls: [
+            {
+              index: 0,
+              id: "c1",
+              function: { name: "bash", arguments: '{"command":"echo round"}' },
+            },
+          ],
           usage: { prompt_tokens: 11, completion_tokens: 22, total_tokens: 33 },
         },
-      });
-      await ctx.emit({
-        id: 5,
-        type: "turn.finished",
-        version: 1,
-        ts: Date.now(),
-        data: {
-          turnId,
-          durationMs: 3,
-          usage: { prompt_tokens: 11, completion_tokens: 22, total_tokens: 33 },
-        },
-      });
-      // §4.3: leave the caller's array complete before turn.finished.
-      messages.push({
-        role: "assistant",
-        content: null,
-        tool_calls: [{ id: "c1", type: "function", function: { name: "bash", arguments: "{}" } }],
-      });
-      messages.push({
-        role: "tool",
-        tool_call_id: "c1",
-        name: "bash",
-        content: JSON.stringify({ exitCode: 0 }),
-      });
-    },
-  };
+      ],
+      [{ usage: { prompt_tokens: 11, completion_tokens: 22, total_tokens: 33 } }],
+    ]);
 }
 
 let daemon: Daemon;
@@ -97,11 +59,21 @@ let storePath: string;
 beforeAll(async () => {
   storePath = join(tmpdir(), `yog-usage-contract-${Date.now()}.db`);
   store = await SessionStore.open(storePath);
-  daemon = await createDaemon({
+  const bus = new EventEmitter();
+  bus.setMaxListeners(0);
+  const fake = orchestratorFromModel(usageClientFactory(), {
+    store,
+    bus,
+    registry: tools,
+    modelId: "usage-model",
+    rateLimit: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0 },
+  });
+  const opts: DaemonOptions = {
     host: "127.0.0.1",
     port: 0,
-    deps: { capabilities: CAPABILITIES, model: usageModel(), store },
-  });
+    deps: { capabilities: CAPABILITIES, orchestrator: fake.orchestrator, store, bus },
+  };
+  daemon = await createDaemon(opts);
   base = daemon.url;
 });
 
@@ -167,7 +139,7 @@ describe("conformance: per-turn usage + round usage on the wire", () => {
     const id = await newSession();
     await runTurn(id, "again");
 
-    const body = await turnGet(id, "turn-usage");
+    const body = await turnGet(id, "any");
     expect(body.turn.status).toBe("finished");
     expect(body.turn.usage).toEqual({ prompt_tokens: 11, completion_tokens: 22, total_tokens: 33 });
     const finishedEvent = body.turn.events.find((e: any) => e.type === "turn.finished");

@@ -4,9 +4,9 @@ import { lookupSession } from "./helpers.ts";
 /**
  * Validate a `turn.start` request beyond the session lookup: an open
  * session, a non-empty string `prompt`, string `model`/`streamId` and
- * boolean `abortOnDisconnect` when present, and a turn driver (orchestrator
- * or model provider) wired in. Returns the mapped error to send, or null
- * when the turn may proceed.
+ * boolean `abortOnDisconnect` when present, and an orchestrator wired in
+ * to drive the turn. Returns the mapped error to send, or null when the
+ * turn may proceed.
  */
 export function validateTurnInput(
   st: AdapterState,
@@ -39,10 +39,7 @@ export function validateTurnInput(
       data.streamId !== undefined && typeof data.streamId !== "string",
       { code: "invalid_request", message: "streamId must be a string" },
     ],
-    [
-      !st.hasOrchestrator && (!st.deps.model || typeof st.deps.model.runTurn !== "function"),
-      { code: "internal", message: "no model provider configured" },
-    ],
+    [!st.hasOrchestrator, { code: "internal", message: "no turn orchestrator configured" }],
   ];
   const bad = checks.find(([invalid]) => invalid);
   return bad === undefined ? null : bad[1];

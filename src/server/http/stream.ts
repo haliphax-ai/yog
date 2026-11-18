@@ -85,15 +85,8 @@ export async function streamSession(
 }
 
 /** Abort every turn bound to a closed stream (best effort per entry). */
-export function abortBoundTurns(
-  bound: Array<{ handle?: TurnHandleLike; controller?: AbortController }>,
-): void {
+export function abortBoundTurns(bound: Array<{ handle?: TurnHandleLike }>): void {
   for (const entry of bound) {
-    try {
-      entry.controller?.abort(new Error("client disconnected"));
-    } catch {
-      // best effort
-    }
     setTimeout(() => {
       try {
         entry.handle?.abort(new Error("client disconnected"));
