@@ -17,6 +17,8 @@
  *   src/toolkit/**    leaf domain: harness tools (may use host for out-of-VFS action)
  *   src/worker/**     worker process + JSONL client (infra; uses host only)
  *   src/state/**      agentfs-backed home/state (the only agentfs-SDK importer)
+ *   src/skills/**     leaf domain: agent-skills subsystem (uses host for
+ *                     file I/O, like every other leaf)
  *
  * Dependency invariants added with the compaction/shake work (#17-#19):
  *
@@ -25,6 +27,10 @@
  *   - The turn layer never imports the server domain — compaction/handoff
  *     orchestration sits on top of turn.ts, never beneath it
  *     (turn-no-server).
+ *   - Every domain (vfs, toolkit, worker, state, server, skills) exposes a
+ *     single public door: modules outside a domain may only import its
+ *     index.ts barrel (domain-entry-only:*), and leaf domains never reach
+ *     up into orchestration/infra (the *-leaf rule family).
  *   - The OpenAI SDK is a transport concern: value imports (client
  *     construction) live only in the server daemon's transport module
  *     (src/server/daemon/openai.ts); the rest of src/ may only import
@@ -58,7 +64,7 @@
 // in one generic regex (no backreferences), so the entry-only rule family is
 // generated per domain from this list; adding a new domain here extends the
 // same guarantee to it automatically.
-const DOMAINS = ["vfs", "toolkit", "worker", "state", "server"];
+const DOMAINS = ["vfs", "toolkit", "worker", "state", "server", "skills"];
 
 module.exports = {
   options: {
@@ -185,6 +191,17 @@ module.exports = {
       to: { path: "^(knex|better-sqlite3|agentfs-sdk)$" },
     },
 
+    // The skills domain is a leaf: it serves descriptors/tools/daemon alike,
+    // but never reaches up into orchestration, server, entry, or manifest.
+    {
+      name: "skills-leaf",
+      severity: "error",
+      from: { path: "^src/skills/" },
+      to: {
+        path: "^src/(vfs/|toolkit/|worker/|state/|server/|turn/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts|config\\.ts)",
+      },
+    },
+
     // The state layer is a leaf below tools/vfs — it never reaches up.
     {
       name: "state-leaf",
@@ -253,6 +270,18 @@ module.exports = {
       severity: "error",
       from: { path: "^src/turn(\\.ts|/)" },
       to: { path: "^src/server/" },
+    },
+    // The turn engine is likewise a leaf: injected registries and client,
+    // its own modules, and (value- or type-) imports of the state barrel for
+    // ids and record shapes. It never reaches up into infra, the manifest,
+    // entry, config, or the server domain (turn-no-server covers server/).
+    {
+      name: "turn-leaf",
+      severity: "error",
+      from: { path: "^src/turn(\\.ts|/)" },
+      to: {
+        path: "^src/(worker/|server/|index\\.ts|register\\.ts|mount\\.ts|config\\.ts)",
+      },
     },
 
     // The OpenAI SDK is a transport concern owned by the daemon: only

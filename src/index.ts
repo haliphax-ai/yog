@@ -12,8 +12,7 @@
  * application, which speaks the v1 HTTP/SSE contract directly.
  */
 import { parseServeArgs } from "./cli.ts";
-import { dispatchSkillsCommand } from "./skills/commands.ts";
-import { SkillManager } from "./skills/index.ts";
+import { dispatchSkillsCommand, SkillManager } from "./skills/index.ts";
 import { createDaemon, runCalibrate } from "./server/index.ts";
 import { logger } from "./log.ts";
 

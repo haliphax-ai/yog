@@ -8,7 +8,7 @@
  * concatenated instructions handed to the turn engine.
  *
  * Nothing outside `src/skills/` may import these internals directly
- * (depcruise `skills-entry-only`).
+ * (depcruise `domain-entry-only:skills`).
  */
 export * from "./types.ts";
 export * from "./validator.ts";
