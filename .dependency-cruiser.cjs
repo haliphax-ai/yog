@@ -26,8 +26,9 @@
  *     orchestration sits on top of turn.ts, never beneath it
  *     (turn-no-server).
  *   - The OpenAI SDK is a transport concern: value imports (client
- *     construction) live only in src/server/serve.ts; the rest of src/ may
- *     only import types (openai-client-in-serve-only).
+ *     construction) live only in the server daemon's transport module
+ *     (src/server/daemon/openai.ts); the rest of src/ may only import
+ *     types (openai-client-in-transport-only).
  *   - Network egress (node:http/https/http2) happens only inside the server
  *     domain (network-egress-in-server-only).
  *   - Hardware queries (node:os) stay in the config module, which computes
@@ -63,9 +64,9 @@ module.exports = {
   options: {
     exclude: { path: "(\\.git|dist|coverage|sys|sys-test|.harness|\\.serena)" },
     // Keep package dependencies in the graph (as non-followed leaves) so
-    // rules can target them by path, e.g. openai-client-in-serve-only.
+    // rules can target them by path, e.g. openai-client-in-transport-only.
     doNotFollow: { path: "node_modules" },
-    // Classify `import type` edges: required by openai-client-in-serve-only.
+    // Classify `import type` edges: required by openai-client-in-transport-only.
     tsPreCompilationDeps: true,
   },
   forbidden: [
@@ -255,13 +256,13 @@ module.exports = {
     },
 
     // The OpenAI SDK is a transport concern owned by the daemon: only
-    // serve.ts may construct a client (value import). Everywhere else the
-    // SDK may appear only as types — `import type` — so the client instance
-    // is always injected from the composition point.
+    // src/server/daemon/openai.ts may construct a client (value import).
+    // Everywhere else the SDK may appear only as types — `import type` —
+    // so the client instance is always injected from the composition point.
     {
-      name: "openai-client-in-serve-only",
+      name: "openai-client-in-transport-only",
       severity: "error",
-      from: { path: "^src/(?!server/serve\\.ts$)" },
+      from: { path: "^src/(?!server/daemon/openai\\.ts$)" },
       to: {
         path: "node_modules/openai(/|$)",
         dependencyTypesNot: ["type-only"],
