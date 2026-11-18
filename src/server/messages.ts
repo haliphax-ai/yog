@@ -2,7 +2,8 @@
  * Message envelope contract for the v1 messages channel.
  *
  * Clients POST one envelope to `POST /v1/sessions/{id}/messages` and the
- * server dispatches on `type` to a handler (see `src/server/http.ts`).
+ * server dispatches on `type` to a handler (see the `src/server/http/`
+ * transport).
  * Adding a feature means adding a `type` + handler — never a new HTTP route.
  *
  * Request:  `{ type, version?, requestId?, data? }`

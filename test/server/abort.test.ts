@@ -16,13 +16,13 @@ import { EventEmitter } from "node:events";
 import type { AddressInfo } from "node:net";
 import type OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
-import { createHttpServer } from "../../src/server/http.ts";
+import { createHttpServer } from "../../src/server/http/index.ts";
 import { SessionOrchestrator } from "../../src/server/orchestrator.ts";
-import { SessionStore } from "../../src/server/store/sessions.ts";
-import { TurnEngine } from "../../src/turn.ts";
+import { SessionStore } from "../../src/server/store/index.ts";
+import { TurnEngine } from "../../src/turn/index.ts";
 import { tools } from "../../src/register.ts";
 import { setBashExecutor } from "../../src/toolkit/index.ts";
-import type { TurnUsage } from "../../src/turn/sink.ts";
+import type { TurnUsage } from "../../src/turn/index.ts";
 import { openStream, sendMessage } from "../messages-helper.ts";
 
 /** `Response.json()` with a loose type: assertions do the checking. */

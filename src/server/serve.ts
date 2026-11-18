@@ -13,7 +13,7 @@
 import { createServer } from "node:http";
 import { EventEmitter } from "node:events";
 import type { AddressInfo } from "node:net";
-import { createHttpServer, type HttpDeps } from "./http.ts";
+import { createHttpServer, type HttpDeps } from "./http/index.ts";
 import { MESSAGE_TYPES } from "./messages.ts";
 import { SessionOrchestrator } from "./orchestrator.ts";
 import { COMPACTION_COMMANDS, SHAKE_COMMAND } from "./commands.ts";

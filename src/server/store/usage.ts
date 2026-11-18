@@ -1,4 +1,4 @@
-import type { TurnUsage } from "../../turn/sink.ts";
+import type { TurnUsage } from "../../turn/index.ts";
 
 /** Turn columns that may carry usage counters. */
 const USAGE_KEYS = ["prompt_tokens", "completion_tokens", "total_tokens"] as const;

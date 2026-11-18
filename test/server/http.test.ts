@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { EventEmitter } from "node:events";
 import { createDaemon, type Daemon, type DaemonOptions } from "../../src/server/serve.ts";
-import { createHttpServer } from "../../src/server/http.ts";
-import { SessionStore } from "../../src/server/store/sessions.ts";
+import { createHttpServer } from "../../src/server/http/index.ts";
+import { SessionStore } from "../../src/server/store/index.ts";
 import { tools } from "../../src/register.ts";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

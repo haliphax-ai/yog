@@ -33,11 +33,15 @@ src/
                     resolution (defaults <- file <- injection).
   register.ts       The wiring manifest: model-facing tools and virtual
                     filesystem descriptors as module-level constants.
-  turn.ts           The turn engine: streams completions, executes tool
-                    calls, feeds results back until the model answers
-                    without tools.
-  turn/             The typed event sink seam between the engine and the
-                    transport.
+  turn/             The turn engine domain: the barrel (index.ts) streams
+                    completions, executes tool calls, feeds results back
+                    until the model answers without tools.
+  server/           The long-lived HTTP/SSE daemon: composition root
+                    (serve.ts), the HTTP/SSE adapter domain (server/http/),
+                    SSE framing, session orchestrator, worker pool, the
+                    sqlite session store domain (server/store/), compaction,
+                    /shake, the agent-CLI registry, and the models.dev
+                    cache.
   mount.ts          Mount/unmount helpers (accepts any FuseOps).
   host.ts           Host proxy: the only sanctioned path for descriptors
                     and tools to touch the host filesystem and subprocesses
@@ -46,11 +50,6 @@ src/
   calibration.ts    Offline token-profile fitting (pure; pinned by tests).
   log.ts            pino loggers (server to stdout, client to stderr).
   fuse-native.d.ts  Ambient typings for the untyped fuse-native package.
-  server/           The long-lived HTTP/SSE daemon: composition root
-                    (serve.ts), the v1 adapter (http.ts), SSE framing,
-                    session orchestrator, worker pool, the sqlite session
-                    store, compaction, /shake, the agent-CLI registry, and
-                    the models.dev cache.
   vfs/              Descriptor plumbing: the node model, capability flags,
                     the registry (the sole permission guard), and the list
                     + /bin/yog shim descriptors.

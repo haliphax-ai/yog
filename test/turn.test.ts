@@ -9,8 +9,8 @@ import {
   rateLimitDelayMs,
   rateLimitHints,
   resolveRateLimitPolicy,
-} from "../src/turn.ts";
-import { RecordingSink, StdoutSink, type TurnEvent, type TurnUsage } from "../src/turn/sink.ts";
+} from "../src/turn/index.ts";
+import { RecordingSink, StdoutSink, type TurnEvent, type TurnUsage } from "../src/turn/index.ts";
 import { ToolRegistry, type ToolSpec } from "../src/toolkit/index.ts";
 import { logger } from "../src/log.ts";
 

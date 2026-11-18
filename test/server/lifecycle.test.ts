@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach, afterEach, beforeAll } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SessionStore } from "../../src/server/store/sessions.ts";
+import { SessionStore } from "../../src/server/store/index.ts";
 import { openStream, sendMessage } from "../messages-helper.ts";
 
 /**
@@ -213,7 +213,7 @@ describe("store: retention re-key (§4.5)", () => {
 
 describe("event persistence dedup (§4.8)", () => {
   it("bus subscriber delivers only — does not persist (the sink is the sole writer)", async () => {
-    const { createHttpServer } = await import("../../src/server/http.ts");
+    const { createHttpServer } = await import("../../src/server/http/index.ts");
     const { EventEmitter } = await import("node:events");
     const persisted: any[] = [];
     const store = {
@@ -268,10 +268,10 @@ describe("event persistence dedup (§4.8)", () => {
 });
 
 describe("routes: phase 5 part B (§4.6)", () => {
-  let createHttpServer: typeof import("../../src/server/http.ts").createHttpServer;
+  let createHttpServer: typeof import("../../src/server/http/index.ts").createHttpServer;
 
   beforeAll(async () => {
-    ({ createHttpServer } = await import("../../src/server/http.ts"));
+    ({ createHttpServer } = await import("../../src/server/http/index.ts"));
   });
 
   const jsonBody = async (res: Response): Promise<any> => JSON.parse(await res.text());

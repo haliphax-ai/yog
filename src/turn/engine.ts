@@ -6,7 +6,7 @@
  * `TurnEvent` on the sink. The engine awaits every `emit`, so slow
  * transports exert backpressure on the loop. The composition root supplies
  * its own sink (the engine never writes stdout itself; see `StdoutSink` in
- * turn/sink.ts for the CLI shape).
+ * turn/sink.ts (re-exported by the barrel) for the CLI shape).
  */
 
 import type OpenAI from "openai";

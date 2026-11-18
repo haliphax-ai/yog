@@ -12,7 +12,7 @@ import {
   extractCalibrationSamples,
   type CalibrateOutcome,
 } from "../calibration.ts";
-import { SessionStore, openSessionsDb } from "./store/sessions.ts";
+import { SessionStore, openSessionsDb } from "./store/index.ts";
 import { logger } from "../log.ts";
 import { join } from "node:path";
 
