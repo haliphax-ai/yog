@@ -48,7 +48,7 @@ jobs:
       - uses: haliphax-ai/yog/.github@main
       - run: |
           sudo apt-get update -qq && \
-            sudo apt-get install -yqq --no-install-recommends fuse
+            sudo apt-get install -yqq --no-install-recommends libfuse2t64
       - name: Install coverage provider
         run: |
           npm install --no-save \
