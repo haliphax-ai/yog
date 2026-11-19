@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { agentSpawnOptions, onAgentSpawn } from "../../src/worker/index.ts";
 import { getAgentOwnership } from "../../src/vfs/index.ts";
-import { createRuntime } from "../../src/server/daemon/runtime.ts";
+import { createRuntime } from "../../src/server/index.ts";
 
 /**
  * The agent-user split must be registered before the worker pool exists:

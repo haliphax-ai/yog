@@ -69,6 +69,11 @@
 // in one generic regex (no backreferences), so the entry-only rule family is
 // generated per domain from this list; adding a new domain here extends the
 // same guarantee to it automatically.
+//
+// Subdomain folders (server/daemon, vfs/ops, toolkit/tools) stay internal to
+// their domain: each module inside them is matched by the domain-wide
+// entry-only rule, and the domain composes them through its own
+// sub-barrel so no importer reaches past the domain door.
 const DOMAINS = ["vfs", "toolkit", "worker", "state", "server", "skills", "turn"];
 
 module.exports = {

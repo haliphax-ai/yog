@@ -5,10 +5,11 @@
  *
  * When `opts.deps` is supplied (tests), those boundaries are used verbatim —
  * no runtime is created. Otherwise `createDaemon` composes the daemon from
- * options → config file → zod defaults. The assembly lives in `./daemon/`:
- * `runtime.ts` (the best-effort boundaries), `bash-wiring.ts` (the bash
- * tool's seams), `turn-runner.ts` (the orchestrator's turn entry point),
- * `openai.ts` (the provider transport), and `skills-cli.ts`.
+ * options → config file → zod defaults. The assembly lives in `./daemon/`
+ * (composed through its barrel): `runtime.ts` (the best-effort boundaries),
+ * `bash-wiring.ts` (the bash tool's seams), `turn-runner.ts` (the
+ * orchestrator's turn entry point), `openai.ts` (the provider transport),
+ * and `skills-cli.ts`.
  */
 import { createServer } from "node:http";
 import { EventEmitter } from "node:events";
@@ -28,10 +29,14 @@ import { logger } from "../log.ts";
 import { resolveConfig, type YogConfig, type PartialYogConfig } from "../config.ts";
 import { createCompactionRunner, type CompactionBoundary } from "./compaction.ts";
 import { createShakeRunner, type ShakeOutcome } from "./shake.ts";
-import { createRuntime } from "./daemon/runtime.ts";
-import { openaiClient } from "./daemon/openai.ts";
-import { unwireBashTool, wireBashTool } from "./daemon/bash-wiring.ts";
-import { makeExecuteTurn, type UsageBySession } from "./daemon/turn-runner.ts";
+import {
+  createRuntime,
+  makeExecuteTurn,
+  openaiClient,
+  type UsageBySession,
+  unwireBashTool,
+  wireBashTool,
+} from "./daemon/index.ts";
 
 /** Options accepted by {@link createDaemon}. */
 export interface DaemonOptions {

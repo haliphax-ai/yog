@@ -14,8 +14,7 @@ import { existsSync } from "node:fs";
 import { appendFile, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { mountSys, unmountSys } from "../src/mount.ts";
-import { ListDescriptor } from "../src/vfs/descriptors/list.ts";
-import { DescriptorRegistry } from "../src/vfs/index.ts";
+import { DescriptorRegistry, ListDescriptor } from "../src/vfs/index.ts";
 
 const mnt = "./sys-test";
 const file = `${mnt}/list`;
