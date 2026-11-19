@@ -161,6 +161,90 @@ let activeClientFactory = hangingToolCallClient;
 /** Usage as of the last cut point, per session (mirrors serve.ts). */
 const usageBySession = new Map<string, TurnUsage | undefined>();
 
+/**
+ * The per-turn callback, mirroring serve.ts's executeTurn: hydrate the
+ * transcript, run the engine over the active fake client, persist the
+ * (partial) batch and settle the row on every exit path — success,
+ * operator abort, or provider failure (yog#42). The signal is the
+ * authoritative abort marker mid-stream.
+ */
+async function runTurn(input: {
+  store: SessionStore;
+  bus: EventEmitter;
+  usageBySession: Map<string, TurnUsage | undefined>;
+  sessionId: string;
+  req: Record<string, unknown>;
+  ctx?: { signal?: AbortSignal };
+}): Promise<{ turnId: string | null }> {
+  const { store, bus, usageBySession, sessionId, req, ctx = {} } = input;
+  const prompt = String(req.prompt ?? "");
+  const prior = (await store.getTranscript(sessionId)) as unknown as ChatCompletionMessageParam[];
+  const messages: ChatCompletionMessageParam[] = [...prior, { role: "user", content: prompt }];
+  const startLen = prior.length;
+  const turnRow = (await store.addTurn(sessionId, {
+    role: "user",
+    content: prompt,
+    status: "running",
+    model: "fake",
+  })) as { id?: number };
+
+  let turnId: string | null = null;
+  const sink = {
+    async emit(ev: any): Promise<void> {
+      if (ev.type === "turn.started") turnId = ev.data.turnId;
+      await store.addEvent(sessionId, {
+        type: ev.type,
+        payload: JSON.stringify(ev.data),
+        version: ev.version,
+      });
+      bus.emit(`session:${sessionId}`, ev);
+    },
+  };
+  const turnOpts = {
+    sessionId,
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
+    isAborted: () => ctx.signal?.aborted === true,
+    abortReason: "turn aborted by operator",
+    onUsage: (u: TurnUsage) => usageBySession.set(sessionId, u),
+  };
+  const turnBook = { store, sessionId, messages, startLen, turnRowId: turnRow.id ?? null };
+  try {
+    await new TurnEngine(sink).run(activeClientFactory(), "fake", messages, tools, turnOpts);
+    await persistAndSettle(turnBook, "finished");
+  } catch (err) {
+    // Mirror serve.ts's failure policy (yog#42): any failure persists
+    // the partial batch (prompt + healed stubs), abort settling as
+    // `aborted` and provider failure as `error`.
+    const status = isOperatorAbort(ctx, err) ? "aborted" : "error";
+    await persistAndSettle(turnBook, status);
+  }
+  return { turnId };
+}
+/** Persist the (partial) batch, then stamp the turn row. */
+async function persistAndSettle(
+  turn: {
+    store: SessionStore;
+    sessionId: string;
+    messages: ChatCompletionMessageParam[];
+    startLen: number;
+    turnRowId: number | null;
+  },
+  status: string,
+): Promise<void> {
+  const { store, sessionId, messages, startLen, turnRowId } = turn;
+  if (messages.length > startLen) {
+    await store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
+  }
+  await store
+    .finishTurn(sessionId, turnRowId, status, usageBySession.get(sessionId))
+    .catch(() => {});
+}
+
+/** An operator abort: the signal mid-stream, an AbortError otherwise. */
+function isOperatorAbort(ctx: { signal?: AbortSignal }, err: unknown): boolean {
+  return ctx.signal?.aborted === true || (err instanceof Error && err.name === "AbortError");
+}
+
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), "yog-abort-"));
   store = await SessionStore.open(join(dir, "sessions.db"));
@@ -176,69 +260,8 @@ beforeAll(async () => {
   // unanswered call.
   setBashExecutor(() => new Promise(() => undefined));
 
-  const executeTurn = async (
-    sessionId: string,
-    req: Record<string, unknown>,
-    ctx: { signal?: AbortSignal } = {},
-  ): Promise<{ turnId: string | null }> => {
-    const prompt = typeof req.prompt === "string" ? req.prompt : "";
-    const prior = (await store.getTranscript(sessionId)) as unknown as ChatCompletionMessageParam[];
-    const messages: ChatCompletionMessageParam[] = [...prior, { role: "user", content: prompt }];
-    const startLen = prior.length;
-    const turnRow = await store.addTurn(sessionId, {
-      role: "user",
-      content: prompt,
-      status: "running",
-      model: "fake",
-    });
-    const turnRowId = (turnRow as { id?: number }).id ?? null;
-
-    let turnId: string | null = null;
-    const sink = {
-      async emit(ev: any): Promise<void> {
-        if (ev.type === "turn.started") turnId = ev.data.turnId;
-        await store.addEvent(sessionId, {
-          type: ev.type,
-          payload: JSON.stringify(ev.data),
-          version: ev.version,
-        });
-        bus.emit(`session:${sessionId}`, ev);
-      },
-    };
-    try {
-      await new TurnEngine(sink).run(activeClientFactory(), "fake", messages, tools, {
-        sessionId,
-        ...(ctx.signal ? { signal: ctx.signal } : {}),
-        isAborted: () => ctx.signal?.aborted === true,
-        abortReason: "turn aborted by operator",
-        onUsage: (u) => usageBySession.set(sessionId, u),
-      });
-      if (messages.length > startLen) {
-        await store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
-      }
-      await store
-        .finishTurn(sessionId, turnRowId, "finished", usageBySession.get(sessionId))
-        .catch(() => {});
-    } catch (err) {
-      // Mirror serve.ts's failure policy (yog#42): any failure persists
-      // the partial batch (prompt + healed stubs), abort settling as
-      // `aborted` and provider failure as `error`.
-      const isOperatorAbort =
-        ctx.signal?.aborted === true || (err instanceof Error && err.name === "AbortError");
-      if (messages.length > startLen) {
-        await store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
-      }
-      await store
-        .finishTurn(
-          sessionId,
-          turnRowId,
-          isOperatorAbort ? "aborted" : "error",
-          usageBySession.get(sessionId),
-        )
-        .catch(() => {});
-    }
-    return { turnId };
-  };
+  const executeTurn = (sessionId: string, req: Record<string, unknown>, ctx = {}) =>
+    runTurn({ store, bus, usageBySession, sessionId, req, ctx });
 
   const orchestrator = new SessionOrchestrator({ store, executeTurn });
 
