@@ -6,28 +6,11 @@
  * runs. The `ToolRegistry` holds the active tools and executes calls by name.
  *
  * Nothing outside `src/toolkit/` may import these internals directly
- * (depcruise `toolkit-entry-only`); tools themselves import `types.ts`/`registry.ts`
- * rather than this barrel to avoid a cycle.
+ * (depcruise `toolkit-entry-only`); tools themselves import `types.ts`/
+ * `registry.ts` rather than this barrel to avoid a cycle.
  */
 export * from "./types.ts";
 export * from "./registry.ts";
 export * from "./token-profiles.ts";
 export * from "./truncation.ts";
-export {
-  abortBash,
-  bashTool,
-  setBashAbort,
-  setBashExecutor,
-  setShellStateProvider,
-  setSkillPathProvider,
-} from "./tools/bash.ts";
-export type {
-  BashAbort,
-  BashArgs,
-  BashExecutionResult,
-  BashExecutor,
-  BashRequestOpts,
-  BashResult,
-  ShellStateProvider,
-  SkillPathProvider,
-} from "./tools/bash.ts";
+export * from "./tools/index.ts";

@@ -13,13 +13,20 @@ import {
   bufferWrite,
   commitOpen,
   createEntry,
+  listingFor,
+  mkdirEntry,
   openEntry,
   readBytes,
+  renameEntry,
+  rmdirEntry,
+  statFor,
   truncateEntry,
-} from "./ops/io.ts";
-import { listingFor, mkdirEntry, rmdirEntry, statFor, unlinkEntry } from "./ops/dirs.ts";
-import { renameEntry } from "./ops/rename.ts";
-import { type Ctx, type OpenFile, type ReadWire, type WriteWire } from "./ops/types.ts";
+  unlinkEntry,
+  type Ctx,
+  type OpenFile,
+  type ReadWire,
+  type WriteWire,
+} from "./ops/index.ts";
 
 /**
  * Registry of FUSE descriptor nodes keyed by mount path — the mount's root is

@@ -39,9 +39,9 @@ src/
   server/           The long-lived HTTP/SSE daemon: composition root
                     (serve.ts), the HTTP/SSE adapter domain (server/http/),
                     SSE framing, session orchestrator, worker pool, the
-                    sqlite session store domain (server/store/), compaction,
-                    /shake, the agent-CLI registry, and the models.dev
-                    cache.
+                    sqlite session store domain (server/store/), the
+                    daemon assembly (server/daemon/), compaction, /shake,
+                    the agent-CLI registry, and the models.dev cache.
   mount.ts          Mount/unmount helpers (accepts any FuseOps).
   host.ts           Host proxy: the only sanctioned path for descriptors
                     and tools to touch the host filesystem and subprocesses
@@ -51,11 +51,12 @@ src/
   log.ts            pino loggers (server to stdout, client to stderr).
   fuse-native.d.ts  Ambient typings for the untyped fuse-native package.
   vfs/              Descriptor plumbing: the node model, capability flags,
-                    the registry (the sole permission guard), and the list
-                    + /bin/yog shim descriptors.
+                    the registry (the sole permission guard; it composes
+                    the vfs/ops/ FUSE-op modules), and the list + /bin/yog
+                    shim descriptors.
   toolkit/          Harness-tool plumbing: ToolSpec/ToolResult, the tool
-                    registry, the bash tool, output truncation, and token
-                    estimation profiles.
+                    registry, the bash tool (toolkit/tools/), output
+                    truncation, and token estimation profiles.
   worker/           The bash worker process: JSONL protocol, persistent-
                     shell wrapper, daemon-side client.
   state/            The agentfs-backed state layer (the only module allowed

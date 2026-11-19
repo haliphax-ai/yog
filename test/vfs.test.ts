@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ListDescriptor } from "../src/vfs/descriptors/list.ts";
+import { ListDescriptor } from "../src/vfs/index.ts";
 import {
   getAgentOwnership,
   type DescriptorFile,

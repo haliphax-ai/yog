@@ -25,6 +25,7 @@
  *   - `./constants.ts` — errno/mode/owner constants, DescriptorFlags, WriteMode
  *   - `./node.ts`      — DescriptorNode/DescriptorFile/DescriptorFolder/DescriptorChild
  *   - `./registry.ts`  — DescriptorRegistry (the FUSE ops adapter)
+ *   - `./ops/`         — the FUSE-op modules the registry composes
  *   - `./descriptors/` — concrete descriptors (ListDescriptor, …)
  *
  * Nothing outside `src/vfs/` may import these internals directly (depcruise
