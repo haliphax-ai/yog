@@ -32,6 +32,7 @@ export const MESSAGE_TYPES = [
   "skills.load",
   "skills.unload",
   "skills.status",
+  "jobs.get",
 ] as const;
 
 export type MessageType = (typeof MESSAGE_TYPES)[number];

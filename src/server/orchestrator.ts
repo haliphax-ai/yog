@@ -165,6 +165,38 @@ export class SessionOrchestrator {
   }
 
   /**
+   * True when the session has a live turn handle (queued or in-flight).
+   * The background-jobs manager gates "finished while a foreign turn is
+   * active → mark pending" on this: a settle observed while `isBusy` rides
+   * the next wake instead of delivering now.
+   */
+  isBusy(sessionId: string): boolean {
+    return this.turns.has(sessionId);
+  }
+
+  /**
+   * Call `cb` when the session's current tail settles with no newer turn
+   * chained on behind it (the session went idle). Used by the background-
+   * jobs manager to deliver results the moment the tail settles; a turn
+   * submitted between the tail's settle and the callback's effects simply
+   * makes the delivery take the pending path instead (no gate is lost —
+   * `isBusy` is re-checked at delivery time). Returns an unsubscribe.
+   */
+  onIdle(sessionId: string, cb: () => void): () => void {
+    const tail = this.tails.get(sessionId) ?? Promise.resolve();
+    let live = true;
+    void tail.then(() => {
+      if (!live) return;
+      // A newer turn chained on since: its own tail will fire onIdle.
+      if (this.tails.get(sessionId) !== undefined) return;
+      cb();
+    });
+    return () => {
+      live = false;
+    };
+  }
+
+  /**
    * Abort the session's current turn (operator-driven turn abort):
    *
    * 1. `killTool` runs first — the tool call in flight dies before anything
