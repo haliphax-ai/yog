@@ -39,6 +39,9 @@
  *   - src/schedule/** is an absolute leaf: the cancelable-timeout primitive
  *     imports nothing under src/ (schedule-leaf) — deterministic time needs
  *     a dependency-free floor, and consumers get the Scheduler injected.
+ *   - src/server/jobs/** is a leaf below orchestration: the background-jobs
+ *     manager never imports the HTTP adapter, the turn engine, the entry,
+ *     the manifest, or config (jobs-leaf) — everything arrives injected.
  *   - The OpenAI SDK is a transport concern: value imports (client
  *     construction) live only in the server daemon's transport module
  *     (src/server/daemon/openai.ts); the rest of src/ may only import
@@ -76,8 +79,20 @@
 // Subdomain folders (server/daemon, vfs/ops, toolkit/tools) stay internal to
 // their domain: each module inside them is matched by the domain-wide
 // entry-only rule, and the domain composes them through its own
-// sub-barrel so no importer reaches past the domain door.
-const DOMAINS = ["vfs", "toolkit", "worker", "state", "server", "skills", "turn", "schedule"];
+// sub-barrel so no importer reaches past the domain door. server/jobs is
+// listed as its own domain instead: it is a leaf below orchestration (like
+// skills), with a jobs-leaf rule of its own.
+const DOMAINS = [
+  "vfs",
+  "toolkit",
+  "worker",
+  "state",
+  "server",
+  "jobs",
+  "skills",
+  "turn",
+  "schedule",
+];
 // Subdomains that expose a type-only door: modules outside the owning folder
 // may reach into their internals only as `import type` shapes — values are
 // always injected from the composition point. Generated per entry like
@@ -217,6 +232,20 @@ module.exports = {
       from: { path: "^src/skills/" },
       to: {
         path: "^src/(vfs/|toolkit/|worker/|state/|server/|turn/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts|config\\.ts)",
+      },
+    },
+
+    // The background-jobs domain is a leaf below orchestration: it serves
+    // the composition root and (via the HTTP adapter's injected boundary)
+    // the message channel, but never reaches up into the adapter, the turn
+    // engine, the entry, the manifest, or config (the manager receives
+    // plain injected values, like every other leaf).
+    {
+      name: "jobs-leaf",
+      severity: "error",
+      from: { path: "^src/server/jobs/" },
+      to: {
+        path: "^src/(server/http/|turn/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts|config\\.ts)",
       },
     },
 
