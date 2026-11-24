@@ -9,7 +9,10 @@
  * call, and `argField` the data field free-text line args land in. The
  * slash name is client-side sugar and never sent to the server.
  *
- * Descriptors live next to their implementations (compaction, shake,
+ * Descriptors live next to their implementations (compaction, shake, jobs)
+ * and the composition root concatenates by what actually wired, so
+ * presence in the list IS availability — a command the daemon cannot serve
+ * is never advertised.
  * skills) and the composition root concatenates by what actually wired, so
  * presence in the list IS availability — a command the daemon cannot serve
  * is never advertised.
@@ -64,4 +67,14 @@ export const SHAKE_COMMAND: CommandDescriptor = {
   summary: "truncate oversized tool args/results in the transcript",
   message: "transcript.shake",
   requiresIdle: true,
+};
+
+/** `/jobs [id]` — background jobs: the session's jobs, or one job's detail. */
+export const JOBS_COMMAND: CommandDescriptor = {
+  name: "jobs",
+  summary: "list background jobs, or show one job's detail",
+  args: "[id]",
+  message: "jobs.get",
+  argField: "jobId",
+  requiresIdle: false,
 };

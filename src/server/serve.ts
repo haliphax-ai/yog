@@ -17,7 +17,7 @@ import type { AddressInfo } from "node:net";
 import { createHttpServer, type HttpDeps } from "./http/index.ts";
 import { MESSAGE_TYPES } from "./messages.ts";
 import { SessionOrchestrator } from "./orchestrator.ts";
-import { COMPACTION_COMMANDS, SHAKE_COMMAND } from "./commands.ts";
+import { COMPACTION_COMMANDS, JOBS_COMMAND, SHAKE_COMMAND } from "./commands.ts";
 import { tools } from "../register.ts";
 import { abortBash } from "../toolkit/index.ts";
 import {
@@ -37,6 +37,7 @@ import {
   unwireBashTool,
   wireBashTool,
   createPreludeSink,
+  registerJobsCliCommand,
 } from "./daemon/index.ts";
 import { JobManager, type JobManagerDeps, type JobManagerOptions } from "./jobs/index.ts";
 import { defaultWorkers } from "../config.ts";
@@ -161,6 +162,7 @@ async function composeDaemon(
     modelFor: (sessionId) => lastTurnModel(runtime.store, sessionId),
   });
   jobs.wire();
+  registerJobsCliCommand(jobs);
 
   const compaction = buildCompaction(config, runtime, modelId);
   const shake = buildShake(runtime);
@@ -183,6 +185,7 @@ async function composeDaemon(
       commands: [
         ...(compaction !== undefined ? COMPACTION_COMMANDS : []),
         ...(shake !== undefined ? [SHAKE_COMMAND] : []),
+        ...(jobs ? [JOBS_COMMAND] : []),
       ],
     },
     contextWindowFor: (model: string) => runtime.modelInfo?.getContextWindow(model),
