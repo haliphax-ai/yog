@@ -21,6 +21,9 @@
  *   src/state/**      agentfs-backed home/state (the only agentfs-SDK importer)
  *   src/skills/**     leaf domain: agent-skills subsystem (uses host for
  *                     file I/O, like every other leaf)
+ *   src/schedule/**   absolute leaf domain: cancelable timeouts with an
+ *                     injectable clock + timer impl (imports nothing under
+ *                     src/, not even host)
  *
  * Dependency invariants added with the compaction/shake work (#17-#19):
  *
@@ -33,9 +36,9 @@
  *     exposes a single public door: modules outside a domain may only import
  *     its index.ts barrel (domain-entry-only:*), and leaf domains never
  *     reach up into orchestration/infra (the *-leaf rule family).
- *     single public door: modules outside a domain may only import its
- *     index.ts barrel (domain-entry-only:*), and leaf domains never reach
- *     up into orchestration/infra (the *-leaf rule family).
+ *   - src/schedule/** is an absolute leaf: the cancelable-timeout primitive
+ *     imports nothing under src/ (schedule-leaf) — deterministic time needs
+ *     a dependency-free floor, and consumers get the Scheduler injected.
  *   - The OpenAI SDK is a transport concern: value imports (client
  *     construction) live only in the server daemon's transport module
  *     (src/server/daemon/openai.ts); the rest of src/ may only import
@@ -74,8 +77,7 @@
 // their domain: each module inside them is matched by the domain-wide
 // entry-only rule, and the domain composes them through its own
 // sub-barrel so no importer reaches past the domain door.
-const DOMAINS = ["vfs", "toolkit", "worker", "state", "server", "skills", "turn"];
-
+const DOMAINS = ["vfs", "toolkit", "worker", "state", "server", "skills", "turn", "schedule"];
 module.exports = {
   options: {
     exclude: { path: "(\\.git|dist|coverage|sys|sys-test|.harness|\\.serena)" },
@@ -240,6 +242,16 @@ module.exports = {
       to: {
         path: "^src/(vfs/|toolkit/|worker/|state/|server/|turn/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts)",
       },
+    },
+
+    // The schedule domain is an absolute leaf: deterministic time needs a
+    // dependency-free floor. It imports nothing under src/ — not host, not
+    // config, not log. Consumers receive the Scheduler via injection.
+    {
+      name: "schedule-leaf",
+      severity: "error",
+      from: { path: "^src/schedule/" },
+      to: { path: "^src/(?!schedule/)" },
     },
 
     // Configuration is loaded once at the composition root (the CLI entry and
