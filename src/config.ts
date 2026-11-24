@@ -120,6 +120,36 @@ export const YogConfigSchema = z
      * no drop; without CAP_SETUID the drop fails and the worker falls back
      * to the harness user with a logged warning.
      */
+    /**
+     * Wall-clock ms after which a still-running tool call detaches into a
+     * background job (the detach seam's threshold). Default 120000 (2 min).
+     */
+    bgDetachMs: z.number().int().min(1).default(120_000),
+    /**
+     * Per-session background-job slots: a threshold race that finds the
+     * session's slots full terminates the call immediately (error result,
+     * no job row). Unset = the worker-pool default `max(1, cpus - 1)`.
+     */
+    bgMaxJobsPerSession: z.number().int().min(1).optional(),
+    /**
+     * The graduated wake ladder (ms) for detached-job wake turns. Advance
+     * one rung when a wake fires with nothing finished; reset to rung 0
+     * only when the queue clears. Nonempty, ascending, unbounded length
+     * (the ceiling rung repeats).
+     */
+    bgWakeLadderMs: z
+      .array(z.number().int().min(1))
+      .nonempty()
+      .refine((ladder) => ladder.every((ms, i) => i === 0 || ms > ladder[i - 1]!), {
+        message: "bgWakeLadderMs must be strictly ascending",
+      })
+      .default([10_000, 30_000, 60_000, 120_000, 300_000, 600_000, 1_800_000]),
+    /**
+     * Per-job lifetime cap (ms): a job still running at its cap is
+     * terminated ("max runtime") and the termination is delivered via a
+     * wake turn. Default 6h.
+     */
+    bgJobMaxMs: z.number().int().min(1).default(21_600_000),
     agentUid: z.number().int().min(1).default(DEFAULT_AGENT_UID),
     agentGid: z.number().int().min(1).default(DEFAULT_AGENT_GID),
     agentHome: z.string().min(1).default("/home/agent"),

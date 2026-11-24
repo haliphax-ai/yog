@@ -38,6 +38,8 @@ import {
   wireBashTool,
   createPreludeSink,
 } from "./daemon/index.ts";
+import { JobManager, type JobManagerDeps, type JobManagerOptions } from "./jobs/index.ts";
+import { defaultWorkers } from "../config.ts";
 
 /** Options accepted by {@link createDaemon}. */
 export interface DaemonOptions {
@@ -147,6 +149,19 @@ async function composeDaemon(
     executeTurn,
   });
 
+  // --- background jobs (yog#91): the JobManager owns the detach seam's
+  // other half — slots, the wake ladder, the cap, wake-turn delivery ---
+  const jobs = buildJobManager(config, modelId, {
+    pool: runtime.pool,
+    orchestrator,
+    prelude,
+    scheduler: runtime.scheduler,
+    recordSettled:
+      runtime.state !== undefined ? (rec) => runtime.state!.recordToolCall(rec) : undefined,
+    modelFor: (sessionId) => lastTurnModel(runtime.store, sessionId),
+  });
+  jobs.wire();
+
   const compaction = buildCompaction(config, runtime, modelId);
   const shake = buildShake(runtime);
 
@@ -161,6 +176,7 @@ async function composeDaemon(
         "transcript",
         "abort",
         "rate-limit-retry",
+        "background-jobs",
         ...(runtime.skills !== undefined ? ["skills"] : []),
       ],
       messageTypes: [...MESSAGE_TYPES],
@@ -179,6 +195,7 @@ async function composeDaemon(
     onUsageFor: (sessionId: string) => usageBySession.get(sessionId),
     prelude,
     onAbortKillTool: (sessionId: string) => abortBash(sessionId),
+    jobs,
   };
 
   const server = createHttpServer(deps);
@@ -189,6 +206,7 @@ async function composeDaemon(
   // unmount, state), then exit.
   const shutdown = async (): Promise<void> => {
     await closeServer(server).catch(() => {});
+    jobs.close();
     unwireBashTool();
     await runtime.close();
   };
@@ -247,6 +265,39 @@ function buildShake(
     return createShakeRunner({ store: runtime.store, registry: tools });
   } catch (err) {
     logger.warn(`[yog] warning: shake unavailable (${(err as Error).message}); continuing`);
+    return undefined;
+  }
+}
+
+/**
+ * Background-jobs manager: resolve the config-derived options (the slot
+ * default mirrors the worker pool's `max(1, cpus - 1)`, handed down as a
+ * plain value by the config module) and inject the runtime boundaries.
+ */
+function buildJobManager(config: YogConfig, modelId: string, deps: JobManagerDeps): JobManager {
+  const slots = config.bgMaxJobsPerSession ?? defaultWorkers();
+  const opts: JobManagerOptions = {
+    detachMs: config.bgDetachMs,
+    maxJobsPerSession: slots,
+    wakeLadderMs: config.bgWakeLadderMs,
+    jobMaxMs: config.bgJobMaxMs,
+    toolOutputLimit: config.toolOutputLimit ?? 50_000,
+    modelId,
+  };
+  return new JobManager(opts, deps);
+}
+
+/** The session's last turn's model id (wake turns reuse it). */
+async function lastTurnModel(
+  store: { listTurns?(sessionId: string): Promise<unknown> } | undefined,
+  sessionId: string,
+): Promise<string | undefined> {
+  if (store?.listTurns === undefined) return undefined;
+  try {
+    const turns = (await store.listTurns(sessionId)) as Array<{ model?: unknown }>;
+    const last = turns.at(-1);
+    return typeof last?.model === "string" ? last.model : undefined;
+  } catch {
     return undefined;
   }
 }

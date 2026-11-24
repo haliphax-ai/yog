@@ -83,6 +83,35 @@ export interface EventBusBoundary {
 }
 
 /**
+ * The background-jobs surface the adapter consumes (structural — the real
+ * manager satisfies it; the field is absent when no manager is wired).
+ */
+export interface JobRowLike {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly tool: string;
+  readonly argsJson: string | null;
+  readonly startedAt: number;
+  readonly endedAt?: number;
+  state: string;
+  readonly result?: unknown;
+  readonly pid?: number;
+  readonly termReason?: string;
+  delivered?: boolean;
+}
+
+export interface JobsBoundary {
+  /** Idle abort: kill the session's jobs; the count for the abort reply. */
+  abortSessionJobs(sessionId: string): number;
+  /** Purge: kill + drop the session's job records (no zombie wakes). */
+  purgeSession(sessionId: string): void;
+  /** One job by id (daemon-wide), or undefined. */
+  job(jobId: string): JobRowLike | undefined;
+  /** A session's jobs, in start order. */
+  jobsFor(sessionId: string): JobRowLike[];
+}
+
+/**
  * Injected dependencies. Fields are optional so tests can fake any boundary;
  * the index signature keeps the seam open for store/orchestrator/factory deps.
  */
@@ -112,6 +141,12 @@ export interface HttpDeps {
   skillsSessionId?: string;
   /** Per-session prelude notices (purged with the session). */
   prelude?: PreludeSink;
+  /**
+   * The background-jobs manager (yog#91): idle aborts kill the session's
+   * jobs (additive `aborted.backgroundJobs` on the reply), purges drop
+   * them first. Absent when no manager is wired (injected-deps tests).
+   */
+  jobs?: JobsBoundary;
 }
 
 /**

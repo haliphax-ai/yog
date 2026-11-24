@@ -1,6 +1,6 @@
 import type { MsgCtx, SessionResolvers } from "./types.ts";
 
-import type { HttpDeps, SessionRecord } from "./types.ts";
+import type { HttpDeps, JobsBoundary, SessionRecord } from "./types.ts";
 import type { CompactionKind } from "../compaction.ts";
 import type { SkillManager } from "../../skills/index.ts";
 
@@ -32,7 +32,11 @@ export async function handleSessionDetach(
         ? await store!.purgeSession(id)
         : (sessions.delete(id), 1);
     // The purge owns every seam keyed by the session id: its pending
-    // prelude notices die with it (nothing would ever drain them).
+    // prelude notices die with it (nothing would ever drain them), and its
+    // background jobs are killed first — no zombie wakes against a purged
+    // session (yog#91).
+    const jobsManager = deps.jobs as JobsBoundary | undefined;
+    jobsManager?.purgeSession(id);
     deps.prelude?.clear(id);
     if (purged === 0) ctx.fail("unknown_session", `session ${id} not found`);
     else ctx.reply(200, { ok: true, deleted: true, id });
@@ -54,6 +58,38 @@ export async function handleSessionDetach(
     }
   }
   ctx.reply(200, { session: detached });
+}
+
+/**
+ * `jobs.get`: the session-scoped background-jobs read. `{ jobId }` names
+ * one job (detail: id, session, tool, args, state, timestamps, pid, and
+ * the result once settled); without it the session's jobs are listed in
+ * start order. An unknown id is 404 `unknown_job`; a daemon without the
+ * manager answers 500 `internal` (the type is still dispatched so clients
+ * get a mapped error, like the skills types without the subsystem).
+ */
+export async function handleJobsGet(deps: HttpDeps, ctx: MsgCtx): Promise<void> {
+  const { id, data } = ctx;
+  const jobs = deps.jobs as JobsBoundary | undefined;
+  if (jobs === undefined) {
+    ctx.fail("internal", "background jobs are not configured on this server");
+    return;
+  }
+  const jobId = data.jobId;
+  if (jobId !== undefined && (typeof jobId !== "string" || jobId.trim() === "")) {
+    ctx.fail("invalid_request", "jobId must be a non-empty string");
+    return;
+  }
+  if (typeof jobId === "string") {
+    const job = jobs.job(jobId);
+    if (job === undefined) {
+      ctx.fail("unknown_job", `job ${jobId} not found`);
+      return;
+    }
+    ctx.reply(200, { job });
+    return;
+  }
+  ctx.reply(200, { jobs: jobs.jobsFor(id) });
 }
 
 /**

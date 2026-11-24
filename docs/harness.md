@@ -145,22 +145,57 @@ job instead of holding the turn hostage. Until a policy is armed
 pattern as the output budgets), the seam is inert: no timer, no behavior
 change.
 
-When the background-jobs manager arms it (yog#85/#91), a call still
-running after the threshold (default 120s, config `bgDetachMs`) races the
-policy:
+When the background-jobs manager arms it (shipped: `JobManager`,
+`src/server/jobs/`), a call still running after the threshold (default
+120s, config `bgDetachMs`) races the policy:
 
-- **detach** — the engine's await resolves with a synthetic
-  `{"backgroundJobId": …}` tool result (the transcript gets a normal
-  tool row; no dangling call, no healer involvement), while the real
-  result keeps running for the manager to deliver later as a wake turn.
-  A detached call is immune to `turn.abort` by construction (the
+- **detach** (a session slot is free) — the engine's await resolves with a
+  synthetic `{"backgroundJobId": …}` tool result (the transcript gets a
+  normal tool row; no dangling call, no healer involvement), while the
+  real result keeps running for the manager to deliver later as a wake
+  turn. A detached call is immune to `turn.abort` by construction (the
   registry's abort race disarms), and the bash tool skips its shell-state
   write-back (background scratch state never touches the live mirror).
+  The live bash run is retargeted under `bg:<jobId>` in the worker pool,
+  so a later session-keyed abort can never kill it; the job's row carries
+  the wrapper child's `pid` (`kill -- -<pid>` addresses the whole process
+  group).
 - **terminate** (no free job slot) — the call is killed via the caller's
   kill hook (bash: the existing session-keyed abort) or simply abandoned
-  (generic tools), and the turn gets a `terminated: …` error row.
-  kill hook (bash: the existing session-keyed abort) or simply abandoned
-  (generic tools), and the turn gets a `terminated: ...` error row.
+  (generic tools), and the turn gets a `terminated: …` error row. No job
+  row is registered.
+
+### Background jobs: slots, ladder, cap, wake turns
+
+The manager is per-session, in-memory only (a restart drops every job,
+timer, and rung — completion forensics survive in the agentfs audit
+rows):
+
+- **Slots** — `bgMaxJobsPerSession` per session (default: the worker-pool
+  size, `max(1, cpus - 1)`). A hung job occupies its slot until the cap.
+- **Wake ladder** — `bgWakeLadderMs` (default 10s → 30m ceiling). A job
+  finishing while the session is idle delivers at once as a _wake turn_
+  (an ordinary turn: own row, events, SSE, hydration; a dormant session
+  is revived). Jobs finishing during a live turn ride the next wake,
+  batched into one shared prompt. The rung advances only when a wake
+  fires with nothing finished and resets only when the queue clears.
+- **Cap** — `bgJobMaxMs` (default 6h) terminates a still-running job
+  ("max runtime"); the termination rides a wake turn like any result.
+- **`turn.abort` while idle** — kills every job for the session, wipes
+  timers, resets the rung, and queues a `background-jobs` prelude notice
+  (delivered in-band as the synthetic `harness_notice` pair on the next
+  turn). **No wake turn.** `turn.abort` while generating only kills the
+  foreground call; detached jobs survive.
+- **`session.detach {purge: true}`** — kills the session's jobs first (no
+  zombie wakes against a purged session).
+
+Agents inspect and manage their jobs through `yog jobs` (the agent-CLI)
+and the `jobs.get` message type; both are daemon-wide reads of the
+in-memory rows (`id`, `sessionId`, `tool`, `state`, elapsed/runtime,
+`pid`, and the result once settled). The kill path for a runaway
+background bash job is `kill -- -<pid>` inside a foreground call — the
+wrapper child owns its process group, so the signal takes the whole tree
+while the job's slot frees at its settle.
 
 Tool authors need not know about the seam; only the bash tool observes
 `ctx.detached` (to skip persistence).

@@ -4,6 +4,7 @@ import { activeToolCallFor } from "../../turn/index.ts";
 import { sendErrorWithRequestId, sendJson } from "./reply.ts";
 import type {
   HttpDeps,
+  JobsBoundary,
   MsgCtx,
   OrchestratorBoundary,
   SessionRecord,
@@ -142,13 +143,32 @@ export async function replyTurnAbort(
     const inFlight = activeToolCallFor(id) ?? null;
     const aborted = await orchestrator!.abortTurn(id, (sid) => (kill ? kill(sid) : false));
     const after = await lookupSession(id);
+    if (aborted) {
+      // Foreground abort: detached jobs survive by construction (the seam).
+      ctx.reply(200, {
+        ok: true,
+        status: "aborted",
+        aborted: {
+          requested: true,
+          sessionId: id,
+          activeToolCall: inFlight,
+        },
+        session: after ?? session,
+      });
+      return;
+    }
+    // Idle abort: kill the session's background jobs, wipe their timers,
+    // reset the rung, and queue the prelude — no wake turn (yog#91).
+    const jobsManager = deps.jobs as JobsBoundary | undefined;
+    const backgroundJobs = jobsManager !== undefined ? jobsManager.abortSessionJobs(id) : 0;
     ctx.reply(200, {
       ok: true,
-      status: aborted ? "aborted" : "idle",
+      status: "idle",
       aborted: {
-        requested: aborted,
+        requested: false,
         sessionId: id,
-        activeToolCall: inFlight,
+        activeToolCall: null,
+        ...(backgroundJobs > 0 ? { backgroundJobs } : {}),
       },
       session: after ?? session,
     });

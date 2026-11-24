@@ -151,6 +151,22 @@ export class WorkerPool {
     return await client.abortBash();
   }
 
+  /**
+   * Out-of-band pid query for the run currently live under `key`
+   * (`bash.pid`, never queued behind the serial chain — a long script
+   * cannot hide its own pid). The background-jobs manager stamps the
+   * detached job's `pid` with this at detach time; null ids when nothing
+   * runs under the key (or the worker is busy between children).
+   */
+  async runPid(key: string): Promise<{ pid: number | null; pgid: number | null }> {
+    const idx = this.#current.get(key);
+    if (idx === undefined) return { pid: null, pgid: null };
+    const clients = await this.#clients;
+    const client = clients[idx];
+    if (!client) return { pid: null, pgid: null };
+    return await client.bashPid();
+  }
+
   /** Session-keyed abort: exactly what it always was (see {@link abortRun}). */
   async abortScript(sessionId: string): Promise<boolean> {
     return await this.abortRun(sessionId);
