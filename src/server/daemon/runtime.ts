@@ -14,18 +14,21 @@
  */
 import { join } from "node:path";
 import type Fuse from "fuse-native";
+import { Scheduler } from "../../schedule/index.ts";
 import { unmountSys } from "../../mount.ts";
 import {
   AgentFSState,
   DEFAULT_AGENT_ID,
   harnessStateRoot,
   pruneStaleHarnessState,
+  SCRATCH_MAX_AGE_MS,
+  sweepRunScratchDirs,
 } from "../../state/index.ts";
 import { mountSys } from "../../mount.ts";
 import { descriptors } from "../../register.ts";
 import { SkillManager } from "../../skills/index.ts";
 import { logger } from "../../log.ts";
-import { mkdir } from "../../host.ts";
+import { mkdir, readdir } from "../../host.ts";
 import { SessionStore } from "../store/index.ts";
 import { WorkerPool } from "../workpool.ts";
 import { onAgentSpawn } from "../../worker/index.ts";
@@ -50,6 +53,12 @@ export interface Runtime {
   readonly modelInfo: ModelInfoCache | undefined;
   /** The agent-CLI shim directory (`<mountPoint>/bin`). */
   readonly cliBinDir: string;
+  /**
+   * Time seam for daemon-internal periodic work (the scratch-dir reaper
+   * today): injectable so tests drive a fake clock. The runtime cancels
+   * its own schedules on close.
+   */
+  readonly scheduler: Scheduler;
   /** Tear the runtime down (idempotent, best effort per boundary). */
   close(): Promise<void>;
 }
@@ -82,6 +91,31 @@ function logPruned(pruned: string[], label: string): void {
   }
 }
 
+/**
+ * One periodic pass of the scratch-dir reaper: prune every session's
+ * `runs/` entries older than {@link SCRATCH_MAX_AGE_MS}. Delete-at-settle
+ * keeps steady state at one dir per in-flight call; this pass only ever
+ * sees leaks (a settle-delete that failed, a worker killed between calls).
+ * Mirrors the sweeps above: startup-only work stays startup-only; the
+ * timer work is idempotent and best effort per session.
+ */
+async function reapRunScratchDirs(config: YogConfig): Promise<void> {
+  let sessions: string[] = [];
+  try {
+    sessions = await readdir(harnessStateRoot(config.stateRoot));
+  } catch {
+    return; // no harness root (fresh volume) — nothing to reap
+  }
+  for (const sessionId of sessions) {
+    const pruned = await bestEffort(
+      () => sweepRunScratchDirs(sessionId, config.stateRoot),
+      "runs scratch reaper failed",
+      [] as string[],
+    );
+    logPruned(pruned, "scratch run dir(s)");
+  }
+}
+
 /** Open the session store (and the state dirs it lives under). */
 async function openStore(config: YogConfig): Promise<SessionStore | undefined> {
   const dirsOk =
@@ -103,6 +137,31 @@ async function sweepHarnessDirs(config: YogConfig): Promise<void> {
     [] as string[],
   );
   logPruned(pruned, "harness state dir(s)");
+}
+
+/**
+ * Startup wipe of every per-call scratch dir (`harness/<sid>/runs/*`).
+ * `maxAgeMs: 0` removes each dir unconditionally: the daemon's bash
+ * workers die with the process, so nothing can be in flight across a
+ * restart and no scratch dir is ever resumed. Sessions are discovered
+ * from the existing per-session dirs; a session with no `runs/` root
+ * simply sweeps nothing.
+ */
+async function wipeRunScratchDirs(config: YogConfig): Promise<void> {
+  let sessions: string[] = [];
+  try {
+    sessions = await readdir(harnessStateRoot(config.stateRoot));
+  } catch {
+    return; // no harness root (fresh volume) — nothing to wipe
+  }
+  for (const sessionId of sessions) {
+    const pruned = await bestEffort(
+      () => sweepRunScratchDirs(sessionId, config.stateRoot, { maxAgeMs: 0 }),
+      "runs scratch wipe failed",
+      [] as string[],
+    );
+    logPruned(pruned, "scratch run dir(s)");
+  }
 }
 
 /** Open the agent state db, then sweep its stale shell snapshots. */
@@ -222,18 +281,31 @@ async function openSkills(
 
 /**
  * Assemble the daemon's runtime boundaries. Order matters where noted: the
- * filesystem sweep runs before any worker can create fresh state, and the
- * skills CLI command registers only when discovery succeeded.
+ * filesystem sweep + scratch-dir wipe run before any worker can create
+ * fresh state, and the skills CLI command registers only when discovery
+ * succeeded.
  */
-export async function createRuntime(config: YogConfig): Promise<Runtime> {
+export async function createRuntime(
+  config: YogConfig,
+  opts: { scheduler?: Scheduler } = {},
+): Promise<Runtime> {
   const store = await openStore(config);
   await sweepHarnessDirs(config);
+  await wipeRunScratchDirs(config);
   const modelInfo = await openModelInfo(config);
   const state = await openAgentState(config);
   const pool = await openPool(config);
   const fuse = await openMount(config);
   const skills = await openSkills(config, state);
+  // Periodic scratch-dir reaper (leaks only; delete-at-settle covers the
+  // steady state). Unref'd via the scheduler's timer impl, so a pending
+  // pass never holds the daemon open.
+  const scheduler = opts.scheduler ?? new Scheduler();
+  const reaper = scheduler.after(SCRATCH_MAX_AGE_MS, () => {
+    void reapRunScratchDirs(config).catch(() => {});
+  });
   return {
+    scheduler,
     store,
     state,
     pool,
@@ -242,6 +314,7 @@ export async function createRuntime(config: YogConfig): Promise<Runtime> {
     modelInfo,
     cliBinDir: join(config.mountPoint, "bin"),
     close: async (): Promise<void> => {
+      scheduler.cancel(reaper);
       await pool?.close().catch(() => {});
       store?.close();
       await Promise.race([unmountSys(fuse), new Promise((r) => setTimeout(r, 1500))]);
