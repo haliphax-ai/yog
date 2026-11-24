@@ -630,6 +630,60 @@ describe("jobs.get message (adapter surface)", () => {
     expect(caps.features).toContain("background-jobs");
     // The dispatch table is transport-owned: jobs.get rides MESSAGE_TYPES.
     expect(caps.messageTypes).toContain("jobs.get");
+    // The injected-deps path never composes the manager, so the user-facing
+    // projection is empty (presence-in-commands IS availability; the
+    // full-daemon test below covers the composed advertisement).
+    expect(caps.commands).toEqual([]);
+    await daemon.close();
+  });
+
+  it("a full daemon advertises the /jobs command (composition-root projection)", async () => {
+    // The full composition (no injected deps) builds the real manager, so
+    // the /jobs descriptor rides the capabilities advertisement.
+    const { createDaemon } = await import("../../src/server/serve.ts");
+    const daemon = await createDaemon({
+      port: 0,
+      host: "127.0.0.1",
+      config: { stateRoot: "/tmp/yog-jobs-cli-caps-test" } as any,
+    });
+    const caps: any = await (await fetch(`${daemon.url}/v1/capabilities`)).json();
+    const jobsCmd = (caps.commands as Array<{ name: string; message: string }>).find(
+      (c) => c.name === "jobs",
+    );
+    expect(jobsCmd).toBeDefined();
+    expect(jobsCmd!.message).toBe("jobs.get");
+    await daemon.close();
+  });
+
+  it("a daemon without the manager does not advertise the /jobs command", async () => {
+    const { orch } = build();
+    const { createDaemon } = await import("../../src/server/serve.ts");
+    const daemon = await createDaemon({
+      port: 0,
+      host: "127.0.0.1",
+      deps: {
+        orchestrator: orch.orchestrator,
+        capabilities: { contractVersion: "v1", models: [], tools: [], features: [] },
+      } as any,
+    });
+    const caps: any = await (await fetch(`${daemon.url}/v1/capabilities`)).json();
+    expect(caps.commands.find((c: { name: string }) => c.name === "jobs")).toBeUndefined();
+    await daemon.close();
+  });
+
+  it("a daemon without the manager does not advertise the /jobs command", async () => {
+    const { orch } = build();
+    const { createDaemon } = await import("../../src/server/serve.ts");
+    const daemon = await createDaemon({
+      port: 0,
+      host: "127.0.0.1",
+      deps: {
+        orchestrator: orch.orchestrator,
+        capabilities: { contractVersion: "v1", models: [], tools: [], features: [] },
+      } as any,
+    });
+    const caps: any = await (await fetch(`${daemon.url}/v1/capabilities`)).json();
+    expect(caps.commands.find((c: { name: string }) => c.name === "jobs")).toBeUndefined();
     await daemon.close();
   });
 });
@@ -688,5 +742,72 @@ describe("turn.abort idle path (the backgroundJobs reply field)", () => {
     expect(manager.job(vb.jobId!)!.termReason).toBe("operator abort");
 
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+});
+
+describe("yog jobs agent-CLI command", () => {
+  /** Two daemon-wide jobs: one settled, one running (a fake read surface). */
+  function fakeJobsManager() {
+    const jobs: Array<Record<string, unknown>> = [
+      {
+        id: "bg_a",
+        sessionId: "s1",
+        tool: "bash",
+        argsJson: null,
+        startedAt: 1_000,
+        endedAt: 61_000,
+        state: "finished" as const,
+        result: { stdout: "done", exitCode: 0 },
+        pid: 4242,
+        delivered: true,
+      },
+      {
+        id: "bg_b",
+        sessionId: "s2",
+        tool: "bash",
+        argsJson: JSON.stringify({ command: "sleep 30" }),
+        startedAt: 2_000,
+        state: "running" as const,
+      },
+    ];
+    return {
+      allJobs: () => jobs,
+      job: (id: string) => jobs.find((j) => j.id === id),
+    };
+  }
+
+  it("lists daemon-wide jobs as rows (running rows carry elapsed, not runtime)", async () => {
+    const { jobsCliCommand } = await import("../../src/server/daemon/jobs-cli.ts");
+    let now = 62_000;
+    const cmd = jobsCliCommand(fakeJobsManager() as never, () => now);
+    const out = await cmd.execute([]);
+    const rows = out.trimEnd().split("\n");
+    expect(rows).toHaveLength(2);
+    // Settled row: runtime = end - start. Running row: elapsed = now - start.
+    expect(rows[0]).toBe("bg_a s1 bash finished 60s 4242");
+    expect(rows[1]).toBe("bg_b s2 bash running 60s -");
+    now = 63_000; // the running row's elapsed follows the clock
+    expect((await cmd.execute(["list"]))!.trimEnd().split("\n")[1]).toBe(
+      "bg_b s2 bash running 61s -",
+    );
+  });
+
+  it("shows one job's detail with the settled result; unknown id says so", async () => {
+    const { jobsCliCommand } = await import("../../src/server/daemon/jobs-cli.ts");
+    const cmd = jobsCliCommand(fakeJobsManager() as never, () => 62_000);
+    const detail = await cmd.execute(["bg_a"]);
+    expect(detail).toContain("job bg_a");
+    expect(detail).toContain("session: s1");
+    expect(detail).toContain("pid: 4242");
+    expect(detail).toContain("result:");
+    expect(detail).toContain("done");
+    const unknown = await cmd.execute(["bg_nope"]);
+    expect(unknown).toContain("unknown job: bg_nope");
+  });
+
+  it("renders (none) for an empty daemon", async () => {
+    const { jobsCliCommand } = await import("../../src/server/daemon/jobs-cli.ts");
+    const cmd = jobsCliCommand({ allJobs: () => [], job: () => undefined } as never);
+    expect(await cmd.execute([])).toBe("(none)\n");
   });
 });
