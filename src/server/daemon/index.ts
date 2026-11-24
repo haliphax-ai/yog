@@ -17,3 +17,17 @@ export {
 export { makeExecuteTurn, type TurnRuntime, type UsageBySession } from "./turn-runner.ts";
 export { openaiClient, isOpenRouterHostname } from "./openai.ts";
 export { registerSkillsCliCommand, skillsCliCommand } from "./skills-cli.ts";
+export {
+  createPreludeSink,
+  deliverPrelude,
+  serializePrelude,
+  HARNESS_NOTICE_HINT,
+  HARNESS_NOTICE_TOOL,
+  PRELUDE_MAX_CHARS,
+  type PreludeSink,
+  type PreludeNotice,
+  type PreludePayload,
+  type PreludeCallRow,
+  type PreludeToolRow,
+  type DeliveredPrelude,
+} from "./prelude.ts";

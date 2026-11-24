@@ -36,6 +36,7 @@ import {
   type UsageBySession,
   unwireBashTool,
   wireBashTool,
+  createPreludeSink,
 } from "./daemon/index.ts";
 
 /** Options accepted by {@link createDaemon}. */
@@ -130,10 +131,16 @@ async function composeDaemon(
   // terminal cut (abort/error) even when no turn.finished is emitted.
   const usageBySession: UsageBySession = new Map();
   const modelId = config.model;
+  // Per-session prelude notices: drained by the next turn each session
+  // starts (in-band `harness_notice` pair); purged on session purge.
+  const prelude = createPreludeSink();
 
   // --- orchestrator drives every turn through executeTurn (cross-session
   // parallelism, per-session FIFO, abort fan-out) ---
-  const executeTurn = makeExecuteTurn({ config, modelId, bus, ...runtime }, usageBySession);
+  const executeTurn = makeExecuteTurn(
+    { config, modelId, bus, prelude, ...runtime },
+    usageBySession,
+  );
   const orchestrator = new SessionOrchestrator({
     store: runtime.store,
     pool: runtime.pool,
@@ -170,6 +177,7 @@ async function composeDaemon(
     ...(shake !== undefined ? { shake } : {}),
     ...(runtime.skills !== undefined ? { skills: runtime.skills } : {}),
     onUsageFor: (sessionId: string) => usageBySession.get(sessionId),
+    prelude,
     onAbortKillTool: (sessionId: string) => abortBash(sessionId),
   };
 

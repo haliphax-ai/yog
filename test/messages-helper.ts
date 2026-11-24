@@ -10,6 +10,7 @@ import { SessionOrchestrator, type TurnRequest } from "../src/server/orchestrato
 import { TurnEngine } from "../src/turn/index.ts";
 import type { TurnEvent, TurnOptions, TurnSink, TurnUsage } from "../src/turn/index.ts";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
+import { deliverPrelude, type PreludeSink } from "../src/server/daemon/prelude.ts";
 import type OpenAI from "openai";
 import type { ToolRegistry } from "../src/toolkit/index.ts";
 
@@ -326,6 +327,8 @@ interface OrchestratorFakeOptions {
    * backoff ladder; production wires config.rateLimit* here.
    */
   rateLimit?: TurnOptions["rateLimit"];
+  /** Per-session prelude notices, drained at hydrate like serve.ts. */
+  prelude?: PreludeSink;
 }
 
 /** The turn row as addTurn resolves it (id is what the fake needs). */
@@ -391,7 +394,16 @@ async function openFakeTurn(
   const prompt = String(req.prompt ?? "");
   const model = req.model ?? opts.modelId;
   const prior = (await opts.store.getTranscript(sessionId)) as ChatCompletionMessageParam[];
-  const messages: ChatCompletionMessageParam[] = [...prior, { role: "user", content: prompt }];
+  // Drain the prelude queue exactly like serve.ts's hydrateMessages: the
+  // notice pair lands between the prior transcript and the prompt row.
+  const notices = opts.prelude?.drain(sessionId);
+  const prelude = notices !== undefined ? deliverPrelude(notices) : undefined;
+  const messages: ChatCompletionMessageParam[] = [
+    ...prior,
+    ...(prelude !== undefined ? [prelude.call as ChatCompletionMessageParam] : []),
+    ...(prelude !== undefined ? [prelude.result as ChatCompletionMessageParam] : []),
+    { role: "user", content: prompt },
+  ];
   const turnRow = (await opts.store.addTurn(sessionId, {
     role: "user",
     content: prompt,
