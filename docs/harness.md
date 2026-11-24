@@ -90,9 +90,15 @@ Every response also carries `error?: string`:
 
 The bash tool runs in a dedicated worker process (JSONL over stdio, serial
 execution because the shell is stateful, SIGTERM forwarded to the running
-child so teardown never leaves a shell behind). The pool soft-pins
-sessions: the first worker that serves a session becomes its preferred
-member while it is free.
+child so teardown never leaves a shell behind). The pool soft-pins runs:
+the first worker that serves a run key becomes its preferred member while
+it is free. Runs are keyed by the session id; the worker protocol also
+exposes the running child's process ids out of band (`bash.pid`, mirroring
+`bash.abort`: it answers the current child without queueing behind the
+serial chain), and a settle response carries `pid`/`pgid` — the wrapper
+child is its own process group leader (`detached` spawn), so
+`kill -- -<pid>` takes the whole process tree. This is the agent's kill
+path for long-running work that detaches into a background job.
 
 ### Tool output limiting
 

@@ -57,8 +57,9 @@ src/
   toolkit/          Harness-tool plumbing: ToolSpec/ToolResult, the tool
                     registry, the bash tool (toolkit/tools/), output
                     truncation, and token estimation profiles.
-  worker/           The bash worker process: JSONL protocol, persistent-
-                    shell wrapper, daemon-side client.
+  worker/           The bash worker process: JSONL protocol (bash.run /
+                    bash.abort / bash.pid), persistent-shell wrapper,
+                    daemon-side client.
   state/            The agentfs-backed state layer (the only module allowed
                     to import the agentfs SDK) and session id generation.
   skills/           The agent-skills subsystem: frontmatter parsing,

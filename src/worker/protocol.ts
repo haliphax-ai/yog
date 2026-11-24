@@ -49,7 +49,12 @@ export interface BashRunRequest {
   readonly cliBin?: string;
 }
 
-export type WorkerRequest = BashRunRequest | BashAbortRequest;
+/** Ask the worker for its current bash child's process ids (out-of-band). */
+export interface BashPidRequest {
+  readonly type: "bash.pid";
+}
+
+export type WorkerRequest = BashRunRequest | BashAbortRequest | BashPidRequest;
 
 /** Ask the worker to kill its currently-running bash child (turn abort). */
 export interface BashAbortRequest {
@@ -75,6 +80,16 @@ export interface BashAbortKilled {
 }
 
 export type WorkerAbortResponse = BashAbortIdle | BashAbortKilled;
+/** Reply to `bash.pid`: the current child's ids, or null when idle. */
+export interface BashPidOk {
+  readonly ok: true;
+  /** The wrapper child's pid; null when no child is running. */
+  readonly pid: number | null;
+  /** The wrapper child's process group id (wrapper runs `detached`). */
+  readonly pgid: number | null;
+}
+
+export type WorkerPidResponse = BashPidOk;
 
 /** Successful bash execution result. */
 export interface BashRunOk {
@@ -88,6 +103,15 @@ export interface BashRunOk {
    * existed.
    */
   readonly state?: ShellSnapshot;
+  /**
+   * The wrapper child's pid at settle time — forensics for the agent:
+   * the wrapper child was spawned `detached` (own process group), so
+   * `kill -- -<pid>` takes the whole tree. Absent when the child never
+   * spawned.
+   */
+  readonly pid?: number;
+  /** The wrapper child's process group id at settle time (=== `pid`). */
+  readonly pgid?: number;
 }
 
 /** Spawn/exec failure or malformed request. */

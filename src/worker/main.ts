@@ -10,7 +10,7 @@
  */
 import { createInterface } from "node:readline";
 import { chmod, mkdir, readFile, spawn, writeFile } from "../host.ts";
-import type { WorkerAbortResponse } from "./protocol.ts";
+import type { WorkerAbortResponse, WorkerPidResponse } from "./protocol.ts";
 import { decodeFrame, encodeFrame, type WorkerResponse, type WorkerRequest } from "./protocol.ts";
 import { buildToolEnv, composeWrapper, resolveStateDir } from "./wrapper.ts";
 import { logger } from "../log.ts";
@@ -42,6 +42,22 @@ function abortCurrentChild(): WorkerAbortResponse {
   // kill request the response reports SIGTERM even if the child was already
   // on its way out.
   return { ok: true, aborted: true, exitCode: null, signal: "SIGTERM" };
+}
+
+/**
+ * Reply to the out-of-band `bash.pid` request (mirrors `bash.abort`: it
+ * answers the *current* child and never queues behind the serial chain).
+ * Pid/pgid are null when no child is running (idle worker).
+ */
+function currentChildPids(): WorkerPidResponse {
+  const child = currentChild;
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    return { ok: true, pid: null, pgid: null };
+  }
+  // pgid === pid for the wrapper child: it was spawned `detached` (own
+  // process group), so `kill -- -<pid>` addresses the whole tree.
+  const pid = child.pid ?? null;
+  return { ok: true, pid, pgid: pid };
 }
 
 /**
@@ -104,6 +120,10 @@ async function runBash(
           stderr: Buffer.concat(errOut).toString("utf8"),
           exitCode: code,
           state: await readState(stateDir),
+          // Settle-time forensics: the wrapper child's ids so the agent can
+          // `kill -- -<pid>` the tree even after a job detaches.
+          pid: child.pid,
+          pgid: child.pid,
         });
       })();
     });
@@ -176,6 +196,12 @@ rl.on("line", (line) => {
   const payload = frame.payload as WorkerRequest;
   if (payload.type === "bash.abort") {
     process.stdout.write(encodeFrame(frame.id, abortCurrentChild()));
+    return;
+  }
+  // bash.pid is likewise out-of-band: it reports the current child without
+  // queueing behind the serial chain (a long script must not hide its pid).
+  if (payload.type === "bash.pid") {
+    process.stdout.write(encodeFrame(frame.id, currentChildPids()));
     return;
   }
 

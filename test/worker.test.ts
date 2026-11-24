@@ -217,6 +217,44 @@ describe("WorkerClient", () => {
   });
 });
 
+describe("WorkerClient pid ops", () => {
+  it("bash.pid returns null ids when the worker is idle", async () => {
+    const client = await startWorker();
+    await expect(client.bashPid()).resolves.toEqual({ pid: null, pgid: null });
+  });
+
+  it("bash.pid reports the running child without queueing, and BashRunOk carries settle-time pid/pgid", async () => {
+    const client = await startWorker();
+    // A long child: the pid request must answer while the script runs.
+    const pending = client.runBash("sleep 10");
+    const t0 = Date.now();
+    let ids: { pid: number | null; pgid: number | null } | undefined;
+    while (Date.now() - t0 < 5000) {
+      const probe = await client.bashPid();
+      if (probe.pid !== null && probe.pgid !== null) {
+        ids = probe;
+        break;
+      }
+    }
+    expect(ids).toBeDefined();
+    expect(ids!.pid).toBeGreaterThan(0);
+    // pgid === pid: the wrapper child is its own process group leader, so
+    // `kill -- -<pid>` addresses the whole tree.
+    expect(ids!.pgid).toBe(ids!.pid);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    // The settle response carries the same ids for forensics.
+    let r: WorkerResponse | undefined;
+    const r0 = pending.then((v) => (r = v));
+    await expect(client.bashPid())
+      .resolves.toEqual({ pid: null, pgid: null })
+      .catch(() => {});
+    await expect(client.abortBash()).resolves.toBe(true);
+    await r0;
+    expectOk(r!);
+    expect(r!.pid).toBe(ids!.pid);
+    expect(r!.pgid).toBe(ids!.pgid);
+  });
+});
 describe("WorkerClient abort", () => {
   it("abortBash returns false when the worker is idle", async () => {
     const client = await startWorker();
