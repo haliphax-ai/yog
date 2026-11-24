@@ -38,8 +38,8 @@ export const SCRATCH_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  * The parent session id is validated by {@link harnessStateDir} (a plain
  * file-name token — separators or dot-segments would escape the harness
  * root and are rejected loudly); the uuid leaf needs no further
- * validation. Sessions share one `runs/` pool each; a detached call can
- * later be keyed independently in the pool without touching these paths.
+ * validation. A detached call (the background-jobs slice) reuses this
+ * derivation unchanged; only the pool run key changes, not these paths.
  */
 export function runScratchDir(sessionId: string, root: string = "/var/lib/yog"): string {
   return `${harnessStateDir(sessionId, root)}/${RUNS_DIR_NAME}/${randomUUID()}`;
