@@ -64,6 +64,9 @@ src/
   skills/           The agent-skills subsystem: frontmatter parsing,
                     discovery, load/unload, PATH injection, agent-CLI
                     commands.
+  schedule/         Cancelable-timeout primitive with an injectable clock +
+                    timer impl (deterministic time under test; absolute
+                    leaf domain).
 test/               Unit suites per layer, plus the external-client
                     conformance suites.
 docs/               Split documentation; start at docs/README.md.
