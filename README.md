@@ -40,10 +40,12 @@ src/
                     (serve.ts), the HTTP/SSE adapter domain (server/http/),
                     SSE framing, session orchestrator, worker pool, the
                     sqlite session store domain (server/store/), the
-                    daemon assembly (server/daemon/), the background-jobs
-                    manager domain (server/jobs/ — slots, wake ladder, cap,
-                    wake-turn delivery), compaction, /shake, the agent-CLI
-                    registry, and the models.dev cache.
+                    daemon assembly (server/daemon/ — runtime, bash wiring,
+                    prelude sink, skills + jobs CLI commands), the
+                    background-jobs manager domain (server/jobs/ — slots,
+                    wake ladder, cap, wake-turn delivery), compaction,
+                    /shake, the agent-CLI registry, and the models.dev
+                    cache.
   mount.ts          Mount/unmount helpers (accepts any FuseOps).
   host.ts           Host proxy: the only sanctioned path for descriptors
                     and tools to touch the host filesystem and subprocesses

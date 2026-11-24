@@ -189,13 +189,26 @@ rows):
 - **`session.detach {purge: true}`** — kills the session's jobs first (no
   zombie wakes against a purged session).
 
-Agents inspect and manage their jobs through `yog jobs` (the agent-CLI)
-and the `jobs.get` message type; both are daemon-wide reads of the
-in-memory rows (`id`, `sessionId`, `tool`, `state`, elapsed/runtime,
-`pid`, and the result once settled). The kill path for a runaway
-background bash job is `kill -- -<pid>` inside a foreground call — the
-wrapper child owns its process group, so the signal takes the whole tree
-while the job's slot frees at its settle.
+Agents inspect and manage their jobs through `yog jobs` (the agent-CLI
+command) and the `jobs.get` message type. `yog jobs` has no session
+context, so it lists every job on the daemon — one row per job (`id`,
+`sessionId`, `tool`, `state`, runtime-or-elapsed, `pid`, `-` when the pid
+is not yet stamped); `yog jobs <id>` shows one job's detail, the settled
+result included, or `unknown job: <id>` for a dead/restarted-away id.
+The kill path for a runaway background bash job is `kill -- -<pid>` inside
+a foreground call — the wrapper child owns its process group, so the
+signal takes the whole tree while the job's slot frees at its settle.
+Clients list or read the same rows over the messages channel with
+`jobs.get` (`{ jobId? }`): session-scoped list, or one job's detail;
+`404 unknown_job` for an id that is not live on this server, `500
+internal` when the daemon was built without the manager.
+
+The idle-abort termination notice is delivered as the synthetic
+`harness_notice` tool-call/result pair on the next turn: the assistant row
+carries one call named `harness_notice` with empty args, and its result is
+`{ hint, notices: [{ kind, body }] }` (kind `background-jobs` here). The
+name is reserved and never advertised in `tools` — clients and models
+should treat the pair as harness-internal state, not a callable tool.
 
 Tool authors need not know about the seam; only the bash tool observes
 `ctx.detached` (to skip persistence).
