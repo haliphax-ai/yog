@@ -70,8 +70,9 @@ runners) are shared freely and are the only thing the two surfaces have in
 common. If a surface needs to act on a resource, an interaction is authored
 on that surface with its own semantics — never exposed, projected, or
 aliased from the other surface's command. Today the operator surface
-advertises `compact`/`handoff` (`compaction.run`) and `shake`
-(`transcript.shake`); skills interactions are agent-facing only. A client
+advertises `compact`/`handoff` (`compaction.run`), `shake`
+(`transcript.shake`), and `jobs` (`jobs.get`); skills interactions are
+agent-facing only. A client
 can offer every advertised command with no bespoke code: build
 `{ type, data: { ...data, [argField]: rest } }` and print the reply.
 
@@ -236,6 +237,13 @@ becomes possible share one prompt (one block per job). A dormant session's
 wake implicitly revives it, like any turn. Jobs are in-memory only: a
 daemon restart drops them (no phantom wakes), and a wake turn interrupted
 by the restart settles as `interrupted` like any running turn.
+
+The `harness_notice` synthetic pair (an idle abort's termination notice and
+future harness notices ride it) is contract, not internal: the assistant
+row carries one tool call named `harness_notice` with empty args (`"{}"`),
+answered by a tool row whose content is `{ hint, notices: [{ kind, body }] }`.
+The name is reserved — it is never advertised in `tools`, and a model
+imitating the call gets the registry's graceful unknown-tool error row.
 
 ## Errors
 

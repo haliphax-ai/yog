@@ -10,6 +10,12 @@ yog skills <list|load|unload|status> [name]                # manage agent skills
 yog calibrate <sessionId> [--config <path>]                # fit a token profile from recorded traffic
 ```
 
+Inside the daemon's FUSE mount, `/yog/bin/yog` is the agent-facing shim
+over `POST /v1/agent-cli`: `yog skills ...` (same surface as the offline
+command, scoped to the daemon's skills session) and `yog jobs [id]` —
+the daemon's background jobs (id, session, tool, state, runtime, pid);
+`yog jobs <id>` shows one job's detail and settled result.
+
 (or via npm: `npm run start:serve`.)
 
 - `serve` logs the listening URL and runs until SIGINT/SIGTERM (graceful
