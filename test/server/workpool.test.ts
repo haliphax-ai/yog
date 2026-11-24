@@ -128,17 +128,29 @@ describe("WorkerPool run keys (bg-jobs prep)", () => {
     // the second finds it busy and takes member 1).
     const a = p.run("sess-a", "sleep 2.5", { stateDir });
     const b = p.run("sess-b", "sleep 2.5", { stateDir });
+    // Exactly one kill per key, each asserted once — never inside a poll
+    // loop. The old probe-abort waitFor here raced itself: a probe kill is
+    // destructive, so the loop's first pass could settle BOTH runs before
+    // its second probe ran, and the post-loop asserts then read a settled
+    // key as idle (intermittent false != true). Poll liveness with a
+    // non-destructive probe instead: A's kill can only return true once
+    // both runs are registered (#clients resolves for all members before
+    // any run's key lands in #running), so A's kill doubling as the
+    // registration barrier keeps the rest of the choreography
+    // deterministic.
     await vi.waitFor(async () => {
-      await expect(p.abortScript("sess-a")).resolves.toBe(true);
-      await expect(p.abortScript("sess-b")).resolves.toBe(true);
+      await expect(p.abortRun("sess-a")).resolves.toBe(true);
     });
+    // A's kill went to A's member; B (pinned to the other member) is still
+    // live and its kill lands too — the cross-member targeting contract.
     expect(p.memberFor("sess-a")).not.toBe(p.memberFor("sess-b"));
-    // Killing key B leaves A alive; then killing A settles both.
     await expect(p.abortRun("sess-b")).resolves.toBe(true);
-    const rb = await b;
-    expectOk(rb);
-    await expect(p.abortRun("sess-a")).resolves.toBe(true);
-    const ra = await a;
+    // Both runs settle as killed runs.
+    const [ra, rb] = await Promise.all([a, b]);
     expectOk(ra);
+    expectOk(rb);
+    // After a full settle the keys are gone: re-aborts report idle.
+    await expect(p.abortRun("sess-a")).resolves.toBe(false);
+    await expect(p.abortRun("sess-b")).resolves.toBe(false);
   }, 30000);
 });
