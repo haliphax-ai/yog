@@ -1,6 +1,13 @@
 /**
  * The tool registry and its OpenAI-function-derivation helpers. Split out of
  * the toolkit barrel so tools can import types without a cycle.
+ *
+ * The execute path carries the optional detach seam (detach.ts): when a
+ * policy is armed, a call still running at the wall-clock threshold races
+ * the policy, and a `detach` verdict resolves the engine's await with a
+ * synthetic `{backgroundJobId}` row while the real result keeps running
+ * for the manager. With no policy the seam is inert (no timer, no race
+ * change).
  */
 import { z } from "zod";
 import type {
@@ -9,16 +16,12 @@ import type {
 } from "openai/resources/chat/completions/completions.mjs";
 import { type ToolContext, type ToolResult, type ToolSpec } from "./types.ts";
 import { capToolResult } from "./truncation.ts";
-
-/** Whether the turn's abort plumbing has already fired for this call. */
-function isAbortedNow(ctx: ToolExecuteContext): boolean {
-  if (ctx.signal?.aborted === true) return true;
-  try {
-    return ctx.isAborted?.() === true;
-  } catch {
-    return false;
-  }
-}
+import {
+  type ToolDetachPolicy,
+  type DetachCall,
+  type DetachVerdict,
+  toolDetachPolicy,
+} from "./detach.ts";
 
 /** Derive the OpenAI function definition from a tool spec's zod schema. */
 export function toFunctionTool(spec: ToolSpec): ChatCompletionFunctionTool {
@@ -47,13 +50,41 @@ class ToolAbortError extends Error {
     this.name = "AbortError";
   }
 }
+/**
+ * The abort race consults this, not the raw context: once a call detaches
+ * (`ctx.detached` stamped by the threshold race), its reject callback is
+ * disarmed — a later `turn.abort` must unwind the turn but leave the
+ * detached job running. Abort immunity by construction.
+ */
+function isAbortedNow(ctx: ToolExecuteContext): boolean {
+  if (ctx.detached !== undefined) return false;
+  if (ctx.signal?.aborted === true) return true;
+  try {
+    return ctx.isAborted?.() === true;
+  } catch {
+    return false;
+  }
+}
 
-/** Build the {@link ToolContext} a tool `run` receives: the session id (the
- *  abort key) plus the explicit persistent-state override, when set. */
+/**
+ * Build the {@link ToolContext} a tool `run` receives — built ONCE per
+ * execute, the same object the threshold race later stamps
+ * (`ctx.detached = jobId`), so a still-running tool observes the detach:
+ * session id (the abort key), the explicit persistent-state override when
+ * set, and (via the getter) the detached job id once the seam detaches
+ * the call.
+ */
 function toolRunContext(ctx: ToolExecuteContext): ToolContext {
   const out: ToolContext = {};
   if (ctx.sessionId !== undefined) out.sessionId = ctx.sessionId;
   if (ctx.stateDir !== undefined) out.stateDir = ctx.stateDir;
+  // A getter, not a copied value: the stamp lands on `ctx` AFTER the tool
+  // started running, so the tool's read of `ctx.detached` must follow the
+  // live execute context.
+  Object.defineProperty(out, "detached", {
+    enumerable: true,
+    get: () => ctx.detached,
+  });
   return out;
 }
 
@@ -88,6 +119,61 @@ function raceAgainstAbort(
     }
   });
   return Promise.race([settledP, abortP]);
+}
+
+/**
+ * The detach side of the seam: race the call's settlement against the
+ * policy threshold (node timer, unref'd). First settlement wins:
+ *
+ * - The call settles first → its (capped) result resolves, the timer is
+ *   dropped, and the policy is never consulted. A late consult would
+ *   register a phantom job for a call that already produced its row.
+ * - The threshold fires first → the policy verdict applies:
+ *   `detach` stamps the live context (`ctx.detached = jobId`) and
+ *   resolves the synthetic `{backgroundJobId}` row the engine awaits;
+ *   `terminate` runs the optional kill hook and resolves a failure row.
+ *   In both cases the racing (abort-guarded) promise is abandoned (GC at
+ *   settle), while the retained capped result (`DetachCall.result`) stays
+ *   alive for the manager.
+ * - A policy that throws/rejects degrades to `terminate` with a fixed
+ *   reason instead of wedging the call.
+ */
+async function raceAgainstDetach(
+  abortedP: Promise<ToolResult>,
+  settledP: Promise<ToolResult>,
+  policy: ToolDetachPolicy,
+  ctx: ToolExecuteContext,
+  call: DetachCall,
+): Promise<ToolResult> {
+  let timer: NodeJS.Timeout | undefined;
+  const thresholdP = new Promise<DetachVerdict>((resolve) => {
+    timer = setTimeout(
+      () =>
+        void policy
+          .onThreshold(call)
+          .then(resolve, () => resolve({ kind: "terminate", reason: "detach policy failed" })),
+      policy.thresholdMs,
+    );
+    timer.unref?.();
+  });
+  // First settlement wins: a call that beat the threshold must never reach
+  // the policy (it already produced a transcript row — a late consult would
+  // register a phantom job), and a detached/terminated call drops its timer.
+  const verdict = await Promise.race([abortedP.then(() => "settled" as const), thresholdP]);
+  if (timer !== undefined) clearTimeout(timer);
+  if (verdict === "settled") return await settledP;
+  if (verdict.kind === "detach") {
+    ctx.detached = verdict.jobId;
+    // Abort bookkeeping fires at detach (the finally below): from the
+    // turn's perspective the call is over; the job carries on.
+    return { backgroundJobId: verdict.jobId };
+  }
+  try {
+    await verdict.kill?.();
+  } catch {
+    // Kill is best effort: the failure result below reports the outcome.
+  }
+  return { error: `terminated: ${verdict.reason}` };
 }
 
 /** Format a zod error the way the harness reports validation failures. */
@@ -132,6 +218,13 @@ export interface ToolExecuteContext {
   sessionId?: string;
   /** Explicit persistent-state override (bash shell snapshots); the daemon path derives it per session. */
   stateDir?: string;
+  /**
+   * Stamped by the registry's threshold race when the call detaches into a
+   * background job (yog#90): the live {@link ToolContext} this context
+   * carries is mutated in place, so the still-running tool observes the
+   * job id and the abort race disarms itself (detach survives `turn.abort`).
+   */
+  detached?: string;
   /** Fired just before the tool runs. */
   onStart?: (call: ToolCall) => void;
   /** Fired when the tool settles (result or throw). */
@@ -175,7 +268,12 @@ export class ToolRegistry {
    * The optional context carries turn-abort plumbing: `signal` (an already
    * aborted signal rejects the call immediately) and the observation hooks
    * the server uses to address a running call (`onStart`/`onEnd`). Existing
-   * two-argument callers are unaffected — context is optional.
+   * two-argument callers are unaffected — context is optional. When a
+   * detach policy is armed ({@link setToolDetachPolicy}), a call still
+   * running at the wall-clock threshold consults it: `detach` resolves
+   * with a synthetic `{backgroundJobId}` row, `terminate` kills (hook
+   * permitting) and resolves a failure row. With no policy, no timer is
+   * armed and behavior is bit-identical to before the seam existed.
    */
   async execute(
     name: string,
@@ -185,6 +283,9 @@ export class ToolRegistry {
     const tool = this.tools.get(name);
     if (!tool) return undefined;
 
+    // The pre-run abort probe consults the same disarmer: a detached call
+    // (re-execution is impossible, but a stale direct caller could pass a
+    // stamped ctx) must not fail before the tool runs.
     if (isAbortedNow(ctx)) throw new ToolAbortError();
 
     let parsed: unknown;
@@ -216,12 +317,48 @@ export class ToolRegistry {
     void settledP.catch(() => undefined);
     ctx.onStart?.(call);
     try {
-      if (ctx.signal !== undefined || ctx.isAborted !== undefined) {
-        return await raceAgainstAbort(settledP, ctx, () => isAbortedNow(ctx));
-      }
-      return await settledP;
+      return await executeDetachable(settledP, ctx, name, rawArgs, call);
     } finally {
       ctx.onEnd?.(call);
     }
   }
+}
+
+/**
+ * The settlement paths one executed call can take, in order of precedence:
+ * an armed detach policy (the threshold race), the turn-abort race, or the
+ * plain settlement. Extracted so `execute` reads as validate → run →
+ * settle; the abort-immunity and retained-promise contract lives in
+ * {@link raceAgainstDetach}.
+ */
+async function executeDetachable(
+  settledP: Promise<ToolResult>,
+  ctx: ToolExecuteContext,
+  name: string,
+  rawArgs: string | null,
+  call: ToolCall,
+): Promise<ToolResult> {
+  const policy = toolDetachPolicy();
+  if (policy !== undefined) {
+    // Detach seam (yog#90): race the threshold against settlement. The
+    // abort race still arms underneath when abort plumbing exists, so a
+    // call inside the threshold window unwinds exactly as before; once
+    // ctx.detached is stamped, its rejects are disarmed and the job
+    // survives operator aborts. DetachCall.result carries the capped,
+    // un-raced promise — the promise the manager retains for delivery.
+    const abortRaced =
+      ctx.signal !== undefined || ctx.isAborted !== undefined
+        ? raceAgainstAbort(settledP, ctx, () => isAbortedNow(ctx))
+        : settledP;
+    return await raceAgainstDetach(abortRaced, settledP, policy, ctx, {
+      ...(ctx.sessionId !== undefined ? { sessionId: ctx.sessionId } : {}),
+      tool: name,
+      argsJson: rawArgs,
+      result: settledP,
+    });
+  }
+  if (ctx.signal !== undefined || ctx.isAborted !== undefined) {
+    return await raceAgainstAbort(settledP, ctx, () => isAbortedNow(ctx));
+  }
+  return await settledP;
 }

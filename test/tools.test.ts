@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,11 +7,13 @@ import {
   jsonEscapedLen,
   setBashExecutor,
   setShellStateProvider,
+  setToolDetachPolicy,
   setToolOutputBudgets,
   toFunctionTool,
   ToolRegistry,
   TOOL_OUTPUT_GRACE_CHARS,
   TOOL_OUTPUT_LIMIT_CHARS,
+  type ToolResult,
   type ToolSpec,
 } from "../src/toolkit/index.ts";
 import { TRUNCATION_IDENTIFIER } from "../src/toolkit/index.ts";
@@ -426,5 +428,219 @@ describe("registry abort of an active tool call (issue #35)", () => {
     const ac = new AbortController();
     const result = await local.execute("echo", '{"text":"hi"}', { signal: ac.signal });
     expect(result).toMatchObject({ error: "tool blew up" });
+  });
+});
+
+describe("tool detach seam (issue #90)", () => {
+  /** Tool that resolves after `ms` with the given result. */
+  function slowTool(ms: number, result: ToolResult): ToolSpec {
+    return {
+      name: "slow",
+      description: "Slow tool.",
+      schema: z.object({}).strict(),
+      failure: (error) => ({ error }),
+      run: async () => new Promise((resolve) => setTimeout(() => resolve(result), ms)),
+    };
+  }
+  /** Tool that never settles: only an abort (or abandonment) can end it. */
+  const hangingTool: ToolSpec = {
+    name: "hang",
+    description: "Never settles.",
+    schema: z.object({}).strict(),
+    failure: (error) => ({ error }),
+    run: async () => new Promise<Record<string, unknown>>(() => undefined),
+  };
+
+  afterEach(() => {
+    setToolDetachPolicy(undefined);
+  });
+
+  it("stays inert with no policy: fast call resolves normally", async () => {
+    const local = new ToolRegistry([slowTool(5, { ok: 1 })]);
+    const result = await local.execute("slow", "{}");
+    expect(result).toEqual({ ok: 1 });
+  });
+
+  it("detaches at the threshold: synthetic backgroundJobId row, ctx stamped, onEnd fired", async () => {
+    const seen: string[] = [];
+    setToolDetachPolicy({
+      thresholdMs: 20,
+      onThreshold: async (call) => {
+        seen.push(`${call.tool}:${Object.keys(call.argsJson ?? "").length}`);
+        // Retain the real result promise: it settles later, nobody awaits.
+        void call.result.then(() => seen.push("settled-later"));
+        return { kind: "detach", jobId: "job_1" };
+      },
+    });
+    const events: string[] = [];
+    const local = new ToolRegistry([slowTool(200, { late: true })]);
+    const ac = new AbortController();
+    const result = await local.execute("slow", "{}", {
+      signal: ac.signal,
+      sessionId: "sess-detach",
+      onStart: () => void events.push("start"),
+      onEnd: () => void events.push("end"),
+    });
+    // The engine await resolved with the synthetic row at the threshold.
+    expect(result).toEqual({ backgroundJobId: "job_1" });
+    expect(events).toEqual(["start", "end"]);
+    // The policy saw the call; the retained result still settles.
+    expect(seen[0]).toContain("slow");
+    await new Promise((r) => setTimeout(r, 250));
+    expect(seen).toContain("settled-later");
+    // An abort after detach must not unwind anything (the race is disarmed).
+    ac.abort(new Error("late abort"));
+  });
+
+  it("abandoned-promise GC: a detached call's real result is retained, not lost", async () => {
+    let retained: ToolResult | undefined;
+    setToolDetachPolicy({
+      thresholdMs: 10,
+      onThreshold: async (call) => {
+        // The ONLY observer of the real result while the engine await is
+        // parked: the retained (capped) promise must still settle with it.
+        void call.result.then((r) => (retained = r));
+        return { kind: "detach", jobId: "job_gc" };
+      },
+    });
+    const local = new ToolRegistry([slowTool(40, { late: true })]);
+    const result = await local.execute("slow", "{}");
+    expect(result).toEqual({ backgroundJobId: "job_gc" });
+    await new Promise((r) => setTimeout(r, 80));
+    // The promise the registry abandoned settled with the real payload —
+    // the manager's retained handle never lost it.
+    expect(retained).toEqual({ late: true });
+  });
+
+  it("detached call survives turn.abort mid-call; foreground aborts identically", async () => {
+    setToolDetachPolicy({
+      thresholdMs: 10,
+      onThreshold: async () => ({ kind: "detach", jobId: "job_abort" }),
+    });
+    const local = new ToolRegistry([hangingTool]);
+    const ac = new AbortController();
+    const result = await local.execute("hang", "{}", {
+      signal: ac.signal,
+      isAborted: () => ac.signal.aborted,
+    });
+    expect(result).toEqual({ backgroundJobId: "job_abort" });
+    // The abort now fires: a detached call must NOT reject.
+    ac.abort(new Error("turn aborted by operator"));
+    await new Promise((r) => setTimeout(r, 60));
+
+    // Foreground parity: with no policy, the same abort rejects with
+    // AbortError exactly as before the seam existed.
+    const noPolicy = new ToolRegistry([hangingTool]);
+    setToolDetachPolicy(undefined);
+    const ac2 = new AbortController();
+    const fg = noPolicy.execute("hang", "{}", {
+      signal: ac2.signal,
+      isAborted: () => ac2.signal.aborted,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    ac2.abort(new Error("turn aborted by operator"));
+    await expect(fg).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("terminate with kill runs the kill hook and resolves a failure row", async () => {
+    let killed = false;
+    setToolDetachPolicy({
+      thresholdMs: 10,
+      onThreshold: async () => ({
+        kind: "terminate",
+        reason: "no free slot",
+        kill: () => {
+          killed = true;
+        },
+      }),
+    });
+    const local = new ToolRegistry([slowTool(5000, { never: true })]);
+    const result = await local.execute("slow", "{}");
+    expect(killed).toBe(true);
+    expect(result).toEqual({ error: "terminated: no free slot" });
+  });
+
+  it("terminate without kill abandons the promise (no kill hook fired)", async () => {
+    setToolDetachPolicy({
+      thresholdMs: 10,
+      onThreshold: async () => ({ kind: "terminate", reason: "slot full" }),
+    });
+    const local = new ToolRegistry([slowTool(5000, { never: true })]);
+    const result = await local.execute("slow", "{}");
+    expect(result).toEqual({ error: "terminated: slot full" });
+  });
+
+  it("a policy that throws degrades to terminate (call never wedges)", async () => {
+    setToolDetachPolicy({
+      thresholdMs: 10,
+      onThreshold: async () => {
+        throw new Error("policy blew up");
+      },
+    });
+    const local = new ToolRegistry([slowTool(5000, { never: true })]);
+    const result = await local.execute("slow", "{}");
+    expect(result).toEqual({ error: "terminated: detach policy failed" });
+  });
+
+  it("a call that settles inside the threshold never consults the policy", async () => {
+    let consulted = false;
+    setToolDetachPolicy({
+      thresholdMs: 10_000,
+      onThreshold: async () => {
+        consulted = true;
+        return { kind: "detach", jobId: "nope" };
+      },
+    });
+    const local = new ToolRegistry([slowTool(5, { quick: true })]);
+    const result = await local.execute("slow", "{}");
+    expect(result).toEqual({ quick: true });
+    expect(consulted).toBe(false);
+  });
+
+  it("bash tool: ctx.detached skips saveState (no mirror write-back)", async () => {
+    const saves: string[] = [];
+    setShellStateProvider({
+      async load() {
+        return undefined;
+      },
+      async save(sessionId) {
+        saves.push(sessionId);
+      },
+    });
+    setToolDetachPolicy({
+      thresholdMs: 10,
+      onThreshold: async () => ({ kind: "detach", jobId: "job_bash" }),
+    });
+    setBashExecutor(async () => {
+      // Resolve slowly so the threshold wins, but the real result carries
+      // shell state the save path would persist — unless detached.
+      await new Promise((r) => setTimeout(r, 40));
+      return {
+        ok: true,
+        stdout: "bg",
+        stderr: "",
+        exitCode: 0,
+        state: { cwd: "/tmp", env: "", functions: "" },
+      };
+    });
+    try {
+      const local = new ToolRegistry([bashTool]);
+      const result = await local.execute("bash", JSON.stringify({ command: "echo bg" }), {
+        sessionId: "sess-bg-bash",
+      });
+      expect(result).toEqual({ backgroundJobId: "job_bash" });
+      await new Promise((r) => setTimeout(r, 120));
+      // The detached run settled with state — the tool observed
+      // ctx.detached and skipped the saveState write-back entirely.
+      expect(saves).toEqual([]);
+    } finally {
+      setShellStateProvider(undefined);
+      if (worker) {
+        const w = worker;
+        setBashExecutor((script, opts) => w.runBash(script, opts?.stateDir, opts?.restore));
+      } else {
+        setBashExecutor(undefined);
+      }
+    }
   });
 });

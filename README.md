@@ -56,7 +56,8 @@ src/
                     shim descriptors.
   toolkit/          Harness-tool plumbing: ToolSpec/ToolResult, the tool
                     registry, the bash tool (toolkit/tools/), output
-                    truncation, and token estimation profiles.
+                    truncation, token estimation profiles, and the
+                    detach seam (module-level background-job policy).
   worker/           The bash worker process: JSONL protocol (bash.run /
                     bash.abort / bash.pid), persistent-shell wrapper,
                     daemon-side client.

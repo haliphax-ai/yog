@@ -136,6 +136,35 @@ const registry = new ToolRegistry([bashTool, myTool]);
 // runTurn(client, modelId, messages, registry)
 ```
 
+### Background-job detach seam (inert until armed)
+
+The registry consults a module-level detach policy at a wall-clock
+threshold, so any tool call (not just bash) can detach into a background
+job instead of holding the turn hostage. Until a policy is armed
+(`setToolDetachPolicy` from the composition root — the same injection
+pattern as the output budgets), the seam is inert: no timer, no behavior
+change.
+
+When the background-jobs manager arms it (yog#85/#91), a call still
+running after the threshold (default 120s, config `bgDetachMs`) races the
+policy:
+
+- **detach** — the engine's await resolves with a synthetic
+  `{"backgroundJobId": …}` tool result (the transcript gets a normal
+  tool row; no dangling call, no healer involvement), while the real
+  result keeps running for the manager to deliver later as a wake turn.
+  A detached call is immune to `turn.abort` by construction (the
+  registry's abort race disarms), and the bash tool skips its shell-state
+  write-back (background scratch state never touches the live mirror).
+- **terminate** (no free job slot) — the call is killed via the caller's
+  kill hook (bash: the existing session-keyed abort) or simply abandoned
+  (generic tools), and the turn gets a `terminated: …` error row.
+  kill hook (bash: the existing session-keyed abort) or simply abandoned
+  (generic tools), and the turn gets a `terminated: ...` error row.
+
+Tool authors need not know about the seam; only the bash tool observes
+`ctx.detached` (to skip persistence).
+
 ## Skills
 
 The agent-skills subsystem discovers, loads, and unloads

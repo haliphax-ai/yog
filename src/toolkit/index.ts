@@ -14,3 +14,4 @@ export * from "./registry.ts";
 export * from "./token-profiles.ts";
 export * from "./truncation.ts";
 export * from "./tools/index.ts";
+export * from "./detach.ts";
