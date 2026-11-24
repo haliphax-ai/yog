@@ -59,9 +59,13 @@ with a persistent shell and the harness's descriptors:
   between calls. Each call starts in the agent's HOME (`agentHome`),
   re-applies the prior snapshot (the prior cwd is `cd`ed into before the
   command runs), and the resulting state is snapshotted (`export -p` +
-  `declare -f` + `pwd -P`) into the session's harness dir under the state
-  root (`<stateRoot>/harness/<sessionId>`, keyed by session: never the
-  agent's HOME and never a single shared dir) after every call. The agent
+  `declare -f` + `pwd -P`) into a per-call scratch dir under the session's
+  harness root (`<stateRoot>/harness/<sessionId>/runs/<uuid>`; keyed by
+  session, never the agent's HOME and never a single shared dir). The
+  snapshot is mirrored to the agentfs db (the rewindable home) and the
+  scratch dir is deleted when the call settles — a live child writes only
+  its own dir, so a future detached call can never last-writer-wins
+  against a foreground one. The agent
   rc (`BASH_ENV`, falling back to `~/.bashrc`) is sourced before each
   command as the home baseline. PATH is layered per run (none of the layers
   are persisted — each call re-derives them from the session's current
@@ -166,9 +170,11 @@ The harness opens an AgentFS database (per agent id under the configured
   actions are queryable in SQL.
 - The persistent bash shell state (cwd/env/functions) is mirrored into the
   database per session (`session:<id>:shell`), making the harness home
-  rewindable. Both the `harness/<sessionId>` directories and these mirror
-  rows are pruned at daemon startup once untouched for 7 days; there is no
-  scheduled reaper.
+  rewindable. The per-call scratch dirs under `harness/<sessionId>/runs/`
+  are the snapshot's working copy, deleted at call settle; whatever
+  survives is wiped at daemon startup (nothing resumes across a restart)
+  and a 24h reaper prunes leaks. The mirror rows are pruned at daemon
+  startup once untouched for 7 days.
 - Snapshot state with `cp .agentfs/yog.db snapshot.db` (the SDK
   checkpoints WAL on `snapshotTo`); restore by pointing `statePath` at the
   copy.
