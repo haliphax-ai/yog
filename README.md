@@ -61,7 +61,8 @@ src/
                     bash.abort / bash.pid), persistent-shell wrapper,
                     daemon-side client.
   state/            The agentfs-backed state layer (the only module allowed
-                    to import the agentfs SDK) and session id generation.
+                    to import the agentfs SDK), session id generation, and
+                    the per-call scratch shell-state dirs (runs/).
   skills/           The agent-skills subsystem: frontmatter parsing,
                     discovery, load/unload, PATH injection, agent-CLI
                     commands.

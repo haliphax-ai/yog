@@ -115,10 +115,16 @@ The daemon's state lives under the configured `stateRoot` (default
   (sqlite via knex; 30-day retention for dormant sessions).
 - `agentfs/<agentId>.db` — the agentfs database: the insert-only
   `tool_calls` audit table and the per-session shell-state mirror.
-- `harness/<sessionId>` — the per-session persistent shell state
-  (`cwd`/`env`/`functions`), written by the agent user. Both these
-  directories and their agentfs mirror rows are pruned at startup after 7
-  days untouched.
+- `harness/<sessionId>` — the per-session shell-state root, keyed by
+  session and written by the agent user. It holds `runs/<uuid>/`
+  scratch dirs: one per in-flight bash call (the snapshot the worker
+  seeds from the agentfs mirror, plus whatever the call itself wrote).
+  Each dir is deleted when its call settles; startup wipes whatever
+  survived a crash, and a periodic reaper prunes dirs older than 24h
+  (leaks only — a live call's dir stays fresh). The persistent record
+  is the agentfs mirror (`session:<id>:shell` in the db above), not
+  these dirs; both the dirs and the mirror rows are pruned at startup
+  after 7 days untouched.
 - `profiles/<model-slug>.json` — token-estimator overlays written by
   `yog calibrate` (see [token-accuracy](../token-accuracy.md)).
 - `model-info.json` — the models.dev cache backing context-window lookups.
