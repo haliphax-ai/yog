@@ -229,6 +229,33 @@ export class WorkerClient {
     });
   }
 
+  /**
+   * Ask the worker for the bash child currently running in it (out-of-band:
+   * the request never queues behind the serial chain, so a long script does
+   * not hide its own pid). Returns null ids when the worker is idle or
+   * closed.
+   */
+  async bashPid(): Promise<{ pid: number | null; pgid: number | null }> {
+    if (this.#closed) return { pid: null, pgid: null };
+    const id = this.#nextId++;
+    const request: WorkerRequest = { type: "bash.pid" };
+    return await new Promise((resolve, reject) => {
+      this.#pending.set(id, {
+        resolve: (resp) => {
+          const rec = resp as { pid?: number | null; pgid?: number | null };
+          resolve({ pid: rec.pid ?? null, pgid: rec.pgid ?? null });
+        },
+        reject,
+      });
+      try {
+        this.#child.stdin?.write(encodeFrame(id, request));
+      } catch (err) {
+        this.#pending.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
   /** Terminate the worker and reject any in-flight requests. */
   close(): Promise<void> {
     if (this.#closed) return Promise.resolve();
