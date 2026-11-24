@@ -242,7 +242,14 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
       const resp = await bashExecutor(args.command, executorOpts(ctx, restore, extraPath));
       const runtimeMs = Math.round(performance.now() - start);
 
-      if (resp.ok && resp.state) await saveState(sessionKey, resp.state);
+      // A detached call (yog#90) must not write shell state back to the
+      // mirror: its scratch dir is throwaway, and the frozen snapshot it
+      // started from is what the manager re-seeds future foreground runs
+      // with. The live per-session state stays exactly as the foreground
+      // left it.
+      if (resp.ok && resp.state && ctx?.detached === undefined) {
+        await saveState(sessionKey, resp.state);
+      }
 
       if (!resp.ok) return nullResult(start, resp.error ?? "bash call failed");
       // Limit the tool's own output: the budget (config `toolOutputLimit`,
