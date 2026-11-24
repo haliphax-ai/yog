@@ -78,6 +78,12 @@
 // entry-only rule, and the domain composes them through its own
 // sub-barrel so no importer reaches past the domain door.
 const DOMAINS = ["vfs", "toolkit", "worker", "state", "server", "skills", "turn", "schedule"];
+// Subdomains that expose a type-only door: modules outside the owning folder
+// may reach into their internals only as `import type` shapes — values are
+// always injected from the composition point. Generated per entry like
+// DOMAINS (see the subdomain-type-only rule family below);
+// tsPreCompilationDeps is what classifies those edges.
+const TYPE_ONLY_SUBDOMAINS = [["server", "daemon"]];
 module.exports = {
   options: {
     exclude: { path: "(\\.git|dist|coverage|sys|sys-test|.harness|\\.serena)" },
@@ -272,6 +278,20 @@ module.exports = {
       severity: "error",
       from: { path: `^src/(?!${domain}/)` },
       to: { path: `^src/${domain}/(?!index\\.ts$)` },
+    })),
+
+    // Type-only subdomain doors: modules outside the owning folder may reach
+    // into these subdomains only for `import type` shapes — values are always
+    // injected from the composition point. Same value/type split as
+    // openai-client-in-transport-only, generated per entry like DOMAINS.
+    ...TYPE_ONLY_SUBDOMAINS.map(([domain, sub]) => ({
+      name: `subdomain-type-only:${domain}/${sub}`,
+      severity: "error",
+      from: { path: `^src/(?!${domain}/${sub}/)` },
+      to: {
+        path: `^src/${domain}/${sub}/(?!index\\.ts$)`,
+        dependencyTypesNot: ["type-only"],
+      },
     })),
 
     // The wiring manifest is composed only at the composition points: the

@@ -2,6 +2,7 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import type { CommandDescriptor } from "../commands.ts";
 import type { CompactionBoundary } from "../compaction.ts";
 import type { ServerResponse } from "node:http";
+import type { PreludeSink } from "../daemon/prelude.ts";
 import type { ShakeOutcome } from "../shake.ts";
 import type { SseEnvelope } from "../sse.ts";
 
@@ -87,6 +88,7 @@ export interface EventBusBoundary {
  */
 
 export interface HttpDeps {
+  [key: string]: unknown;
   /** Resolve the context window for an arbitrary model id (models.dev cache). */
   contextWindowFor?: (model: string) => number | undefined;
   capabilities?: Capabilities;
@@ -108,7 +110,8 @@ export interface HttpDeps {
    * session id from the URL (`/v1/sessions/{id}/messages`).
    */
   skillsSessionId?: string;
-  [key: string]: unknown;
+  /** Per-session prelude notices (purged with the session). */
+  prelude?: PreludeSink;
 }
 
 /**

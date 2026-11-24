@@ -31,6 +31,9 @@ export async function handleSessionDetach(
       !!store && typeof store.purgeSession === "function"
         ? await store!.purgeSession(id)
         : (sessions.delete(id), 1);
+    // The purge owns every seam keyed by the session id: its pending
+    // prelude notices die with it (nothing would ever drain them).
+    deps.prelude?.clear(id);
     if (purged === 0) ctx.fail("unknown_session", `session ${id} not found`);
     else ctx.reply(200, { ok: true, deleted: true, id });
     return;

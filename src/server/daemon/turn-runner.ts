@@ -11,6 +11,12 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import type { SessionStore } from "../store/index.ts";
 import { TurnEngine, type TurnOptions } from "../../turn/index.ts";
 import type { TurnEvent, TurnSink, TurnUsage } from "../../turn/index.ts";
+import {
+  deliverPrelude,
+  type DeliveredPrelude,
+  type PreludeNotice,
+  type PreludeSink,
+} from "./prelude.ts";
 import type { SseEnvelope } from "../sse.ts";
 import { tools } from "../../register.ts";
 import { availableSkillsBlock, type SkillManager } from "../../skills/index.ts";
@@ -32,6 +38,8 @@ export interface TurnRuntime {
   readonly modelInfo: ModelInfoCache | undefined;
   /** Per-session event fan-out (the HTTP adapter subscribes per channel). */
   readonly bus: EventBusBoundary;
+  /** Prelude notices delivered on the next turn each session starts. */
+  readonly prelude?: PreludeSink;
 }
 
 /** Per-session usage as of the last known point, for terminal-cut flushes. */
@@ -86,23 +94,6 @@ function turnSink(rt: TurnRuntime, sessionId: string, live: LiveTurnState): Turn
 interface LiveTurnState {
   turnId: string | null;
   usage: TurnUsage | undefined;
-}
-
-/** Hydrate the engine's `messages` from the canonical transcript + prompt. */
-async function hydrateMessages(
-  rt: TurnRuntime,
-  sessionId: string,
-  prompt: string,
-): Promise<{ messages: ChatCompletionMessageParam[]; startLen: number }> {
-  const prior =
-    rt.store !== undefined
-      ? ((await rt.store.getTranscript(sessionId)) as Array<Record<string, unknown>>)
-      : [];
-  const messages: ChatCompletionMessageParam[] = [
-    ...(prior as unknown as ChatCompletionMessageParam[]),
-    { role: "user", content: prompt },
-  ];
-  return { messages, startLen: prior.length };
 }
 
 /** Create the turn row (best effort: persistence failure keeps the turn alive). */
@@ -218,10 +209,19 @@ export function makeExecuteTurn(rt: TurnRuntime, usageBySession: UsageBySession)
     const live: LiveTurnState = { turnId: null, usage: undefined };
     usageBySession.set(sessionId, undefined);
 
-    // Hydrate prior context from the canonical transcript. On the first
-    // turn the transcript is empty; a retry replays from the last turn
-    // boundary (naive full replay — the context policy is §3).
+    // Hydrate prior context from the canonical transcript, then drain the
+    // session's prelude queue: the notice pair lands between the prior
+    // transcript and this turn's prompt row, and persists under this
+    // turn's id (the batch slice starts before the pair). An unwound turn
+    // keeps its delivered pair — a notice never re-delivers.
     const { messages, startLen } = await hydrateMessages(rt, sessionId, prompt);
+    if (startLen < messages.length - 1) {
+      // Something extra (a prelude notice pair) landed between the prior
+      // transcript and the prompt row; log it for daemon forensics.
+      logger
+        .child({ sessionId })
+        .debug({ startLen, extraRows: messages.length - 1 - startLen }, "turn prelude");
+    }
     const turnRowId = await startTurnRow(rt, sessionId, prompt, model);
 
     const turnOpts = await buildTurnOptions(rt, {
@@ -235,7 +235,9 @@ export function makeExecuteTurn(rt: TurnRuntime, usageBySession: UsageBySession)
 
     // (The engine heals announced-but-unanswered tool calls before
     // throwing, so the batch persisted in the catch below already
-    // carries the stubs and stays hydratable.)
+    // carries the stubs and stays hydratable. A delivered harness_notice
+    // pair is already balanced — its result row exists — so the healer
+    // never stubs it.)
     try {
       await new TurnEngine(sink).run(client, model, messages, tools, turnOpts);
       // On success, persist everything this turn produced: the batch
@@ -287,4 +289,35 @@ async function settleFailedTurn(
   const status = isOperatorAbort(ctx, err) ? "aborted" : "error";
   await persistBatch(s.rt, s.sessionId, s.messages, s.startLen, s.turnRowId);
   await settleTurnRow(s.rt, s.sessionId, s.turnRowId, status, s.live);
+}
+
+/**
+ * Hydrate the engine's `messages` from the canonical transcript, the
+ * drained prelude pair (if any), and the prompt: the notice pair lands
+ * between the prior transcript and the user prompt row, so the prompt row
+ * stays pure. The batch slice starts BEFORE the pair, so persistence
+ * carries it under this turn's id like any other row.
+ */
+async function hydrateMessages(
+  rt: TurnRuntime,
+  sessionId: string,
+  prompt: string,
+): Promise<{
+  messages: ChatCompletionMessageParam[];
+  startLen: number;
+  prelude: DeliveredPrelude | undefined;
+}> {
+  const prior =
+    rt.store !== undefined
+      ? ((await rt.store.getTranscript(sessionId)) as Array<Record<string, unknown>>)
+      : [];
+  const notices: PreludeNotice[] | undefined = rt.prelude?.drain(sessionId);
+  const prelude = notices !== undefined ? deliverPrelude(notices) : undefined;
+  const messages: ChatCompletionMessageParam[] = [
+    ...(prior as unknown as ChatCompletionMessageParam[]),
+    ...(prelude !== undefined ? [prelude.call as unknown as ChatCompletionMessageParam] : []),
+    ...(prelude !== undefined ? [prelude.result as unknown as ChatCompletionMessageParam] : []),
+    { role: "user", content: prompt },
+  ];
+  return { messages, startLen: prior.length, prelude };
 }
