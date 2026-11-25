@@ -303,6 +303,12 @@ async function newSession(): Promise<string> {
   return ((await json(res)) as { session: { id: string } }).session.id;
 }
 
+/** The `turn.start` reply's queued flag (the FIFO-wait signal). */
+async function queuedOf(startRes: Response): Promise<boolean> {
+  const body = (await dataOf(startRes)) as { queued?: boolean };
+  return body?.queued === true;
+}
+
 /** Start a turn on an open stream; returns the stream handle + start response. */
 async function startTurn(sessionId: string) {
   const stream = await openStream(base, sessionId);
@@ -332,6 +338,29 @@ async function waitForTranscript(
 }
 
 describe("turn.abort message", () => {
+  it("the turn.start reply reports queued only when an earlier turn is live", async () => {
+    const sid = await newSession();
+    const first = await startTurn(sid);
+    expect(first.startRes.status).toBe(202);
+    expect(await queuedOf(first.startRes)).toBe(false); // nothing was live before it
+
+    // A second submit while the first is in flight: queued behind it.
+    const second = await startTurn(sid);
+    expect(await queuedOf(second.startRes)).toBe(true);
+
+    // Drain: abort kills every live handle in the FIFO chain.
+    await abortTurn(sid);
+    await first.stream.collectUntil((fs) => fs.some((f) => f.event === "turn.aborted"), 3_000);
+    first.stream.abort();
+    second.stream.abort();
+    await waitForTranscript(sid, (ms) => ms.some((m) => m.role === "assistant"));
+
+    // The queue drained: a fresh submit is not queued.
+    const third = await startTurn(sid);
+    expect(await queuedOf(third.startRes)).toBe(false);
+    third.stream.abort();
+  });
+
   it("aborts an in-flight turn, heals the transcript, and reports success", async () => {
     const sid = await newSession();
     const { stream, startRes } = await startTurn(sid);

@@ -149,6 +149,14 @@ export async function startTurn(
   const linger = data.abortOnDisconnect !== true;
   const boundStreamId = !linger && typeof data.streamId === "string" ? data.streamId : undefined;
 
+  // `queued` tells the client its turn is waiting behind an earlier one
+  // on this session (a wake turn mid-flight, or a burst of submits): the
+  // spinner alone can't distinguish "running" from "queued behind".
+  // Captured BEFORE runOrchestratorTurn registers the new handle — the
+  // registration makes isBusy(answer-yes) self-fulfilling otherwise.
+  const busyBefore =
+    typeof st.orchestrator?.isBusy === "function" && st.orchestrator.isBusy(session.id);
+
   await runOrchestratorTurn(
     st,
     { session, data, turnRowId: null, boundStreamId },
@@ -164,11 +172,7 @@ export async function startTurn(
     },
   );
 
-  // `queued` tells the client its turn is waiting behind an earlier one
-  // on this session (a wake turn mid-flight, or a burst of submits): the
-  // spinner alone can't distinguish "running" from "queued behind".
-  const busy = typeof st.orchestrator?.isBusy === "function" && st.orchestrator.isBusy(session.id);
-  sendMessage(res, 202, "turn.start", { accepted: true, queued: busy }, requestId);
+  sendMessage(res, 202, "turn.start", { accepted: true, queued: busyBefore }, requestId);
 }
 
 /**
