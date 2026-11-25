@@ -129,21 +129,23 @@ describe("WorkerPool run keys (bg-jobs prep)", () => {
     const a = p.run("sess-a", "sleep 2.5", { stateDir });
     const b = p.run("sess-b", "sleep 2.5", { stateDir });
     // Exactly one kill per key, each asserted once — never inside a poll
-    // loop. The old probe-abort waitFor here raced itself: a probe kill is
-    // destructive, so the loop's first pass could settle BOTH runs before
-    // its second probe ran, and the post-loop asserts then read a settled
-    // key as idle (intermittent false != true). Poll liveness with a
-    // non-destructive probe instead: A's kill can only return true once
-    // both runs are registered (#clients resolves for all members before
-    // any run's key lands in #running), so A's kill doubling as the
-    // registration barrier keeps the rest of the choreography
-    // deterministic.
+    // loop. Two timing hazards here, both real in CI:
+    //  - a destructive probe (abortRun) retried by waitFor can hit a run
+    //    it already killed and read false (intermittent false != true);
+    //  - memberFor is set at DISPATCH, before the worker's bash child
+    //    exists, so a kill right after pinning finds no bash and returns
+    //    false (worker-client abortBash: no in-flight bash → false).
+    // Barrier on the non-destructive pid probe: a non-null pid is proof
+    // the bash child is up — the kill must land once we can see it.
     await vi.waitFor(async () => {
-      await expect(p.abortRun("sess-a")).resolves.toBe(true);
+      const [pa, pb] = await Promise.all([p.runPid("sess-a"), p.runPid("sess-b")]);
+      expect(pa.pid).not.toBeNull();
+      expect(pb.pid).not.toBeNull();
+      expect(p.memberFor("sess-a")).not.toBe(p.memberFor("sess-b"));
     });
     // A's kill went to A's member; B (pinned to the other member) is still
     // live and its kill lands too — the cross-member targeting contract.
-    expect(p.memberFor("sess-a")).not.toBe(p.memberFor("sess-b"));
+    await expect(p.abortRun("sess-a")).resolves.toBe(true);
     await expect(p.abortRun("sess-b")).resolves.toBe(true);
     // Both runs settle as killed runs.
     const [ra, rb] = await Promise.all([a, b]);
