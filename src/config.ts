@@ -122,9 +122,9 @@ export const YogConfigSchema = z
      */
     /**
      * Wall-clock ms after which a still-running tool call detaches into a
-     * background job (the detach seam's threshold). Default 120000 (2 min).
+     * background job (the detach seam's threshold). Default 60000 (1 min).
      */
-    bgDetachMs: z.number().int().min(1).default(120_000),
+    bgDetachMs: z.number().int().min(1).default(60_000),
     /**
      * Per-session background-job slots: a threshold race that finds the
      * session's slots full terminates the call immediately (error result,

@@ -147,7 +147,7 @@ change.
 
 When the background-jobs manager arms it (shipped: `JobManager`,
 `src/server/jobs/`), a call still running after the threshold (default
-120s, config `bgDetachMs`) races the policy:
+60s, config `bgDetachMs`) races the policy:
 
 - **detach** (a session slot is free) — the engine's await resolves with a
   synthetic `{"backgroundJobId": …}` tool result (the transcript gets a
