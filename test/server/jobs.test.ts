@@ -637,9 +637,11 @@ describe("jobs.get message (adapter surface)", () => {
     await daemon.close();
   });
 
-  it("a full daemon advertises the /jobs command (composition-root projection)", async () => {
-    // The full composition (no injected deps) builds the real manager, so
-    // the /jobs descriptor rides the capabilities advertisement.
+  it("a full daemon advertises the background-jobs feature but NOT a /jobs command", async () => {
+    // The client owns /jobs (its drawer view toggles its own read; a server
+    // descriptor would collide with the drawer command — two /jobs entries).
+    // The server surface stays: `background-jobs` in features + jobs.get in
+    // messageTypes (the drawer polls it; agents script it directly).
     const { createDaemon } = await import("../../src/server/serve.ts");
     const daemon = await createDaemon({
       port: 0,
@@ -647,11 +649,9 @@ describe("jobs.get message (adapter surface)", () => {
       config: { stateRoot: "/tmp/yog-jobs-cli-caps-test" } as any,
     });
     const caps: any = await (await fetch(`${daemon.url}/v1/capabilities`)).json();
-    const jobsCmd = (caps.commands as Array<{ name: string; message: string }>).find(
-      (c) => c.name === "jobs",
-    );
-    expect(jobsCmd).toBeDefined();
-    expect(jobsCmd!.message).toBe("jobs.get");
+    expect(caps.features).toContain("background-jobs");
+    expect(caps.messageTypes).toContain("jobs.get");
+    expect(caps.commands.find((c: { name: string }) => c.name === "jobs")).toBeUndefined();
     await daemon.close();
   });
 

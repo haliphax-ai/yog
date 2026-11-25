@@ -17,7 +17,7 @@ import type { AddressInfo } from "node:net";
 import { createHttpServer, type HttpDeps } from "./http/index.ts";
 import { MESSAGE_TYPES } from "./messages.ts";
 import { SessionOrchestrator } from "./orchestrator.ts";
-import { COMPACTION_COMMANDS, JOBS_COMMAND, SHAKE_COMMAND } from "./commands.ts";
+import { COMPACTION_COMMANDS, SHAKE_COMMAND } from "./commands.ts";
 import { tools } from "../register.ts";
 import { abortBash } from "../toolkit/index.ts";
 import {
@@ -185,7 +185,6 @@ async function composeDaemon(
       commands: [
         ...(compaction !== undefined ? COMPACTION_COMMANDS : []),
         ...(shake !== undefined ? [SHAKE_COMMAND] : []),
-        ...(jobs ? [JOBS_COMMAND] : []),
       ],
     },
     contextWindowFor: (model: string) => runtime.modelInfo?.getContextWindow(model),

@@ -68,13 +68,3 @@ export const SHAKE_COMMAND: CommandDescriptor = {
   message: "transcript.shake",
   requiresIdle: true,
 };
-
-/** `/jobs [id]` — background jobs: the session's jobs, or one job's detail. */
-export const JOBS_COMMAND: CommandDescriptor = {
-  name: "jobs",
-  summary: "list background jobs, or show one job's detail",
-  args: "[id]",
-  message: "jobs.get",
-  argField: "jobId",
-  requiresIdle: false,
-};

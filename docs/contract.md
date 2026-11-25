@@ -70,9 +70,11 @@ runners) are shared freely and are the only thing the two surfaces have in
 common. If a surface needs to act on a resource, an interaction is authored
 on that surface with its own semantics — never exposed, projected, or
 aliased from the other surface's command. Today the operator surface
-advertises `compact`/`handoff` (`compaction.run`), `shake`
-(`transcript.shake`), and `jobs` (`jobs.get`); skills interactions are
-agent-facing only. A client
+advertises `compact`/`handoff` (`compaction.run`) and `shake`
+(`transcript.shake`); skills and background jobs are agent-facing only —
+`jobs.get` stays a wire-type read (the jobs _drawer_ is the client's own
+view of it, so a `/jobs` descriptor would only collide with the drawer's
+client-local command). A client
 can offer every advertised command with no bespoke code: build
 `{ type, data: { ...data, [argField]: rest } }` and print the reply.
 
