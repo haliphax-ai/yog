@@ -117,6 +117,8 @@ export interface JobManagerOptions {
   readonly wakeLadderMs: readonly number[];
   /** Per-job lifetime cap (config `bgJobMaxMs`). */
   readonly jobMaxMs: number;
+  /** Settled-job retention (config `bgJobTtlMs` ?? 24h). */
+  readonly jobTtlMs: number;
   /** Per-job serialized char budget in wake prompts (toolOutputLimit). */
   readonly toolOutputLimit: number;
   /** The session model id (wake-turn model when no last turn is known). */

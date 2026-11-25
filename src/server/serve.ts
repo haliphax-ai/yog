@@ -284,6 +284,7 @@ function buildJobManager(config: YogConfig, modelId: string, deps: JobManagerDep
     maxJobsTotal: config.bgMaxJobsTotal ?? slots * 4,
     wakeLadderMs: config.bgWakeLadderMs,
     jobMaxMs: config.bgJobMaxMs,
+    jobTtlMs: config.bgJobTtlMs ?? 24 * 60 * 60 * 1000,
     toolOutputLimit: config.toolOutputLimit ?? 50_000,
     modelId,
   };

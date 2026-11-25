@@ -13,6 +13,7 @@ export { JobManager } from "./manager.ts";
 export { buildWakePrompt, jobBlock } from "./wake.ts";
 export { advanceRung, collectPending, queueCleared, rungDelayMs } from "./ladder.ts";
 export { abortSessionJobs, purgeSessionJobs, type AbortContext } from "./abort.ts";
+export { PRUNE_SWEEP_MS, pruneExpiredJobs, type PruneContext } from "./prune.ts";
 export {
   NO_ORCHESTRATOR,
   NO_POOL,

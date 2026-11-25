@@ -56,6 +56,7 @@ import {
 import { buildWakePrompt } from "./wake.ts";
 import { advanceRung, collectPending, queueCleared, rungDelayMs } from "./ladder.ts";
 import { abortSessionJobs, purgeSessionJobs, type AbortContext } from "./abort.ts";
+import { PRUNE_SWEEP_MS, pruneExpiredJobs, type PruneContext } from "./prune.ts";
 
 export class JobManager {
   readonly #opts: JobManagerOptions;
@@ -68,6 +69,10 @@ export class JobManager {
   readonly #idleSubs = new Map<string, () => void>();
   /** Per-job cap timers (canceled at settle/terminate, not at unwire-only). */
   readonly #capTimers = new Map<string, { readonly active: boolean; readonly dueAt: number }>();
+  /** The hourly settled-job TTL sweep (re-arms itself; one live at most). */
+  #pruneTimer?: { readonly active: boolean; readonly dueAt: number };
+  /** The fixed sweep cadence: one hour (the TTL itself is configurable). */
+  static readonly PRUNE_SWEEP_MS = PRUNE_SWEEP_MS;
   /** Resolved boundary views (no-op when the injection is absent). */
   readonly #sched: SchedulerLike;
   readonly #orch: OrchestratorLike | undefined;
@@ -95,6 +100,7 @@ export class JobManager {
     if (this.#policyArmed) return;
     this.#policyArmed = true;
     setToolDetachPolicy(this.#policy());
+    this.#armPruneSweep();
   }
 
   /** Disarm the detach policy and cancel every timer/subscription. */
@@ -122,8 +128,32 @@ export class JobManager {
     }
     for (const handle of this.#capTimers.values()) this.#sched.cancel(handle);
     this.#capTimers.clear();
+    if (this.#pruneTimer !== undefined) {
+      this.#sched.cancel(this.#pruneTimer);
+      this.#pruneTimer = undefined;
+    }
     for (const unsub of this.#idleSubs.values()) unsub();
     this.#idleSubs.clear();
+  }
+
+  /** Arm the hourly settled-job sweep (re-arms itself after each pass). */
+  #armPruneSweep(): void {
+    if (this.#pruneTimer !== undefined) return;
+    this.#pruneTimer = this.#sched.after(JobManager.PRUNE_SWEEP_MS, () => {
+      this.#pruneTimer = undefined;
+      pruneExpiredJobs(this.#pruneCtx(), this.#opts.jobTtlMs);
+      this.#armPruneSweep();
+    });
+  }
+
+  /** The sweep's view of the manager state (the module's PruneContext). */
+  #pruneCtx(): PruneContext {
+    return {
+      jobs: this.#jobs,
+      sessions: this.#sessions,
+      idleSubs: this.#idleSubs,
+      sched: this.#sched,
+    };
   }
 
   // ── injected boundaries (structural, optional) ───────────────────────────

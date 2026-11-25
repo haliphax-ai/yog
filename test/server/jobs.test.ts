@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { sendMessage } from "../messages-helper.ts";
-import { JobManager } from "../../src/server/jobs/index.ts";
+import { JobManager, PRUNE_SWEEP_MS } from "../../src/server/jobs/index.ts";
 import type {
   JobManagerDeps,
   JobManagerOptions,
@@ -144,6 +144,7 @@ function opts(over: Partial<JobManagerOptions> = {}): JobManagerOptions {
     maxJobsTotal: 8,
     wakeLadderMs: [10, 20, 30],
     jobMaxMs: 1_000,
+    jobTtlMs: 2_000,
     toolOutputLimit: 500,
     modelId: "test-model",
     ...over,
@@ -537,6 +538,87 @@ describe("JobManager (fake clock)", () => {
     expect(orch.wakes).toHaveLength(1);
     expect(orch.wakes[0]!.prompt).toContain(v.jobId!);
   });
+
+  it(
+    "TTL sweep: settled jobs older than bgJobTtlMs are pruned; running jobs are not",
+    { timeout: 5_000 },
+    async () => {
+      const { manager, clock } = build({
+        opts: {
+          jobTtlMs: 2_000,
+          jobMaxMs: 10 * 60 * 60 * 1000,
+          // One ladder rung (1h): a live running job would otherwise wake
+          // every ≤30ms across the sweep advance — 120k fake-timer fires.
+          wakeLadderMs: [3_600_000],
+        },
+      });
+      manager.wire();
+      const startedAt = clock.now;
+
+      // One job that settles immediately, one that stays running.
+      const settled = deferred();
+      const v1 = (await consultThreshold(manager, {
+        sessionId: "s1",
+        tool: "bash",
+        argsJson: null,
+        result: settled.promise,
+      })) as { kind: string; jobId: string };
+      const running = deferred();
+      const v2 = (await consultThreshold(manager, {
+        sessionId: "s1",
+        tool: "bash",
+        argsJson: null,
+        result: running.promise,
+      })) as { kind: string; jobId: string };
+      expect(manager.job(v1.jobId!)!.state).toBe("running");
+      await settleJob(v1.jobId!, settled, { stdout: "done", exitCode: 0 });
+      expect(manager.job(v1.jobId!)!.state).toBe("finished");
+
+      // One sweep lands past the TTL: the settled job is pruned; the
+      // running job (cap 10h — nowhere near firing) is untouched.
+      const sweepFired = clock.advance(startedAt + PRUNE_SWEEP_MS + 2_000);
+      expect(sweepFired).toBeGreaterThan(0);
+      expect(manager.job(v1.jobId!)).toBeUndefined();
+      expect(manager.job(v2.jobId!)).toBeDefined();
+      expect(manager.job(v2.jobId!)!.state).toBe("running");
+    },
+  );
+
+  it(
+    "TTL sweep scrubs undelivered pending entries and drops empty session state",
+    { timeout: 5_000 },
+    async () => {
+      const { manager, clock, orch } = build({
+        opts: {
+          jobTtlMs: 2_000,
+          jobMaxMs: 10 * 60 * 60 * 1000,
+          wakeLadderMs: [3_600_000],
+        },
+      });
+      manager.wire();
+      const startedAt = clock.now;
+
+      // Settle while a foreign turn is live: the job lands in st.pending
+      // (undelivered — no wake yet).
+      const ret = deferred();
+      const v = (await consultThreshold(manager, {
+        sessionId: "s1",
+        tool: "bash",
+        argsJson: null,
+        result: ret.promise,
+      })) as { kind: string; jobId: string };
+      orch.setBusy(true);
+      await settleJob(v.jobId!, ret, { stdout: "done", exitCode: 0 });
+      expect(orch.wakes).toHaveLength(0); // busy: nothing delivered
+
+      // Past the TTL, the sweep drops the undelivered row + its pending
+      // entry and tears down the now-empty session (no ladder spin-up).
+      clock.advance(startedAt + PRUNE_SWEEP_MS + 2_000);
+      expect(manager.job(v.jobId!)).toBeUndefined();
+      clock.advance(clock.now + PRUNE_SWEEP_MS * 4);
+      expect(orch.wakes).toHaveLength(0); // no zombie wakes for the pruned id
+    },
+  );
 });
 
 describe("jobs.get message (adapter surface)", () => {

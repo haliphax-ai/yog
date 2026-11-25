@@ -158,6 +158,13 @@ export const YogConfigSchema = z
      * wake turn. Default 6h.
      */
     bgJobMaxMs: z.number().int().min(1).default(21_600_000),
+    /**
+     * Settled-job retention (ms): the manager sweeps once an hour and
+     * drops settled jobs (with any undelivered-result pending entries)
+     * older than this. In-memory only — the agentfs audit rows survive
+     * in the store. Default 24h.
+     */
+    bgJobTtlMs: z.number().int().min(1).optional(),
     agentUid: z.number().int().min(1).default(DEFAULT_AGENT_UID),
     agentGid: z.number().int().min(1).default(DEFAULT_AGENT_GID),
     agentHome: z.string().min(1).default("/home/agent"),
