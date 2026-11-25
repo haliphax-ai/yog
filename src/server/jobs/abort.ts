@@ -93,6 +93,35 @@ export function abortSessionJobs(ctx: AbortContext, sessionId: string): number {
 }
 
 /**
+ * Stop the session's wake machinery (operator turn.abort): cancel the
+ * ladder timer, drop undelivered pendings, clear idle subscriptions.
+ * RUNNING jobs are untouched — they keep executing and surface through
+ * `jobs.get`/the drawer. This exists because a wake turn aborted by the
+ * operator must not be re-spawned by the ladder 30m later: the user
+ * said stop, and the session should go (and stay) idle.
+ */
+export function stopSessionWakes(ctx: AbortContext, sessionId: string): void {
+  const st = ctx.sessions.get(sessionId);
+  if (st !== undefined) {
+    if (st.ladderTimer !== undefined) {
+      ctx.sched.cancel(st.ladderTimer);
+      st.ladderTimer = undefined;
+    }
+    st.rung = 0;
+    for (const id of st.pending) {
+      const job = ctx.jobs.get(id);
+      if (job !== undefined) job.delivered = true;
+    }
+    st.pending = [];
+  }
+  const unsub = ctx.idleSubs.get(sessionId);
+  if (unsub !== undefined) {
+    unsub();
+    ctx.idleSubs.delete(sessionId);
+  }
+}
+
+/**
  * Purge the session's jobs + timers + records (session.detach purge):
  * kills like an idle abort but clears the prelude instead of queueing it
  * (no zombie wakes against a purged session).

@@ -105,6 +105,8 @@ export interface JobRowLike {
 export interface JobsBoundary {
   /** Idle abort: kill the session's jobs; the count for the abort reply. */
   abortSessionJobs(sessionId: string): number;
+  /** Operator turn.abort: stop re-spawning wake turns (jobs keep running). */
+  stopSessionWakes?(sessionId: string): void;
   /** Purge: kill + drop the session's job records (no zombie wakes). */
   purgeSession(sessionId: string): void;
   /** One job by id (daemon-wide), or undefined. */

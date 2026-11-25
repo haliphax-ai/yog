@@ -39,7 +39,12 @@ import {
   createPreludeSink,
   registerJobsCliCommand,
 } from "./daemon/index.ts";
-import { JobManager, type JobManagerDeps, type JobManagerOptions } from "./jobs/index.ts";
+import {
+  jobsBoundary,
+  JobManager,
+  type JobManagerDeps,
+  type JobManagerOptions,
+} from "./jobs/index.ts";
 import { defaultWorkers } from "../config.ts";
 
 /** Options accepted by {@link createDaemon}. */
@@ -197,7 +202,7 @@ async function composeDaemon(
     onUsageFor: (sessionId: string) => usageBySession.get(sessionId),
     prelude,
     onAbortKillTool: (sessionId: string) => abortBash(sessionId),
-    jobs,
+    jobs: jobsBoundary(jobs),
   };
 
   const server = createHttpServer(deps);

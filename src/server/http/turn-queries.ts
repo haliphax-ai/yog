@@ -142,6 +142,10 @@ export async function replyTurnAbort(
     // as the turn settles, and the response reports what *was* killed.
     const inFlight = activeToolCallFor(id) ?? null;
     const aborted = await orchestrator!.abortTurn(id, (sid) => (kill ? kill(sid) : false));
+    // The user said stop: a killed wake turn must not re-spawn via the
+    // ladder 30m later (the session's auto-turn machinery halts; running
+    // jobs keep executing and surface via `jobs.get`/the drawer).
+    deps.jobs?.stopSessionWakes?.(id);
     const after = await lookupSession(id);
     if (aborted) {
       // Foreground abort: detached jobs survive by construction (the seam).

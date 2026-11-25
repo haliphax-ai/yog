@@ -8,7 +8,14 @@
  */
 import { describe, expect, it } from "vitest";
 import { sendMessage } from "../messages-helper.ts";
-import { JobManager, PRUNE_SWEEP_MS } from "../../src/server/jobs/index.ts";
+import {
+  abortSessionJobs,
+  jobsBoundary,
+  JobManager,
+  PRUNE_SWEEP_MS,
+  purgeSessionJobs,
+  stopSessionWakes,
+} from "../../src/server/jobs/index.ts";
 import type {
   JobManagerDeps,
   JobManagerOptions,
@@ -438,7 +445,7 @@ describe("JobManager (fake clock)", () => {
       result: ret.promise,
     })) as { kind: string; jobId: string };
 
-    const count = manager.abortSessionJobs("s1");
+    const count = abortSessionJobs(manager.operator(), "s1");
     expect(count).toBe(1);
     const job = manager.job(v.jobId!);
     expect(job!.state).toBe("terminated");
@@ -468,7 +475,7 @@ describe("JobManager (fake clock)", () => {
     await settleJob(v.jobId!, ret, { stdout: "late", exitCode: 0 });
     expect(manager.job(v.jobId!)!.state).toBe("finished");
 
-    const count = manager.abortSessionJobs("s1");
+    const count = abortSessionJobs(manager.operator(), "s1");
     expect(count).toBe(1);
     expect(manager.job(v.jobId!)!.termReason).toBe("operator abort");
     orch.setBusy(false);
@@ -509,7 +516,7 @@ describe("JobManager (fake clock)", () => {
       argsJson: null,
       result: ret.promise,
     })) as { kind: string; jobId: string };
-    manager.purgeSession("s1");
+    purgeSessionJobs(manager.operator(), "s1");
     expect(pool.aborts).toContain(`bg:${v.jobId}`);
     expect(manager.job(v.jobId!)).toBeUndefined();
     expect(preludes).toHaveLength(0);
@@ -537,6 +544,48 @@ describe("JobManager (fake clock)", () => {
     await Promise.resolve();
     expect(orch.wakes).toHaveLength(1);
     expect(orch.wakes[0]!.prompt).toContain(v.jobId!);
+  });
+
+  it("stopSessionWakes: an aborted wake turn leaves no ladder, no pendings; jobs run on", async () => {
+    // A long cap: the running job must outlive the test's advance.
+    const { manager, clock, orch } = build({ opts: { jobMaxMs: 60_000 } });
+    manager.wire();
+    // A running job (undelivered at this point) + a settled undelivered
+    // one → a wake turn is live and the ladder is armed behind it.
+    const run = deferred();
+    const vr = (await consultThreshold(manager, {
+      sessionId: "s1",
+      tool: "bash",
+      argsJson: null,
+      result: run.promise,
+    })) as { kind: string; jobId: string };
+    const fin = deferred();
+    const vf = (await consultThreshold(manager, {
+      sessionId: "s1",
+      tool: "bash",
+      argsJson: null,
+      result: fin.promise,
+    })) as { kind: string; jobId: string };
+    await settleJob(vf.jobId!, fin, { stdout: "done", exitCode: 0 });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(orch.wakes.length).toBeGreaterThanOrEqual(1);
+
+    // The operator aborts the wake turn (turn.abort): the ladder must
+    // not re-spawn it, the pending result is dropped (delivered), and
+    // the still-running job keeps executing.
+    stopSessionWakes(manager.operator(), "s1");
+    expect(orch.wakes.length).toBe(1); // no NEW wake turns on later ticks
+    clock.advance(clock.now + 1000);
+    expect(orch.wakes.length).toBe(1);
+    const st = manager.job(vf.jobId!);
+    expect(st!.delivered).toBe(true);
+    expect(manager.job(vr.jobId!)!.state).toBe("running");
+
+    // The idle-abort surface still works after the wake-stop.
+    const count = abortSessionJobs(manager.operator(), "s1");
+    expect(count).toBe(1); // only the still-running job
   });
 
   it(
@@ -632,7 +681,7 @@ describe("jobs.get message (adapter surface)", () => {
     const server = createHttpServer({
       orchestrator: orch.orchestrator,
       bus,
-      jobs: manager,
+      jobs: jobsBoundary(manager),
       capabilities: { contractVersion: "v1", models: [], tools: [], features: [] },
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -715,7 +764,7 @@ describe("jobs.get message (adapter surface)", () => {
       host: "127.0.0.1",
       deps: {
         orchestrator: orch.orchestrator,
-        jobs: manager,
+        jobs: jobsBoundary(manager),
         capabilities: {
           contractVersion: "v1",
           models: ["m"],
@@ -809,7 +858,7 @@ describe("turn.abort idle path (the backgroundJobs reply field)", () => {
         abortTurn: async () => false,
       },
       bus,
-      jobs: manager,
+      jobs: jobsBoundary(manager),
       capabilities: { contractVersion: "v1", models: [], tools: [], features: [] },
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

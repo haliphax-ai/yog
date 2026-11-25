@@ -55,8 +55,8 @@ import {
 } from "./adapters.ts";
 import { buildWakePrompt } from "./wake.ts";
 import { advanceRung, collectPending, queueCleared, rungDelayMs } from "./ladder.ts";
-import { abortSessionJobs, purgeSessionJobs, type AbortContext } from "./abort.ts";
-import { PRUNE_SWEEP_MS, pruneExpiredJobs, type PruneContext } from "./prune.ts";
+import type { AbortContext } from "./abort.ts";
+import { PRUNE_SWEEP_MS, pruneExpiredJobs } from "./prune.ts";
 
 export class JobManager {
   readonly #opts: JobManagerOptions;
@@ -141,13 +141,18 @@ export class JobManager {
     if (this.#pruneTimer !== undefined) return;
     this.#pruneTimer = this.#sched.after(JobManager.PRUNE_SWEEP_MS, () => {
       this.#pruneTimer = undefined;
-      pruneExpiredJobs(this.#pruneCtx(), this.#opts.jobTtlMs);
+      pruneExpiredJobs(this.#stateCtx(), this.#opts.jobTtlMs);
       this.#armPruneSweep();
     });
   }
 
-  /** The sweep's view of the manager state (the module's PruneContext). */
-  #pruneCtx(): PruneContext {
+  /** The shared state view (PruneContext; AbortContext extends it). */
+  #stateCtx(): {
+    jobs: Map<string, BackgroundJob>;
+    sessions: Map<string, JobSessionState>;
+    idleSubs: Map<string, () => void>;
+    sched: SchedulerLike;
+  } {
     return {
       jobs: this.#jobs,
       sessions: this.#sessions,
@@ -186,14 +191,11 @@ export class JobManager {
 
   // ── operator abort (turn.abort while idle) + purge ───────────────────────
 
-  /** The explicit state view the abort/purge operators share. */
+  /** The operator-view the abort/purge/wake-stop operators share. */
   #abortCtx(): AbortContext {
     return {
-      jobs: this.#jobs,
-      sessions: this.#sessions,
+      ...this.#stateCtx(),
       capTimers: this.#capTimers,
-      idleSubs: this.#idleSubs,
-      sched: this.#sched,
       poolView: this.#poolView,
       preludeView: this.#preludeView,
       recordAudit: (job) => this.#recordAudit(job),
@@ -205,17 +207,9 @@ export class JobManager {
    * reset the rung, and queue the prelude notice — no wake turn. Returns
    * the number of jobs terminated (the reply's `aborted.backgroundJobs`).
    */
-  abortSessionJobs(sessionId: string): number {
-    return abortSessionJobs(this.#abortCtx(), sessionId);
-  }
-
-  /**
-   * Purge the session's jobs + timers + records (session.detach purge):
-   * kills like an idle abort but clears the prelude instead of queueing it
-   * (no zombie wakes against a purged session).
-   */
-  purgeSession(sessionId: string): void {
-    purgeSessionJobs(this.#abortCtx(), sessionId);
+  /** The operator view (the abort/purge/wake-stop free functions' state). */
+  operator(): AbortContext {
+    return this.#abortCtx();
   }
 
   // ── the detach policy (the toolkit seam) ─────────────────────────────────
