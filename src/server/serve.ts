@@ -277,10 +277,11 @@ function buildShake(
  * plain value by the config module) and inject the runtime boundaries.
  */
 function buildJobManager(config: YogConfig, modelId: string, deps: JobManagerDeps): JobManager {
-  const slots = config.bgMaxJobsPerSession ?? defaultWorkers();
+  const slots = defaultWorkers();
   const opts: JobManagerOptions = {
     detachMs: config.bgDetachMs,
     maxJobsPerSession: slots,
+    maxJobsTotal: config.bgMaxJobsTotal ?? slots * 4,
     wakeLadderMs: config.bgWakeLadderMs,
     jobMaxMs: config.bgJobMaxMs,
     toolOutputLimit: config.toolOutputLimit ?? 50_000,

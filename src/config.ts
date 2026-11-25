@@ -126,11 +126,13 @@ export const YogConfigSchema = z
      */
     bgDetachMs: z.number().int().min(1).default(60_000),
     /**
-     * Per-session background-job slots: a threshold race that finds the
-     * session's slots full terminates the call immediately (error result,
-     * no job row). Unset = the worker-pool default `max(1, cpus - 1)`.
+     * Daemon-wide background-job ceiling: a threshold race that finds the
+     * daemon's jobs at this count (across every session) terminates the
+     * call immediately ("max concurrent jobs"). Guards the worker pool's
+     * aggregate pressure under many concurrent sessions. Unset = four
+     * times the per-session slot default (`4 * max(1, cpus - 1)`).
      */
-    bgMaxJobsPerSession: z.number().int().min(1).optional(),
+    bgMaxJobsTotal: z.number().int().min(1).optional(),
     /**
      * The graduated wake ladder (ms) for detached-job wake turns. Advance
      * one rung when a wake fires with nothing finished; reset to rung 0

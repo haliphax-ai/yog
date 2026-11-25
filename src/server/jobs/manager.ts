@@ -206,17 +206,27 @@ export class JobManager {
         }
         const st = this.#session(sessionId);
         if (st.running >= this.#opts.maxJobsPerSession) {
-          return await this.#terminateVerdict(sessionId);
+          return await this.#terminateVerdict(sessionId, "no free background-job slot");
+        }
+        if (this.#totalRunning() >= this.#opts.maxJobsTotal) {
+          return await this.#terminateVerdict(sessionId, "max concurrent jobs");
         }
         return await this.#detachVerdict(call, sessionId, st);
       },
     };
   }
 
-  /** No free slot: kill the call via the session key (bash) / abandon. */
-  async #terminateVerdict(sessionId: string): Promise<DetachVerdict> {
+  /** No free capacity: kill the call via the session key (bash) / abandon. */
+  async #terminateVerdict(sessionId: string, reason: JobTermReason): Promise<DetachVerdict> {
     await this.#poolView?.abortRun(sessionId).catch(() => false);
-    return { kind: "terminate", reason: "no free background-job slot" };
+    return { kind: "terminate", reason };
+  }
+
+  /** The daemon-wide count of running (unsettled) jobs. */
+  #totalRunning(): number {
+    let total = 0;
+    for (const st of this.#sessions.values()) total += st.running;
+    return total;
   }
 
   /** Free slot: register the job, hand over the result, arm the timers. */

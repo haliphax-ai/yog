@@ -141,6 +141,7 @@ function opts(over: Partial<JobManagerOptions> = {}): JobManagerOptions {
   return {
     detachMs: 100,
     maxJobsPerSession: 2,
+    maxJobsTotal: 8,
     wakeLadderMs: [10, 20, 30],
     jobMaxMs: 1_000,
     toolOutputLimit: 500,
@@ -288,6 +289,29 @@ describe("JobManager (fake clock)", () => {
     })) as { kind: string; reason: string };
     expect(second.kind).toBe("terminate");
     expect(second.reason).toContain("slot");
+  });
+
+  it("daemon-wide cap: bgMaxJobsTotal terminates across sessions", async () => {
+    // maxJobsPerSession: 2, maxJobsTotal: 2 — two DIFFERENT sessions, one
+    // job each: per-session slots are free, the daemon-wide ceiling is not.
+    const { manager } = build({ opts: { maxJobsPerSession: 2, maxJobsTotal: 1 } });
+    manager.wire();
+    const ret = deferred();
+    const first = (await consultThreshold(manager, {
+      sessionId: "s1",
+      tool: "bash",
+      argsJson: null,
+      result: ret.promise,
+    })) as { kind: string };
+    expect(first.kind).toBe("detach");
+    const second = (await consultThreshold(manager, {
+      sessionId: "s2",
+      tool: "bash",
+      argsJson: null,
+      result: ret.promise,
+    })) as { kind: string; reason?: string };
+    expect(second.kind).toBe("terminate");
+    expect(second.reason).toBe("max concurrent jobs");
   });
 
   it("cap termination: bgJobMaxMs settles the job as terminated: max runtime", async () => {

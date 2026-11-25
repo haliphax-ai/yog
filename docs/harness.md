@@ -172,7 +172,10 @@ timer, and rung — completion forensics survive in the agentfs audit
 rows):
 
 - **Slots** — `bgMaxJobsPerSession` per session (default: the worker-pool
-  size, `max(1, cpus - 1)`). A hung job occupies its slot until the cap.
+  size, `max(1, cpus - 1)`), plus `bgMaxJobsTotal` daemon-wide across all
+  sessions (default 4× the slot default). A hung job occupies its slot
+  until the cap; a race with no capacity kills the call immediately
+  ("no free background-job slot" / "max concurrent jobs").
 - **Wake ladder** — `bgWakeLadderMs` (default 10s → 30m ceiling). A job
   finishing while the session is idle delivers at once as a _wake turn_
   (an ordinary turn: own row, events, SSE, hydration; a dormant session

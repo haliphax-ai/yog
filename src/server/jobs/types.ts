@@ -9,7 +9,12 @@ import type { ToolResult } from "../../toolkit/index.ts";
 export type JobState = "running" | "finished" | "terminated";
 
 /** Why a job was terminated (never set for a plain finish). */
-export type JobTermReason = "max runtime" | "operator abort" | "detach policy failed";
+export type JobTermReason =
+  | "max runtime"
+  | "no free background-job slot"
+  | "max concurrent jobs"
+  | "operator abort"
+  | "detach policy failed";
 
 /** One background job (in-memory row — nothing survives a restart). */
 export interface BackgroundJob {
@@ -106,6 +111,8 @@ export interface JobManagerOptions {
   readonly detachMs: number;
   /** Per-session slot cap (config `bgMaxJobsPerSession` ?? pool default). */
   readonly maxJobsPerSession: number;
+  /** Daemon-wide job ceiling (config `bgMaxJobsTotal` ?? 4 × slot default). */
+  readonly maxJobsTotal: number;
   /** Graduated wake ladder (config `bgWakeLadderMs`). */
   readonly wakeLadderMs: readonly number[];
   /** Per-job lifetime cap (config `bgJobMaxMs`). */
