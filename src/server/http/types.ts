@@ -74,6 +74,8 @@ export interface OrchestratorBoundary {
     sessionId: string,
     killTool?: (sessionId: string) => Promise<boolean> | boolean,
   ): Promise<boolean>;
+  /** True while the session has a live (queued or in-flight) turn. */
+  isBusy?(sessionId: string): boolean;
 }
 
 /** Minimal per-daemon event bus boundary (a Node `EventEmitter`). */

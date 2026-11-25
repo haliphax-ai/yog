@@ -164,7 +164,11 @@ export async function startTurn(
     },
   );
 
-  sendMessage(res, 202, "turn.start", { accepted: true }, requestId);
+  // `queued` tells the client its turn is waiting behind an earlier one
+  // on this session (a wake turn mid-flight, or a burst of submits): the
+  // spinner alone can't distinguish "running" from "queued behind".
+  const busy = typeof st.orchestrator?.isBusy === "function" && st.orchestrator.isBusy(session.id);
+  sendMessage(res, 202, "turn.start", { accepted: true, queued: busy }, requestId);
 }
 
 /**
