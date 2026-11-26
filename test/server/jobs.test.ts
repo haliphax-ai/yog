@@ -80,7 +80,13 @@ function fakeScheduler() {
 
 /** Fake orchestrator: busy flag + recorded wake turns + idle callbacks. */
 function fakeOrchestrator() {
-  const wakes: Array<{ sessionId: string; prompt: string; model?: string; revive?: boolean }> = [];
+  const wakes: Array<{
+    sessionId: string;
+    prompt: string;
+    model?: string;
+    revive?: boolean;
+    wake?: boolean;
+  }> = [];
   const idleCbs = new Map<string, Set<() => void>>();
   let busy = false;
   return {
@@ -108,6 +114,7 @@ function fakeOrchestrator() {
           prompt: String(req.prompt ?? ""),
           model: typeof req.model === "string" ? req.model : undefined,
           revive: req.revive === true,
+          wake: req.wake === true,
         });
         return { promise: Promise.resolve({ ok: true }), abort: () => undefined };
       },
@@ -395,6 +402,7 @@ describe("JobManager (fake clock)", () => {
     expect(orch.wakes[0]!.prompt).toContain("background jobs");
     expect(orch.wakes[0]!.prompt).toContain(v.jobId!);
     expect(orch.wakes[0]!.revive).toBe(true);
+    expect(orch.wakes[0]!.wake).toBe(true);
     expect(orch.wakes[0]!.model).toBe("last-model");
   });
 

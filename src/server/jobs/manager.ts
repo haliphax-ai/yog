@@ -474,7 +474,10 @@ export class JobManager {
   async #runWakeTurn(sessionId: string, orch: OrchestratorLike, prompt: string): Promise<void> {
     const lookedUp = await this.#deps.modelFor?.(sessionId);
     const model = lookedUp ?? this.#opts.modelId;
-    const handle = orch.runTurn(sessionId, { prompt, model, revive: true });
+    // The `wake` marker rides the turn row: the transcript summary carries
+    // it (turnSummaryRow), so a client can style the wake prompt row as
+    // harness-internal instead of user-typed.
+    const handle = orch.runTurn(sessionId, { prompt, model, revive: true, wake: true });
     void handle.promise.catch(() => undefined);
   }
 
