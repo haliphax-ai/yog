@@ -368,12 +368,16 @@ export class JobManager {
     // the client's notice-block path (live via the idle watch, or on
     // the next transcript sync). The wake prompt's own header is the
     // model-facing summary; this is the log-side signal that a job
-    // SETTLED — a natural finish never queued one before, so nobody
-    // watching saw a completion until the wake turn's rebuild.
-    this.#preludeView.push(
+    // SETTLED. The job's settled result rides the notice — it IS a
+    // tool result, so the client renders it through the same shared
+    // tool-result components every live call uses (no re-truncation:
+    // the tool layer already capped it).
+    this.#preludeView.pushResult(
       job.sessionId,
       "background jobs",
       `job ${job.id} finished · ${settleNoticeResult(job.result)} · ${settleSeconds(job.startedAt, job.endedAt)}s`,
+      job.tool,
+      job.result,
     );
     this.#markPending(job);
     void this.#maybeDeliver(job.sessionId);

@@ -9,7 +9,8 @@
  *  - The pair is an assistant row carrying one tool call named
  *    `harness_notice` with EMPTY args ("{}"), answered by a tool row whose
  *    content is a JSON object: the fixed `hint` constant plus the
- *    `notices` array (`{kind, body}`). All information lives in the result.
+ *    `notices` array (`{kind, body}`, with optional `tool` + `result`):
+ *    all information lives in the result.
  *  - `harness_notice` is never advertised in `tools`; a model imitating the
  *    call gets the registry's graceful unknown-tool error row.
  *  - Provenance is the balanced pair + the reserved name, so downstream
@@ -21,10 +22,17 @@
 import { newSessionId } from "../../state/index.ts";
 import { middleTruncate } from "../../toolkit/index.ts";
 
-/** One queued notice: a categorical `kind` plus the free-text `body`. */
+/** One queued notice: a categorical `kind` plus the free-text `body`. An
+ * attached tool result (`tool` + `result`) rides along for producers
+ * whose notice IS a tool outcome (background jobs): the payload is the
+ * settled result exactly as the tool produced it, already capped at the
+ * tool boundary — the notice layer never re-truncates it.
+ */
 export interface PreludeNotice {
   readonly kind: string;
   readonly body: string;
+  readonly tool?: string;
+  readonly result?: unknown;
 }
 
 /** The JSON payload of the synthetic `harness_notice` tool result. */
@@ -40,6 +48,7 @@ export interface PreludePayload {
  */
 export interface PreludeSink {
   push(sessionId: string, kind: string, body: string): void;
+  pushResult(sessionId: string, kind: string, body: string, tool: string, result: unknown): void;
   drain(sessionId: string): PreludeNotice[] | undefined;
   clear(sessionId: string): void;
 }
@@ -51,8 +60,14 @@ export const HARNESS_NOTICE_HINT =
 /** The reserved synthetic tool name (never advertised in `tools`). */
 export const HARNESS_NOTICE_TOOL = "harness_notice" as const;
 
-/** The serialized `harness_notice` result is middle-truncated at this many chars. */
-export const PRELUDE_MAX_CHARS = 4_000;
+/** The serialized `harness_notice` result is middle-truncated at this many
+ * chars — the LAST-resort net behind the tool layer's own caps. Sized
+ * above the live tool-output budget (`TOOL_OUTPUT_LIMIT_CHARS`) so a
+ * fully-capped tool result rides through intact; only producers that
+ * bypass the tool boundary can ever reach the clamp. Background jobs
+ * are exempt by construction: their result is the tool's own.
+ */
+export const PRELUDE_MAX_CHARS = 64_000;
 
 /** The assistant row of the pair: empty args, all information in the result. */
 export interface PreludeCallRow {
@@ -83,14 +98,20 @@ export interface DeliveredPrelude {
 /** Create the sink: plain object, no module-level state. */
 export function createPreludeSink(): PreludeSink {
   const queues = new Map<string, PreludeNotice[]>();
+  const queue = (sessionId: string): PreludeNotice[] => {
+    let q = queues.get(sessionId);
+    if (q === undefined) {
+      q = [];
+      queues.set(sessionId, q);
+    }
+    return q;
+  };
   return {
     push(sessionId: string, kind: string, body: string): void {
-      let q = queues.get(sessionId);
-      if (q === undefined) {
-        q = [];
-        queues.set(sessionId, q);
-      }
-      q.push({ kind, body });
+      queue(sessionId).push({ kind, body });
+    },
+    pushResult(sessionId, kind, body, tool, result): void {
+      queue(sessionId).push({ kind, body, tool, result });
     },
     drain(sessionId: string): PreludeNotice[] | undefined {
       const q = queues.get(sessionId);
@@ -130,9 +151,10 @@ export function deliverPrelude(notices: PreludeNotice[]): DeliveredPrelude | und
 
 /**
  * Serialize the result payload with the safety clamp: the serialized form is
- * middle-truncated to {@link PRELUDE_MAX_CHARS} total, so an over-long
- * notice can never blow a context window (the truncation marker survives
- * the cut).
+ * middle-truncated to {@link PRELUDE_MAX_CHARS} total — the last-resort
+ * net (the tool layer caps long results itself; see the constant). The
+ * truncation marker survives the cut, so a clamped payload stays a
+ * visible truncation, never a silent drop.
  */
 export function serializePrelude(payload: PreludePayload): string {
   return middleTruncate(JSON.stringify(payload), PRELUDE_MAX_CHARS);

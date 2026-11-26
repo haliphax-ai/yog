@@ -25,6 +25,7 @@ export const NO_ORCHESTRATOR: OrchestratorLike = {
 /** Total (no-op) prelude view for a missing injection. */
 export const NO_PRELUDE: PreludeSinkLike = {
   push: () => undefined,
+  pushResult: () => undefined,
   drain: () => undefined,
   clear: () => undefined,
 };

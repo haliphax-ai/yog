@@ -164,9 +164,18 @@ function build(over: { opts?: Partial<JobManagerOptions>; deps?: Partial<JobMana
   const orch = fakeOrchestrator();
   const pool = fakePool();
   const audits: unknown[] = [];
-  const preludes: Array<{ sessionId: string; kind: string; body: string }> = [];
+  const preludes: Array<{
+    sessionId: string;
+    kind: string;
+    body: string;
+    tool?: string;
+    result?: unknown;
+  }> = [];
   const preludeSink = (() => {
-    const queued = new Map<string, Array<{ kind: string; body: string }>>();
+    const queued = new Map<
+      string,
+      Array<{ kind: string; body: string; tool?: string; result?: unknown }>
+    >();
     return {
       push(sessionId: string, kind: string, body: string) {
         preludes.push({ sessionId, kind, body });
@@ -176,6 +185,15 @@ function build(over: { opts?: Partial<JobManagerOptions>; deps?: Partial<JobMana
           queued.set(sessionId, q);
         }
         q.push({ kind, body });
+      },
+      pushResult(sessionId: string, kind: string, body: string, tool: string, result: unknown) {
+        preludes.push({ sessionId, kind, body, tool, result });
+        let q = queued.get(sessionId);
+        if (q === undefined) {
+          q = [];
+          queued.set(sessionId, q);
+        }
+        q.push({ kind, body, tool, result });
       },
       drain(sessionId: string) {
         const q = queued.get(sessionId);
@@ -507,6 +525,29 @@ describe("JobManager (fake clock)", () => {
     expect(preludes[0]!.kind).toBe("background jobs");
     expect(preludes[0]!.body).toContain(`job ${v.jobId} finished`);
     expect(preludes[0]!.body).toContain("exit 0");
+  });
+
+  it("the settle notice carries the settled tool result verbatim (no re-truncation)", async () => {
+    const { manager, orch, preludes } = build();
+    manager.wire();
+    orch.setBusy(true);
+    const ret = deferred();
+    const v = (await consultThreshold(manager, {
+      sessionId: "s1",
+      tool: "bash",
+      argsJson: null,
+      result: ret.promise,
+    })) as { kind: string; jobId: string };
+    const big: ToolResult = { stdout: "z".repeat(60_000), exitCode: 0 };
+    await settleJob(v.jobId!, ret, big);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(preludes[0]!.tool).toBe("bash");
+    // The tool layer (not the notice layer) owns truncation: whatever the
+    // retained promise resolved with rides the notice byte-for-byte — here
+    // a result already capped by the registry — so the client renders the
+    // same components a live call does.
+    expect(preludes[0]!.result).toEqual(big);
   });
 
   it("audit row per settled job (completion forensics)", async () => {

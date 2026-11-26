@@ -94,7 +94,10 @@ export interface JobManagerDeps {
 /** The prelude-sink surface the manager uses (structural, not nominal). */
 export interface PreludeSinkLike {
   push(sessionId: string, kind: string, body: string): void;
-  drain(sessionId: string): Array<{ kind: string; body: string }> | undefined;
+  pushResult(sessionId: string, kind: string, body: string, tool: string, result: unknown): void;
+  drain(
+    sessionId: string,
+  ): Array<{ kind: string; body: string; tool?: string; result?: unknown }> | undefined;
   clear(sessionId: string): void;
 }
 

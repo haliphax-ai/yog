@@ -114,4 +114,28 @@ describe("serializePrelude (the safety clamp)", () => {
     const TAIL = `x` + String.fromCharCode(34) + `}]}`;
     expect(out.endsWith(TAIL)).toBe(true);
   });
+
+  describe("pushResult (the tool-result carrier)", () => {
+    it("carries the tool name and settled result on the notice, verbatim", () => {
+      const sink = createPreludeSink();
+      const result = { stdout: "a".repeat(10_000), exitCode: 0 };
+      sink.pushResult("s1", "background jobs", "job bg_1 finished · exit 0", "bash", result);
+      const notices = sink.drain("s1")!;
+      expect(notices).toHaveLength(1);
+      expect(notices[0]!.kind).toBe("background jobs");
+      expect(notices[0]!.tool).toBe("bash");
+      // No truncation at the notice layer — the tool boundary owns that.
+      expect(notices[0]!.result).toEqual(result);
+    });
+
+    it("a tool-result notice survives deliverPrelude + serializePrelude intact", () => {
+      const sink = createPreludeSink();
+      const result = { exitCode: 0, stdout: "out".repeat(500) };
+      sink.pushResult("s1", "background jobs", "job bg_1 finished", "bash", result);
+      const delivered = deliverPrelude(sink.drain("s1")!);
+      const payload = JSON.parse(delivered!.result.content) as PreludePayload;
+      expect(payload.notices[0]!.tool).toBe("bash");
+      expect(payload.notices[0]!.result).toEqual(result);
+    });
+  });
 });
