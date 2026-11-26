@@ -87,7 +87,7 @@ export function abortSessionJobs(ctx: AbortContext, sessionId: string): number {
   wipeSessionState(ctx, sessionId);
   if (jobs.length > 0) {
     const ids = jobs.map((j) => j.id).join(", ");
-    ctx.preludeView.push(sessionId, "background-jobs", `background jobs terminated: ${ids}`);
+    ctx.preludeView.push(sessionId, "background jobs", `background jobs terminated: ${ids}`);
   }
   return jobs.length;
 }

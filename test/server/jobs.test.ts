@@ -457,7 +457,7 @@ describe("JobManager (fake clock)", () => {
     expect(orch.wakes).toHaveLength(0);
     // Prelude queued, no wake.
     expect(preludes).toEqual([
-      { sessionId: "s1", kind: "background-jobs", body: `background jobs terminated: ${v.jobId}` },
+      { sessionId: "s1", kind: "background jobs", body: `background jobs terminated: ${v.jobId}` },
     ]);
   });
 
@@ -504,7 +504,7 @@ describe("JobManager (fake clock)", () => {
     await Promise.resolve();
     expect(orch.wakes).toHaveLength(0); // busy: rides the idle callback
     expect(preludes).toHaveLength(1);
-    expect(preludes[0]!.kind).toBe("background-jobs");
+    expect(preludes[0]!.kind).toBe("background jobs");
     expect(preludes[0]!.body).toContain(`job ${v.jobId} finished`);
     expect(preludes[0]!.body).toContain("exit 0");
   });

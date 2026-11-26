@@ -372,7 +372,7 @@ export class JobManager {
     // watching saw a completion until the wake turn's rebuild.
     this.#preludeView.push(
       job.sessionId,
-      "background-jobs",
+      "background jobs",
       `job ${job.id} finished · ${settleNoticeResult(job.result)} · ${settleSeconds(job.startedAt, job.endedAt)}s`,
     );
     this.#markPending(job);
