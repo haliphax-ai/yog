@@ -21,16 +21,20 @@
 
 import { newSessionId } from "../../state/index.ts";
 import { middleTruncate } from "../../toolkit/index.ts";
-
-/** One queued notice: a categorical `kind` plus the free-text `body`. An
- * attached tool result (`tool` + `result`) rides along for producers
- * whose notice IS a tool outcome (background jobs): the payload is the
- * settled result exactly as the tool produced it, already capped at the
- * tool boundary — the notice layer never re-truncates it.
- */
+/** One queued notice: a categorical `kind` plus the free-text `body`. */
 export interface PreludeNotice {
   readonly kind: string;
   readonly body: string;
+  /**
+   * Exemption scope for the clamp (see {@link serializePrelude}): a
+   * notice whose payload must survive serialization untouched (a
+   * background job's settled tool result — already capped at the tool
+   * boundary) opts in here. Everything else stays clamped. The
+   * exemption is the PRODUCER'S declaration, made at push time; future
+   * exempting producers set the flag and never touch the clamp itself.
+   */
+  readonly exemptFromClamp?: boolean;
+  /** Attached tool result (a notice that IS a tool outcome). */
   readonly tool?: string;
   readonly result?: unknown;
 }
@@ -61,13 +65,15 @@ export const HARNESS_NOTICE_HINT =
 export const HARNESS_NOTICE_TOOL = "harness_notice" as const;
 
 /** The serialized `harness_notice` result is middle-truncated at this many
- * chars — the LAST-resort net behind the tool layer's own caps. Sized
- * above the live tool-output budget (`TOOL_OUTPUT_LIMIT_CHARS`) so a
- * fully-capped tool result rides through intact; only producers that
- * bypass the tool boundary can ever reach the clamp. Background jobs
- * are exempt by construction: their result is the tool's own.
+ * chars: the clamp on ordinary notices, sized against the context-window
+ * math (a long body cannot nuke the model's context). The clamp is
+ * PER-NOTICE exemptable — {@link PreludeNotice.exemptFromClamp} — for
+ * payloads that are already size-safe by construction (a background
+ * job's settled tool result was capped at the tool boundary; clamping
+ * it would only shred the JSON). The exemption is declared by the
+ * PRODUCER at push time; this module owns only the mechanism.
  */
-export const PRELUDE_MAX_CHARS = 64_000;
+export const PRELUDE_MAX_CHARS = 4_000;
 
 /** The assistant row of the pair: empty args, all information in the result. */
 export interface PreludeCallRow {
@@ -111,7 +117,15 @@ export function createPreludeSink(): PreludeSink {
       queue(sessionId).push({ kind, body });
     },
     pushResult(sessionId, kind, body, tool, result): void {
-      queue(sessionId).push({ kind, body, tool, result });
+      queue(sessionId).push({
+        kind,
+        body,
+        tool,
+        result,
+        // Background jobs notices carry an already-capped tool result:
+        // exempt from the clamp. The exemption is per-notice, not global.
+        exemptFromClamp: true,
+      });
     },
     drain(sessionId: string): PreludeNotice[] | undefined {
       const q = queues.get(sessionId);
@@ -150,12 +164,17 @@ export function deliverPrelude(notices: PreludeNotice[]): DeliveredPrelude | und
 }
 
 /**
- * Serialize the result payload with the safety clamp: the serialized form is
- * middle-truncated to {@link PRELUDE_MAX_CHARS} total — the last-resort
- * net (the tool layer caps long results itself; see the constant). The
- * truncation marker survives the cut, so a clamped payload stays a
- * visible truncation, never a silent drop.
+ * The per-notice clamp. Exempt notices ride through untouched — the
+ * exemption is the PRODUCER'S declaration ({@link PreludeNotice
+ * .exemptFromClamp}): the payload is already size-safe by construction
+ * (a background job's tool result was capped at the tool boundary),
+ * and this layer must not second-guess tool-owned data. Everything else
+ * is serialized whole then middle-truncated to {@link PRELUDE_MAX_CHARS}
+ * — the marker survives the cut, so a clamped payload stays a visible
+ * truncation, never a silent drop.
  */
 export function serializePrelude(payload: PreludePayload): string {
-  return middleTruncate(JSON.stringify(payload), PRELUDE_MAX_CHARS);
+  const exempt = payload.notices.every((n) => n.exemptFromClamp === true);
+  const json = JSON.stringify(payload);
+  return exempt ? json : middleTruncate(json, PRELUDE_MAX_CHARS);
 }

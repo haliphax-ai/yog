@@ -115,27 +115,55 @@ describe("serializePrelude (the safety clamp)", () => {
     expect(out.endsWith(TAIL)).toBe(true);
   });
 
-  describe("pushResult (the tool-result carrier)", () => {
-    it("carries the tool name and settled result on the notice, verbatim", () => {
-      const sink = createPreludeSink();
-      const result = { stdout: "a".repeat(10_000), exitCode: 0 };
-      sink.pushResult("s1", "background jobs", "job bg_1 finished · exit 0", "bash", result);
-      const notices = sink.drain("s1")!;
-      expect(notices).toHaveLength(1);
-      expect(notices[0]!.kind).toBe("background jobs");
-      expect(notices[0]!.tool).toBe("bash");
-      // No truncation at the notice layer — the tool boundary owns that.
-      expect(notices[0]!.result).toEqual(result);
-    });
+  it("an exempt notice rides the clamp untouched (per-notice, producer-declared)", () => {
+    const payload: PreludePayload = {
+      hint: HARNESS_NOTICE_HINT,
+      notices: [{ kind: "background jobs", body: "job bg_1 finished", exemptFromClamp: true }],
+    };
+    expect(serializePrelude(payload)).toBe(JSON.stringify(payload));
+  });
 
-    it("a tool-result notice survives deliverPrelude + serializePrelude intact", () => {
-      const sink = createPreludeSink();
-      const result = { exitCode: 0, stdout: "out".repeat(500) };
-      sink.pushResult("s1", "background jobs", "job bg_1 finished", "bash", result);
-      const delivered = deliverPrelude(sink.drain("s1")!);
-      const payload = JSON.parse(delivered!.result.content) as PreludePayload;
-      expect(payload.notices[0]!.tool).toBe("bash");
-      expect(payload.notices[0]!.result).toEqual(result);
+  it("mixed exempt + clamped notices still clamp (the clamp is per-pair, not per-notice)", () => {
+    const payload: PreludePayload = {
+      hint: HARNESS_NOTICE_HINT,
+      notices: [
+        { kind: "background jobs", body: "tool result rides", exemptFromClamp: true },
+        { kind: "k", body: "x".repeat(PRELUDE_MAX_CHARS * 2) },
+      ],
+    };
+    const out = serializePrelude(payload);
+    expect(out.length).toBeLessThanOrEqual(PRELUDE_MAX_CHARS);
+    expect(out).toContain("TRUNCATED");
+  });
+
+  it("pushResult marks its notices exempt (the tool result is already capped)", () => {
+    const sink = createPreludeSink();
+    sink.pushResult("s1", "background jobs", "job bg_1 finished · exit 0", "bash", {
+      stdout: "out",
+      exitCode: 0,
     });
+    expect(sink.drain("s1")![0]!.exemptFromClamp).toBe(true);
+  });
+
+  it("pushResult carries the tool name and settled result on the notice, verbatim", () => {
+    const sink = createPreludeSink();
+    const result = { stdout: "a".repeat(10_000), exitCode: 0 };
+    sink.pushResult("s1", "background jobs", "job bg_1 finished · exit 0", "bash", result);
+    const notices = sink.drain("s1")!;
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.kind).toBe("background jobs");
+    expect(notices[0]!.tool).toBe("bash");
+    // No truncation at the notice layer — the tool boundary owns that.
+    expect(notices[0]!.result).toEqual(result);
+  });
+
+  it("a tool-result notice survives deliverPrelude + serializePrelude intact", () => {
+    const sink = createPreludeSink();
+    const result = { exitCode: 0, stdout: "out".repeat(500) };
+    sink.pushResult("s1", "background jobs", "job bg_1 finished", "bash", result);
+    const delivered = deliverPrelude(sink.drain("s1")!);
+    const payload = JSON.parse(delivered!.result.content) as PreludePayload;
+    expect(payload.notices[0]!.tool).toBe("bash");
+    expect(payload.notices[0]!.result).toEqual(result);
   });
 });
