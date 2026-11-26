@@ -483,7 +483,30 @@ describe("JobManager (fake clock)", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(orch.wakes).toHaveLength(0);
+    // The settle notice (natural finish) + the idle-abort notice
+    // (termination) — both queued, one wake suppressed.
+    expect(preludes).toHaveLength(2);
+  });
+
+  it("a natural settle queues a completion prelude notice (the live signal)", async () => {
+    const { manager, orch, preludes } = build();
+    manager.wire();
+    orch.setBusy(true); // no wake while the foreign turn runs
+    const ret = deferred();
+    const v = (await consultThreshold(manager, {
+      sessionId: "s1",
+      tool: "bash",
+      argsJson: null,
+      result: ret.promise,
+    })) as { kind: string; jobId: string };
+    await settleJob(v.jobId!, ret, { stdout: "out", exitCode: 0 });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(orch.wakes).toHaveLength(0); // busy: rides the idle callback
     expect(preludes).toHaveLength(1);
+    expect(preludes[0]!.kind).toBe("background-jobs");
+    expect(preludes[0]!.body).toContain(`job ${v.jobId} finished`);
+    expect(preludes[0]!.body).toContain("exit 0");
   });
 
   it("audit row per settled job (completion forensics)", async () => {

@@ -67,3 +67,15 @@ export function buildWakePrompt(
   const header = `[background jobs] ${jobs.length} finished: results are attached below. Use them to continue your work; do not re-run the tools.`;
   return [header, ...jobs.map((job) => jobBlock(job, budget))].join("\n\n");
 }
+
+/** One-line result summary for the settle notice (the drawer's exit cell). */
+export function settleNoticeResult(result: unknown): string {
+  const r = (result ?? {}) as { exitCode?: unknown; error?: unknown };
+  if (typeof r.error === "string" && r.error !== "") return `error: ${r.error}`;
+  return typeof r.exitCode === "number" ? `exit ${r.exitCode}` : "done";
+}
+
+/** The job's total runtime in seconds (one decimal). */
+export function settleSeconds(startedAt: number, endedAt: number): number {
+  return Math.max(0, Math.round((endedAt - startedAt) / 100) / 10);
+}

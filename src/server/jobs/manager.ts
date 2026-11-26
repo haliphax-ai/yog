@@ -53,7 +53,7 @@ import {
   schedulerView,
   type OrchestratorLike,
 } from "./adapters.ts";
-import { buildWakePrompt } from "./wake.ts";
+import { buildWakePrompt, settleNoticeResult, settleSeconds } from "./wake.ts";
 import { advanceRung, collectPending, queueCleared, rungDelayMs } from "./ladder.ts";
 import type { AbortContext } from "./abort.ts";
 import { PRUNE_SWEEP_MS, pruneExpiredJobs } from "./prune.ts";
@@ -364,11 +364,21 @@ export class JobManager {
     const st = this.#session(job.sessionId);
     st.running = Math.max(0, st.running - 1);
     this.#recordAudit(job);
+    // The human-facing completion signal: a prelude notice rendered by
+    // the client's notice-block path (live via the idle watch, or on
+    // the next transcript sync). The wake prompt's own header is the
+    // model-facing summary; this is the log-side signal that a job
+    // SETTLED — a natural finish never queued one before, so nobody
+    // watching saw a completion until the wake turn's rebuild.
+    this.#preludeView.push(
+      job.sessionId,
+      "background-jobs",
+      `job ${job.id} finished · ${settleNoticeResult(job.result)} · ${settleSeconds(job.startedAt, job.endedAt)}s`,
+    );
     this.#markPending(job);
     void this.#maybeDeliver(job.sessionId);
   }
 
-  /** Best-effort agentfs audit row per settled job (completion forensics). */
   #recordAudit(job: BackgroundJob): void {
     const { recordSettled } = this.#deps;
     if (recordSettled === undefined) return;
