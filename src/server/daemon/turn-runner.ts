@@ -13,6 +13,8 @@ import { TurnEngine, type TurnOptions } from "../../turn/index.ts";
 import type { TurnEvent, TurnSink, TurnUsage } from "../../turn/index.ts";
 import {
   deliverPrelude,
+  HARNESS_NOTICE_HINT,
+  HARNESS_NOTICE_TOOL,
   type DeliveredPrelude,
   type PreludeNotice,
   type PreludeSink,
@@ -319,5 +321,52 @@ async function hydrateMessages(
     ...(prelude !== undefined ? [prelude.result as unknown as ChatCompletionMessageParam] : []),
     { role: "user", content: prompt },
   ];
+  if (prelude !== undefined && notices !== undefined)
+    publishPrelude(rt, sessionId, prelude, notices);
   return { messages, startLen: prior.length, prelude };
+}
+
+/**
+ * Mirror the drained prelude pair onto the wire (persist + bus): the
+ * transcript splice above only reaches clients that rehydrate from
+ * `transcript.get` — a live client (the idle watch's stream) never saw
+ * the notices until its next submit synced the transcript. The pair
+ * ships as ordinary `tool.call`/`tool.result` frames for the
+ * `harness_notice` tool, exactly the shape the rehydrate path decodes.
+ */
+function publishPrelude(
+  rt: TurnRuntime,
+  sessionId: string,
+  prelude: DeliveredPrelude,
+  notices: PreludeNotice[],
+): void {
+  const callId = prelude.call.tool_calls[0]?.id ?? "";
+  const events: Array<{ type: "tool.call" | "tool.result"; data: Record<string, unknown> }> = [
+    {
+      type: "tool.call",
+      data: {
+        id: callId,
+        name: HARNESS_NOTICE_TOOL,
+        args: "{}",
+      },
+    },
+    {
+      type: "tool.result",
+      data: {
+        id: callId,
+        name: HARNESS_NOTICE_TOOL,
+        ok: true,
+        result: { hint: HARNESS_NOTICE_HINT, notices },
+      },
+    },
+  ];
+  for (const ev of events) {
+    void rt.store
+      ?.addEvent(sessionId, { type: ev.type, payload: JSON.stringify(ev.data), version: 1 })
+      .catch(() => undefined);
+    (rt.bus as unknown as { emit?: (ch: string, ev: unknown) => void })?.emit?.(
+      `session:${sessionId}`,
+      { id: 0, type: ev.type, version: 1, ts: Date.now(), data: ev.data },
+    );
+  }
 }
