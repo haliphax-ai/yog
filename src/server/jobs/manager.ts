@@ -235,10 +235,15 @@ export class JobManager {
           return { kind: "terminate", reason: "background jobs are session-scoped" };
         }
         const st = this.#session(sessionId);
-        if (st.running >= this.#opts.maxJobsPerSession) {
+        // Capacity = live + undelivered pendings (both hold the job's
+        // result in memory and both are owed a wake): a slot frees at
+        // settle, but the job stays under the cap until DELIVERED — or a
+        // busy session piles pendings past its slots and floods the next
+        // wake turn.
+        if (st.running + st.pending.length >= this.#opts.maxJobsPerSession) {
           return await this.#terminateVerdict(sessionId, "no free background-job slot");
         }
-        if (this.#totalRunning() >= this.#opts.maxJobsTotal) {
+        if (this.#totalUnsettled() >= this.#opts.maxJobsTotal) {
           return await this.#terminateVerdict(sessionId, "max concurrent jobs");
         }
         return await this.#detachVerdict(call, sessionId, st);
@@ -252,10 +257,10 @@ export class JobManager {
     return { kind: "terminate", reason };
   }
 
-  /** The daemon-wide count of running (unsettled) jobs. */
-  #totalRunning(): number {
+  /** The daemon-wide count of unsettled jobs (running + undelivered). */
+  #totalUnsettled(): number {
     let total = 0;
-    for (const st of this.#sessions.values()) total += st.running;
+    for (const st of this.#sessions.values()) total += st.running + st.pending.length;
     return total;
   }
 

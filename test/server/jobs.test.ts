@@ -326,6 +326,42 @@ describe("JobManager (fake clock)", () => {
     expect(second.kind).toBe("terminate");
     expect(second.reason).toContain("slot");
   });
+  it("pendings count against the slot cap (delivery debt is capacity too)", async () => {
+    // maxJobsPerSession: 2 — one job RUNNING (undelivered: the session is
+    // busy) plus one SETTLED-but-pending job together exhaust the slots:
+    // the third detach is refused. Cap pressure must not evaporate at
+    // settle — 203 pollers once piled up while a turn never went idle.
+    const { manager, orch } = build({ opts: { maxJobsPerSession: 2 } });
+    manager.wire();
+    orch.setBusy(true);
+    const ret = deferred();
+    const first = (await consultThreshold(manager, {
+      sessionId: "s1",
+      tool: "bash",
+      argsJson: null,
+      result: ret.promise,
+    })) as { kind: string; jobId: string };
+    expect(first.kind).toBe("detach");
+    const second = (await consultThreshold(manager, {
+      sessionId: "s1",
+      tool: "bash",
+      argsJson: null,
+      result: ret.promise,
+    })) as { kind: string; jobId: string };
+    expect(second.kind).toBe("detach");
+    // Settle the first: its slot frees, but it stays pending (busy).
+    await settleJob(first.jobId!, ret, { stdout: "out", exitCode: 0 });
+    expect(manager.job(first.jobId!)!.state).toBe("finished");
+    // 1 running + 1 pending = full: the third detach is refused.
+    const third = (await consultThreshold(manager, {
+      sessionId: "s1",
+      tool: "bash",
+      argsJson: null,
+      result: ret.promise,
+    })) as { kind: string; reason?: string };
+    expect(third.kind).toBe("terminate");
+    expect(third.reason).toContain("slot");
+  });
 
   it("daemon-wide cap: bgMaxJobsTotal terminates across sessions", async () => {
     // maxJobsPerSession: 2, maxJobsTotal: 2 — two DIFFERENT sessions, one
