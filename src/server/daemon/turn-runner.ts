@@ -98,12 +98,19 @@ interface LiveTurnState {
   usage: TurnUsage | undefined;
 }
 
-/** Create the turn row (best effort: persistence failure keeps the turn alive). */
+/**
+ * Create the turn row (best effort: persistence failure keeps the turn
+ * alive). `wake` marks a background-jobs wake turn (the jobs manager
+ * fires it, no human prompt behind it): the flag persists in the row's
+ * request_json so transcript consumers can style the prompt row as
+ * harness-internal, not user-typed.
+ */
 async function startTurnRow(
   rt: TurnRuntime,
   sessionId: string,
   prompt: string,
   model: string,
+  wake: boolean,
 ): Promise<number | null> {
   if (rt.store === undefined) return null;
   try {
@@ -112,6 +119,7 @@ async function startTurnRow(
       content: prompt,
       status: "running",
       model,
+      wake,
     });
     const id = (turnRow as { id?: unknown }).id;
     return typeof id === "number" ? id : null;
@@ -208,6 +216,9 @@ export function makeExecuteTurn(rt: TurnRuntime, usageBySession: UsageBySession)
     const client = newClient();
     const prompt = typeof req.prompt === "string" ? req.prompt : "";
     const model = typeof req.model === "string" ? req.model : rt.modelId;
+    // The jobs manager stamps its wake turns (`revive: true` plus the
+    // `wake` marker); the flag rides the turn row for transcript styling.
+    const wake = req.wake === true;
     const live: LiveTurnState = { turnId: null, usage: undefined };
     usageBySession.set(sessionId, undefined);
 
@@ -224,8 +235,8 @@ export function makeExecuteTurn(rt: TurnRuntime, usageBySession: UsageBySession)
         .child({ sessionId })
         .debug({ startLen, extraRows: messages.length - 1 - startLen }, "turn prelude");
     }
-    const turnRowId = await startTurnRow(rt, sessionId, prompt, model);
 
+    const turnRowId = await startTurnRow(rt, sessionId, prompt, model, wake);
     const turnOpts = await buildTurnOptions(rt, {
       sessionId,
       model,

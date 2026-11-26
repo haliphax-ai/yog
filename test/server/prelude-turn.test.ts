@@ -268,3 +268,44 @@ describe("harness_notice prelude delivery (turn runner)", () => {
     },
   );
 });
+
+describe("wake-turn marker (the jobs manager turn row)", () => {
+  it(
+    "persists wake: true on the turn row and surfaces it through transcript.get",
+    { timeout: 30_000 },
+    async () => {
+      const bus = new EventEmitter();
+      bus.setMaxListeners(0);
+      const prelude = createPreludeSink();
+      const fake = orchestratorFromModel(ackClientFactory(), {
+        store,
+        bus,
+        registry: tools,
+        modelId: "fake-model",
+        prelude,
+      });
+      const daemon = await buildDaemon(fake, prelude, bus);
+      try {
+        const sid = await newSession(daemon.url);
+        await runTurnToEnd(daemon.url, sid, { prompt: "normal" });
+        // The wake turn: same executeTurn path, with the wake marker.
+        await runTurnToEnd(daemon.url, sid, { prompt: "[background jobs] 1 finished", wake: true });
+        const turns = await store.listTurns(sid);
+        expect(turns).toHaveLength(2);
+        expect(turns[0]!.request.wake).toBeUndefined();
+        expect(turns[1]!.request.wake).toBe(true);
+        // The transcript dump carries the marker on the wake turn only.
+        const dump = (
+          (await (await sendMessage(daemon.url, sid, "transcript.get")).json()) as {
+            data?: { turns?: Array<{ turnId: number; wake?: boolean }> };
+          }
+        ).data;
+        expect(dump!.turns).toHaveLength(2);
+        expect(dump!.turns![0]!.wake).toBeUndefined();
+        expect(dump!.turns![1]!.wake).toBe(true);
+      } finally {
+        await daemon.close();
+      }
+    },
+  );
+});

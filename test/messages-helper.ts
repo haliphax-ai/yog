@@ -409,6 +409,9 @@ async function openFakeTurn(
     content: prompt,
     status: "running",
     model,
+    // The jobs manager stamps its wake turns; the marker rides the row
+    // exactly like the real executeTurn.
+    wake: req.wake === true,
   })) as TurnRowLike;
   capture.calls.push({ sessionId, messages, model });
   capture.usageBySession.set(sessionId, undefined);

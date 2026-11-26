@@ -82,19 +82,33 @@ export async function collectTurnSummaries(
     }
   }
   const liveUsage = deps.onUsageFor?.(id);
-  turns = rows.map((r) => {
+  return rows.map(turnSummaryRow(usageById, liveUsage));
+}
+
+/** The summary row for one turn-row record: the fields transcript.get
+ *  consumers read (usage attribution, duration, settle status, wake). */
+function turnSummaryRow(
+  usageById: Map<number, { usage?: unknown; durationMs?: number }>,
+  liveUsage: unknown,
+) {
+  return (r: Record<string, unknown>): Record<string, unknown> => {
     const turnId = Number(r.id);
     const status = typeof r.status === "string" ? r.status : "finished";
     const stored = usageById.get(turnId) ?? {};
     const running = status === "running";
+    // The wake marker (a background-jobs wake turn, the jobs manager
+    // fired it): rides the summary so a client can style the prompt row
+    // as harness-internal instead of user-typed.
+    const request = r.request as { wake?: unknown } | undefined;
+    const wake = request?.wake === true;
     return {
       turnId,
       status,
+      ...(wake ? { wake: true } : {}),
       ...(running && liveUsage !== undefined ? { usage: liveUsage } : stored),
       ...(typeof r.duration_ms === "number" ? { durationMs: r.duration_ms } : {}),
     };
-  });
-  return turns;
+  };
 }
 
 /**
