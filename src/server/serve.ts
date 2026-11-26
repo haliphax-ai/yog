@@ -291,6 +291,10 @@ function buildJobManager(config: YogConfig, modelId: string, deps: JobManagerDep
     jobMaxMs: config.bgJobMaxMs,
     jobTtlMs: config.bgJobTtlMs ?? 24 * 60 * 60 * 1000,
     toolOutputLimit: config.toolOutputLimit ?? 50_000,
+    // A wake turn delivers at most a handful of jobs: the per-job streams
+    // are already budget-capped, but the BATCH size is the multiplier that
+    // overflowed the context window (3.2 MB prompt, turn 635).
+    maxJobsPerWake: config.bgMaxJobsPerWake ?? 8,
     modelId,
   };
   return new JobManager(opts, deps);

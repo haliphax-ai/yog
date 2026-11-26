@@ -12,7 +12,13 @@
 export { jobsBoundary } from "./boundary.ts";
 export { JobManager } from "./manager.ts";
 export { buildWakePrompt, jobBlock } from "./wake.ts";
-export { advanceRung, collectPending, queueCleared, rungDelayMs } from "./ladder.ts";
+export {
+  advanceRung,
+  collectPending,
+  queueCleared,
+  rungDelayMs,
+  sliceToWakeCap,
+} from "./ladder.ts";
 export {
   abortSessionJobs,
   purgeSessionJobs,

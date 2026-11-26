@@ -124,6 +124,13 @@ export interface JobManagerOptions {
   readonly jobTtlMs: number;
   /** Per-job serialized char budget in wake prompts (toolOutputLimit). */
   readonly toolOutputLimit: number;
+  /**
+   * The max jobs one wake turn delivers (a per-wake BATCH cap, on top of
+   * the per-job `toolOutputLimit` truncation): an unbounded batch
+   * multiplies the per-job budget into a context-window overflow. Jobs
+   * beyond the cap stay pending and ride the next wake turn.
+   */
+  readonly maxJobsPerWake: number;
   /** The session model id (wake-turn model when no last turn is known). */
   readonly modelId: string;
 }

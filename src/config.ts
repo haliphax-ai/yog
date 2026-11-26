@@ -165,6 +165,14 @@ export const YogConfigSchema = z
      * in the store. Default 24h.
      */
     bgJobTtlMs: z.number().int().min(1).optional(),
+    /**
+     * The max jobs ONE wake turn delivers (a batch cap on top of the
+     * per-job `toolOutputLimit` truncation): the batch size is the
+     * multiplier that once shipped a 3.2 MB wake prompt and overflowed the
+     * context window. Jobs beyond the cap stay pending and ride the next
+     * wake turn. Default 8.
+     */
+    bgMaxJobsPerWake: z.number().int().min(1).optional(),
     agentUid: z.number().int().min(1).default(DEFAULT_AGENT_UID),
     agentGid: z.number().int().min(1).default(DEFAULT_AGENT_GID),
     agentHome: z.string().min(1).default("/home/agent"),

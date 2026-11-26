@@ -38,3 +38,24 @@ export function collectPending(
     .map((id) => lookup(id))
     .filter((j): j is BackgroundJob => j !== undefined && j.delivered !== true);
 }
+
+/**
+ * Slice a settled batch to the per-wake cap (the context-window guard):
+ * the first `cap` jobs deliver on this wake; the rest stay pending (in
+ * pending order) and ride the next wake turn. Mutates `jobs` in place —
+ * the free-function pattern the other ladder rules use (the manager keeps
+ * its collections, this keeps its arithmetic).
+ */
+export function sliceToWakeCap(
+  jobs: BackgroundJob[],
+  pendingIds: readonly string[],
+  cap: number,
+): { delivered: BackgroundJob[]; pending: string[] } {
+  if (jobs.length <= Math.max(1, cap)) return { delivered: jobs, pending: [...pendingIds] };
+  const delivered = jobs.slice(0, Math.max(1, cap));
+  const deliveredIds = new Set(delivered.map((j) => j.id));
+  const overflow = jobs.filter((j) => !deliveredIds.has(j.id));
+  const pending = overflow.map((j) => j.id);
+  for (const id of pendingIds) if (!deliveredIds.has(id)) pending.push(id);
+  return { delivered, pending };
+}

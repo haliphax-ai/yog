@@ -153,6 +153,9 @@ function opts(over: Partial<JobManagerOptions> = {}): JobManagerOptions {
     jobMaxMs: 1_000,
     jobTtlMs: 2_000,
     toolOutputLimit: 500,
+    // The batch cap: tests use a big default (batches stay small) and
+    // override it explicitly in the batch-slicing tests.
+    maxJobsPerWake: 100,
     modelId: "test-model",
     ...over,
   };
@@ -426,6 +429,44 @@ describe("JobManager (fake clock)", () => {
     expect(orch.wakes[0]!.prompt).toContain("2 finished");
   });
 
+  it("batch slice: a wake delivers at most maxJobsPerWake jobs; overflow rides the next wake", async () => {
+    const { manager, orch, clock } = build({ opts: { maxJobsPerWake: 2, maxJobsPerSession: 8 } });
+    manager.wire();
+    orch.setBusy(true);
+    const ret = deferred();
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const v = (await consultThreshold(manager, {
+        sessionId: "s1",
+        tool: "bash",
+        argsJson: `{"n":${i}}`,
+        result: ret.promise,
+      })) as { kind: string; jobId: string };
+      ids.push(v.jobId!);
+    }
+    for (const id of ids) await settleJob(id, ret, { stdout: "out", exitCode: 0 });
+    orch.setBusy(false);
+    orch.fireIdle("s1");
+    await Promise.resolve();
+    await Promise.resolve();
+    // First wake: the first TWO jobs only; the overflow stays pending.
+    expect(orch.wakes).toHaveLength(1);
+    expect(orch.wakes[0]!.prompt).toContain(ids[0]!);
+    expect(orch.wakes[0]!.prompt).toContain(ids[1]!);
+    expect(orch.wakes[0]!.prompt).toContain("2 finished");
+    expect(orch.wakes[0]!.prompt).not.toContain(ids[2]!);
+    // The ladder re-arm lands on a later microtask (it follows the wake
+    // turn's awaited model lookup): let it settle before moving the clock.
+    await new Promise((r) => setTimeout(r, 0));
+    clock.advance(clock.now + 10);
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(orch.wakes).toHaveLength(2);
+    expect(orch.wakes[1]!.prompt).toContain(ids[2]!);
+    expect(orch.wakes[1]!.prompt).toContain(ids[3]!);
+    expect(orch.wakes[1]!.prompt).toContain("2 finished");
+  });
+
   it("wake prompt truncates per-job streams against the tool-output budget", async () => {
     const { manager, orch } = build({ opts: { toolOutputLimit: 64 } });
     manager.wire();
@@ -527,7 +568,7 @@ describe("JobManager (fake clock)", () => {
     expect(preludes[0]!.body).toContain("exit 0");
   });
 
-  it("the settle notice carries the settled tool result verbatim (no re-truncation)", async () => {
+  it("the settle notice stays a bounded one-liner (no result payload)", async () => {
     const { manager, orch, preludes } = build();
     manager.wire();
     orch.setBusy(true);
@@ -542,12 +583,15 @@ describe("JobManager (fake clock)", () => {
     await settleJob(v.jobId!, ret, big);
     await Promise.resolve();
     await Promise.resolve();
-    expect(preludes[0]!.tool).toBe("bash");
-    // The tool layer (not the notice layer) owns truncation: whatever the
-    // retained promise resolved with rides the notice byte-for-byte — here
-    // a result already capped by the registry — so the client renders the
-    // same components a live call does.
-    expect(preludes[0]!.result).toEqual(big);
+    // The notice body stays one bounded line: no settled result rides it
+    // (a 60k-char result on 203 jobs once shipped a 3.1 MB notice payload
+    // that killed the next wake turn with a context-overflow 400). The
+    // result streams ride the wake prompt instead.
+    expect(preludes[0]!.tool).toBeUndefined();
+    expect(preludes[0]!.result).toBeUndefined();
+    expect(preludes[0]!.body).toContain(`job ${v.jobId} finished`);
+    expect(preludes[0]!.body).toContain("exit 0");
+    expect(preludes[0]!.body.length).toBeLessThan(200);
   });
 
   it("audit row per settled job (completion forensics)", async () => {

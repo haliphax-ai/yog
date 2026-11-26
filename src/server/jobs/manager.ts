@@ -54,7 +54,13 @@ import {
   type OrchestratorLike,
 } from "./adapters.ts";
 import { buildWakePrompt, settleNoticeResult, settleSeconds } from "./wake.ts";
-import { advanceRung, collectPending, queueCleared, rungDelayMs } from "./ladder.ts";
+import {
+  advanceRung,
+  collectPending,
+  queueCleared,
+  rungDelayMs,
+  sliceToWakeCap,
+} from "./ladder.ts";
 import type { AbortContext } from "./abort.ts";
 import { PRUNE_SWEEP_MS, pruneExpiredJobs } from "./prune.ts";
 
@@ -365,19 +371,20 @@ export class JobManager {
     st.running = Math.max(0, st.running - 1);
     this.#recordAudit(job);
     // The human-facing completion signal: a prelude notice rendered by
-    // the client's notice-block path (live via the idle watch, or on
-    // the next transcript sync). The wake prompt's own header is the
+    // the client's notice-block path (live via the idle watch, or on the
+    // next transcript sync). The wake prompt's own header is the
     // model-facing summary; this is the log-side signal that a job
-    // SETTLED. The job's settled result rides the notice — it IS a
-    // tool result, so the client renders it through the same shared
-    // tool-result components every live call uses (no re-truncation:
-    // the tool layer already capped it).
-    this.#preludeView.pushResult(
+    // SETTLED. The notice body stays a bounded one-liner: no settled
+    // result rides it. A settled result is NOT size-safe here — a detached
+    // bash job can legally return up to ~50k serialized chars, and 203 of
+    // them once shipped a 3.1 MB notice payload (turn 631, session
+    // fe74e3b7) that killed the next wake turn with a 400. Result streams
+    // ride the wake prompt only (per-job budget, batch-capped by the
+    // manager).
+    this.#preludeView.push(
       job.sessionId,
       "background jobs",
       `job ${job.id} finished · ${settleNoticeResult(job.result)} · ${settleSeconds(job.startedAt, job.endedAt)}s`,
-      job.tool,
-      job.result,
     );
     this.#markPending(job);
     void this.#maybeDeliver(job.sessionId);
@@ -417,8 +424,9 @@ export class JobManager {
 
   /**
    * Deliver pending jobs when the session is idle: one wake turn, one
-   * shared prompt. Busy sessions keep their pending set (rides the next
-   * wake or the tail-settles callback).
+   * shared prompt, capped at `maxJobsPerWake` jobs (the overflow stays
+   * pending and rides the next wake). Busy sessions keep their pending
+   * set (rides the next wake or the tail-settles callback).
    */
   async #maybeDeliver(sessionId: string): Promise<void> {
     const st = this.#session(sessionId);
@@ -426,14 +434,25 @@ export class JobManager {
     if (st.pending.length === 0 || orch === undefined) return;
     if (orch.isBusy?.(sessionId) === true) return;
     const jobs = collectPending((id) => this.#jobs.get(id), st.pending);
-    const prompt = buildWakePrompt(jobs, this.#opts.toolOutputLimit);
-    if (jobs.length === 0 || prompt === undefined) return;
-    for (const job of jobs) job.delivered = true;
-    st.pending = st.pending.filter((id) => !jobs.some((j) => j.id === id));
+    if (jobs.length === 0) return;
+    // Context-window guard: cap the BATCH of jobs a wake turn delivers.
+    // Each job carries its already-truncated streams (up to ~50k serialized
+    // chars), so an unbounded batch multiplies that budget: 203 detached
+    // jobs once produced a 3.2 MB prompt (turn 635, session fe74e3b7) and a
+    // guaranteed 400 from the provider. The cap slices BEFORE the prompt
+    // is built (the header must count the delivered slice, not the queue);
+    // the overflow stays pending and rides the next wake turn.
+    const slice = sliceToWakeCap(jobs, st.pending, this.#opts.maxJobsPerWake);
+    st.pending = slice.pending;
+    const deliverable = slice.delivered;
+    const prompt = buildWakePrompt(deliverable, this.#opts.toolOutputLimit);
+    if (prompt === undefined) return;
+    for (const job of deliverable) job.delivered = true;
     // Rung resets only when the queue clears; otherwise the rung holds.
     if (queueCleared([...this.#jobs.values()], sessionId)) this.#resetRung(sessionId);
     await this.#runWakeTurn(sessionId, orch, prompt);
-    // Re-arm at the current rung while jobs remain (hot-loop guard).
+    // A deferred overflow rides the same hot-loop guard: the ladder timer
+    // re-arms at the current rung and delivers the next slice.
     this.#armLadder(sessionId);
   }
 
