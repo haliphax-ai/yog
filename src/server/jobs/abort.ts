@@ -18,6 +18,16 @@ export interface AbortContext {
   readonly poolView: WorkerPoolLike;
   readonly preludeView: PreludeSinkLike;
   readonly recordAudit: (job: BackgroundJob) => void;
+  /**
+   * A live event emitter (the session's stream channel): termination
+   * notices stream IMMEDIATELY — they must not wait for the next turn's
+   * hydrate (an idle client would see them minutes late, and the next
+   * turn's prelude splice is what shifted them around the prompt row).
+   */
+  readonly emitEvent: (
+    sessionId: string,
+    envelope: { type: string; data: Record<string, unknown> },
+  ) => void;
 }
 
 /** Stamp a running job terminated + release its slot/cap (no delivery). */
@@ -88,6 +98,15 @@ export function abortSessionJobs(ctx: AbortContext, sessionId: string): number {
   if (jobs.length > 0) {
     const ids = jobs.map((j) => j.id).join(", ");
     ctx.preludeView.push(sessionId, "background jobs", `background jobs terminated: ${ids}`);
+  }
+  // The termination notice streams NOW (the operator is watching): the
+  // prelude copy keeps the transcript faithful for late joiners, but an
+  // idle client must not wait for the next turn's hydrate to see it.
+  if (jobs.length > 0) {
+    ctx.emitEvent(sessionId, {
+      type: "job.terminated",
+      data: { jobs: jobs.map((j) => j.id), reason: "operator abort" },
+    });
   }
   return jobs.length;
 }

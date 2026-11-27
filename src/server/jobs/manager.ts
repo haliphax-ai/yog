@@ -206,6 +206,7 @@ export class JobManager {
       poolView: this.#poolView,
       preludeView: this.#preludeView,
       recordAudit: (job) => this.#recordAudit(job),
+      emitEvent: (sessionId, envelope) => this.#emitJobEvent(sessionId, envelope),
     };
   }
 
