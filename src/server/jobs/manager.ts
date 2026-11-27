@@ -62,6 +62,7 @@ import {
   sliceToWakeCap,
 } from "./ladder.ts";
 import type { AbortContext } from "./abort.ts";
+import { jobSettledEvent, jobStartedEvent } from "./events.ts";
 import { PRUNE_SWEEP_MS, pruneExpiredJobs } from "./prune.ts";
 
 export class JobManager {
@@ -292,6 +293,10 @@ export class JobManager {
     this.#poolView.rekeyRun(job.sessionId, `bg:${job.id}`);
     // Stamp the pid out of band (never queues behind the serial chain).
     void this.#stampPid(job.id);
+    // The client's drawer runs off the stream, not a poll: job.started
+    // carries the fields the row renders (runtime is computed from
+    // startedAt until a settled event stamps the real duration).
+    this.#emitJobEvent(job.sessionId, jobStartedEvent(job));
     // Cap timer + wake ladder at rung 0 (when nothing is armed yet).
     this.#armCap(job.id);
     this.#armLadder(job.sessionId);
@@ -393,8 +398,19 @@ export class JobManager {
       job.tool,
       job.result,
     );
+    this.#emitJobEvent(job.sessionId, jobSettledEvent(job));
     this.#markPending(job);
     void this.#maybeDeliver(job.sessionId);
+  }
+
+  /** Publish one job-lifecycle envelope on the session's stream channel.
+   *  Best effort by contract: the sink (the bus) never throws; a hostile
+   *  fake's throw is the caller's bug, not a drawer concern. */
+  #emitJobEvent(
+    sessionId: string,
+    envelope: { type: string; data: Record<string, unknown> },
+  ): void {
+    this.#deps.jobEvents?.(sessionId, envelope);
   }
 
   #recordAudit(job: BackgroundJob): void {

@@ -165,6 +165,17 @@ async function composeDaemon(
     recordSettled:
       runtime.state !== undefined ? (rec) => runtime.state!.recordToolCall(rec) : undefined,
     modelFor: (sessionId) => lastTurnModel(runtime.store, sessionId),
+    // Job lifecycle rides the same bus the turn events stream on: the
+    // client's drawer renders live rows from job.started/job.settled
+    // instead of polling jobs.get every 2s.
+    jobEvents: (sessionId, envelope) =>
+      (bus as unknown as { emit: (ch: string, ev: unknown) => void }).emit(`session:${sessionId}`, {
+        id: 0,
+        type: envelope.type,
+        version: 1,
+        ts: Date.now(),
+        data: envelope.data,
+      }),
   });
   jobs.wire();
   registerJobsCliCommand(jobs);

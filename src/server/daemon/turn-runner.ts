@@ -163,6 +163,8 @@ interface TurnOptionsInput {
   readonly ctx: { signal?: AbortSignal };
   readonly live: LiveTurnState;
   readonly usageBySession: UsageBySession;
+  /** The harness-internal marker echoed on `turn.started` (wake turns). */
+  readonly wake?: boolean;
 }
 
 /**
@@ -197,6 +199,7 @@ async function buildTurnOptions(rt: TurnRuntime, input: TurnOptionsInput): Promi
       : {}),
     ...(skillInstructions !== "" ? { skillInstructions } : {}),
     ...(availableSkills !== "" ? { availableSkills } : {}),
+    ...(input.wake ? { wake: true } : {}),
   };
 }
 
@@ -243,6 +246,7 @@ export function makeExecuteTurn(rt: TurnRuntime, usageBySession: UsageBySession)
       ctx,
       live,
       usageBySession,
+      wake,
     });
     const sink = turnSink(rt, sessionId, live);
 

@@ -87,6 +87,12 @@ export interface JobManagerDeps {
     durationMs: number;
     sessionId: string;
   }) => Promise<void>;
+  /**
+   * Live job-lifecycle events (the client's drawer runs off the SSE
+   * stream, not a poll): `emit(sessionId, envelope)` publishes onto the
+   * session's stream channel. Structural: the real bus, a fake in tests.
+   */
+  jobEvents?(sessionId: string, envelope: { type: string; data: Record<string, unknown> }): void;
   /** The last turn's model id per session (wake turns reuse it). */
   modelFor?: (sessionId: string) => Promise<string | undefined> | string | undefined;
 }
