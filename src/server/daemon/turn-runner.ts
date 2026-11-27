@@ -350,7 +350,14 @@ async function hydrateMessages(
   ];
   if (prelude !== undefined && notices !== undefined)
     publishPrelude(rt, sessionId, prelude, notices, turnRowId);
-  return { messages, startLen: prior.length, prelude };
+  // The batch boundary is the LAST row of the hydrate output (the prompt):
+  // the engine may PREPEND to `messages` after hydrate (the skills-context
+  // injection unshifts a system row when the transcript has none — yog#146),
+  // so a hydrate-time count drifts and the settled batch re-persists the
+  // prior transcript's tail. The prompt is the array's final row at this
+  // point by construction, so `length - 1` is the exact, mutation-proof
+  // boundary.
+  return { messages, startLen: messages.length - 1, prelude };
 }
 
 /**
