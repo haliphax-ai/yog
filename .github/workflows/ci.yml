@@ -53,8 +53,13 @@ jobs:
         run: |
           npm install --no-save \
             "@vitest/coverage-v8@$(node -p "require('./node_modules/vitest/package.json').version")"
+      # The mount tag rides the package.json filter (npm test): the live
+      # FUSE suite needs kernel mount privileges the hosted runner image
+      # does not guarantee (20261122.9 lost them — EACCES through the
+      # mounted path), and its own job (test:mount) covers it explicitly.
       - run: >-
           npx vitest run --silent=true
+          --tagsFilter '!mount'
           --coverage.enabled
           --coverage.provider=v8
           --coverage.reporter=lcov
