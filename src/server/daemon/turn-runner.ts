@@ -370,9 +370,13 @@ function publishPrelude(
     // harness_notice pair) — the client's decode path consumes both.
     const content = p.result.content;
     const parsed = safeJson(content);
+    // The ok flag mirrors the live engine's rule: a result with an error
+    // string failed. A plain parse failure leaves the frame ok (the
+    // content still rides for the client to render).
+    const failed = typeof (parsed as Record<string, unknown> | undefined)?.["error"] === "string";
     events.push({
       type: "tool.result",
-      data: { id: call.id, name: fn.name, ok: true, result: parsed },
+      data: { id: call.id, name: fn.name, ok: !failed, result: parsed },
     });
   }
   void notices;
