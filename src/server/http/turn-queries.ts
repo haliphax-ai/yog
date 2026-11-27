@@ -142,16 +142,12 @@ export async function replyTurnAbort(
     // as the turn settles, and the response reports what *was* killed.
     const inFlight = activeToolCallFor(id) ?? null;
     const aborted = await orchestrator!.abortTurn(id, (sid) => (kill ? kill(sid) : false));
-    // The user said stop — the FULL cascade: the turn unwinds, the
-    // session's background jobs terminate (running: pool kill; settled-
-    // undelivered: dropped), and the wake machinery halts. A detached job
-    // must not outlive the turn that spawned it, and its settle must not
-    // respawn generation the operator just killed.
-    const backgroundJobs = deps.jobs?.abortSessionJobs?.(id) ?? 0;
-    const after = await lookupSession(id);
+    // Esc is a PRIORITY cascade — it applies to the highest open item
+    // only: drawer (client-side) → active turn → background jobs. A
+    // foreground abort cancels THE TURN and nothing else: detached jobs
+    // keep running (their settle rides the normal wake ladder — killing
+    // them here would be the cascade mis-applying downward).
     if (aborted) {
-      // Foreground abort: detached jobs were just terminated (the cascade
-      // above — a job must not outlive the turn that spawned it).
       ctx.reply(200, {
         ok: true,
         status: "aborted",
@@ -159,12 +155,27 @@ export async function replyTurnAbort(
           requested: true,
           sessionId: id,
           activeToolCall: inFlight,
-          ...(backgroundJobs > 0 ? { backgroundJobs } : {}),
         },
-        session: after ?? session,
+        session: (await lookupSession(id)) ?? session,
       });
       return;
     }
+    // Idle abort (no active turn): the cascade falls through to the
+    // background jobs — kill them, halt the wake machinery, queue the
+    // termination notice. No wake turn.
+    const backgroundJobs = deps.jobs?.abortSessionJobs?.(id) ?? 0;
+    ctx.reply(200, {
+      ok: true,
+      status: "idle",
+      aborted: {
+        requested: false,
+        sessionId: id,
+        activeToolCall: null,
+        ...(backgroundJobs > 0 ? { backgroundJobs } : {}),
+      },
+      session: (await lookupSession(id)) ?? session,
+    });
+    return;
     // The idle-abort branch shares the same cascade (already applied
     // above): the reply only re-states the count.
     ctx.reply(200, {
@@ -176,7 +187,7 @@ export async function replyTurnAbort(
         activeToolCall: null,
         ...(backgroundJobs > 0 ? { backgroundJobs } : {}),
       },
-      session: after ?? session,
+      session,
     });
     return;
   }
