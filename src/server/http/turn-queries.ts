@@ -142,13 +142,16 @@ export async function replyTurnAbort(
     // as the turn settles, and the response reports what *was* killed.
     const inFlight = activeToolCallFor(id) ?? null;
     const aborted = await orchestrator!.abortTurn(id, (sid) => (kill ? kill(sid) : false));
-    // The user said stop: a killed wake turn must not re-spawn via the
-    // ladder 30m later (the session's auto-turn machinery halts; running
-    // jobs keep executing and surface via `jobs.get`/the drawer).
-    deps.jobs?.stopSessionWakes?.(id);
+    // The user said stop — the FULL cascade: the turn unwinds, the
+    // session's background jobs terminate (running: pool kill; settled-
+    // undelivered: dropped), and the wake machinery halts. A detached job
+    // must not outlive the turn that spawned it, and its settle must not
+    // respawn generation the operator just killed.
+    const backgroundJobs = deps.jobs?.abortSessionJobs?.(id) ?? 0;
     const after = await lookupSession(id);
     if (aborted) {
-      // Foreground abort: detached jobs survive by construction (the seam).
+      // Foreground abort: detached jobs were just terminated (the cascade
+      // above — a job must not outlive the turn that spawned it).
       ctx.reply(200, {
         ok: true,
         status: "aborted",
@@ -156,15 +159,14 @@ export async function replyTurnAbort(
           requested: true,
           sessionId: id,
           activeToolCall: inFlight,
+          ...(backgroundJobs > 0 ? { backgroundJobs } : {}),
         },
         session: after ?? session,
       });
       return;
     }
-    // Idle abort: kill the session's background jobs, wipe their timers,
-    // reset the rung, and queue the prelude — no wake turn (yog#91).
-    const jobsManager = deps.jobs as JobsBoundary | undefined;
-    const backgroundJobs = jobsManager !== undefined ? jobsManager.abortSessionJobs(id) : 0;
+    // The idle-abort branch shares the same cascade (already applied
+    // above): the reply only re-states the count.
     ctx.reply(200, {
       ok: true,
       status: "idle",
