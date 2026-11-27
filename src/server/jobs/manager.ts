@@ -380,24 +380,20 @@ export class JobManager {
     const st = this.#session(job.sessionId);
     st.running = Math.max(0, st.running - 1);
     this.#recordAudit(job);
-    // The human-facing completion signal: a prelude notice rendered by
-    // the client's notice-block path (live via the idle watch, or on the
-    // next transcript sync). The wake prompt's own header is the
-    // model-facing summary; this is the log-side signal that a job
-    // SETTLED. The settled result rides the notice — through the client's
-    // SAME tool-result component every live call uses (bash jobs get the
-    // bash chunk, not a plain cyan line). The SINK clamps the attached
-    // result (NOTICE_RESULT_MAX_CHARS: head+tail, marker intact), so a
-    // settle flood cannot stack unbounded outputs into one pair — the
-    // 3.1 MB notice pileup that killed turn 631. The FULL text still
-    // rides the wake prompt and the audit row.
-    this.#preludeView.pushResult(
-      job.sessionId,
-      "background jobs",
-      `job ${job.id} finished · ${settleNoticeResult(job.result)} · ${settleSeconds(job.startedAt, job.endedAt)}s`,
-      job.tool,
-      job.result,
-    );
+    // The human-facing completion signal: the notice IS the job's tool
+    // outcome, delivered as the INVERSE of its detach — a synthetic call
+    // (the original call's name + arguments) paired to the call's TRUE
+    // result. The client's standard pairing renders the real tool
+    // component (bash jobs get the bash chunk), and the model sees a
+    // well-formed tool round. No user-message parsing anywhere.
+    this.#preludeView.pushResult(job.sessionId, {
+      kind: "background jobs",
+      body: `job ${job.id} finished · ${settleNoticeResult(job.result)} · ${settleSeconds(job.startedAt, job.endedAt)}s`,
+      tool: job.tool,
+      argsJson: job.argsJson,
+      result: job.result,
+      exemptFromClamp: true,
+    });
     this.#emitJobEvent(job.sessionId, jobSettledEvent(job));
     this.#markPending(job);
     void this.#maybeDeliver(job.sessionId);

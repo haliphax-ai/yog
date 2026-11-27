@@ -400,8 +400,10 @@ async function openFakeTurn(
   const prelude = notices !== undefined ? deliverPrelude(notices) : undefined;
   const messages: ChatCompletionMessageParam[] = [
     ...prior,
-    ...(prelude !== undefined ? [prelude.call as ChatCompletionMessageParam] : []),
-    ...(prelude !== undefined ? [prelude.result as ChatCompletionMessageParam] : []),
+    ...(prelude ?? []).flatMap((p) => [
+      p.call as ChatCompletionMessageParam,
+      p.result as ChatCompletionMessageParam,
+    ]),
     { role: "user", content: prompt },
   ];
   const turnRow = (await opts.store.addTurn(sessionId, {

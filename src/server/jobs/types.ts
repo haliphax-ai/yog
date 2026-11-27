@@ -98,12 +98,31 @@ export interface JobManagerDeps {
 }
 
 /** The prelude-sink surface the manager uses (structural, not nominal). */
+/** The tool-outcome notice the manager pushes on settle: the inverse of
+ *  detach — a synthetic call (name + args) paired to the call's TRUE
+ *  result. */
+export interface JobSettleNotice {
+  kind: string;
+  body: string;
+  tool: string;
+  argsJson: string | null;
+  result: unknown;
+  exemptFromClamp: true;
+}
 export interface PreludeSinkLike {
   push(sessionId: string, kind: string, body: string): void;
-  pushResult(sessionId: string, kind: string, body: string, tool: string, result: unknown): void;
+  pushResult(sessionId: string, notice: JobSettleNotice): void;
   drain(
     sessionId: string,
-  ): Array<{ kind: string; body: string; tool?: string; result?: unknown }> | undefined;
+  ):
+    | Array<{
+        kind: string;
+        body: string;
+        tool?: string;
+        argsJson?: string | null;
+        result?: unknown;
+      }>
+    | undefined;
   clear(sessionId: string): void;
 }
 

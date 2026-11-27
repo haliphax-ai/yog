@@ -322,7 +322,7 @@ async function hydrateMessages(
 ): Promise<{
   messages: ChatCompletionMessageParam[];
   startLen: number;
-  prelude: DeliveredPrelude | undefined;
+  prelude: DeliveredPrelude[] | undefined;
 }> {
   const prior =
     rt.store !== undefined
@@ -332,8 +332,10 @@ async function hydrateMessages(
   const prelude = notices !== undefined ? deliverPrelude(notices) : undefined;
   const messages: ChatCompletionMessageParam[] = [
     ...(prior as unknown as ChatCompletionMessageParam[]),
-    ...(prelude !== undefined ? [prelude.call as unknown as ChatCompletionMessageParam] : []),
-    ...(prelude !== undefined ? [prelude.result as unknown as ChatCompletionMessageParam] : []),
+    ...(prelude ?? []).flatMap((p) => [
+      p.call as unknown as ChatCompletionMessageParam,
+      p.result as unknown as ChatCompletionMessageParam,
+    ]),
     { role: "user", content: prompt },
   ];
   if (prelude !== undefined && notices !== undefined)
@@ -352,29 +354,28 @@ async function hydrateMessages(
 function publishPrelude(
   rt: TurnRuntime,
   sessionId: string,
-  prelude: DeliveredPrelude,
+  prelude: DeliveredPrelude[],
   notices: PreludeNotice[],
 ): void {
-  const callId = prelude.call.tool_calls[0]?.id ?? "";
-  const events: Array<{ type: "tool.call" | "tool.result"; data: Record<string, unknown> }> = [
-    {
+  const events: Array<{ type: "tool.call" | "tool.result"; data: Record<string, unknown> }> = [];
+  for (const p of prelude) {
+    const call = p.call.tool_calls[0]!;
+    const fn = call.function;
+    events.push({
       type: "tool.call",
-      data: {
-        id: callId,
-        name: HARNESS_NOTICE_TOOL,
-        args: "{}",
-      },
-    },
-    {
+      data: { id: call.id, name: fn.name, args: safeJson(fn.arguments) },
+    });
+    // The result frame carries the paired content verbatim (the true tool
+    // result for tool-outcome pairs; the notice payload for the
+    // harness_notice pair) — the client's decode path consumes both.
+    const content = p.result.content;
+    const parsed = safeJson(content);
+    events.push({
       type: "tool.result",
-      data: {
-        id: callId,
-        name: HARNESS_NOTICE_TOOL,
-        ok: true,
-        result: { hint: HARNESS_NOTICE_HINT, notices },
-      },
-    },
-  ];
+      data: { id: call.id, name: fn.name, ok: true, result: parsed },
+    });
+  }
+  void notices;
   for (const ev of events) {
     void rt.store
       ?.addEvent(sessionId, { type: ev.type, payload: JSON.stringify(ev.data), version: 1 })
@@ -383,5 +384,14 @@ function publishPrelude(
       `session:${sessionId}`,
       { id: 0, type: ev.type, version: 1, ts: Date.now(), data: ev.data },
     );
+  }
+}
+
+/** Best-effort JSON parse (prelude content is always serialized JSON). */
+function safeJson(content: string): unknown {
+  try {
+    return JSON.parse(content) as unknown;
+  } catch {
+    return content;
   }
 }

@@ -34,8 +34,17 @@ export interface PreludeNotice {
    * exempting producers set the flag and never touch the clamp itself.
    */
   readonly exemptFromClamp?: boolean;
-  /** Attached tool result (a notice that IS a tool outcome). */
+  /**
+   * Attached tool outcome: the notice IS a tool result, delivered as the
+   * INVERSE of detach — a synthetic call (the original call's name and
+   * arguments) paired to the call's TRUE result, so the client renders
+   * it through the same call/result component any live call uses and the
+   * model sees a well-formed tool round. No user-message parsing: the
+   * pair rides the transcript like any other rows.
+   */
   readonly tool?: string;
+  /** The original call's raw JSON arguments (the synthetic call echoes them). */
+  readonly argsJson?: string | null;
   readonly result?: unknown;
 }
 
@@ -52,7 +61,9 @@ export interface PreludePayload {
  */
 export interface PreludeSink {
   push(sessionId: string, kind: string, body: string): void;
-  pushResult(sessionId: string, kind: string, body: string, tool: string, result: unknown): void;
+  /** A tool-outcome notice: the notice IS a tool result (see
+   *  {@link PreludeNotice.tool}). */
+  pushResult(sessionId: string, notice: PreludeNotice): void;
   drain(sessionId: string): PreludeNotice[] | undefined;
   clear(sessionId: string): void;
 }
@@ -74,22 +85,16 @@ export const HARNESS_NOTICE_TOOL = "harness_notice" as const;
  * PRODUCER at push time; this module owns only the mechanism.
  */
 export const PRELUDE_MAX_CHARS = 4_000;
-/** The per-notice cap on an attached tool result (serialized chars, the
- *  same unit PRELUDE_MAX_CHARS speaks): the sink clamps in this module,
- *  one budget for the whole pair. 4k chars ≈ a screenful per job —
- *  enough for the component preview, far under a context risk. */
-export const NOTICE_RESULT_MAX_CHARS = 4_000;
+/** NO second truncation pass here: an attached result was already capped
+ *  at the tool boundary (the tool layer owns truncation), and the
+ *  per-notice exemption below is that contract. (The 3.1 MB pair that
+ *  killed turn 631 was 203 notices x 50k — the BATCH is what compounded,
+ *  and the batch cap lives at delivery: maxJobsPerWake on the wake
+ *  prompt. The sink never second-guesses tool-owned data.) */
 
-/** Clamp an attached result to `max` serialized chars: whole when small,
- *  otherwise a {"truncated": …} envelope keeping the payload's own shape
- *  (head + tail, middle cut) so the client component still previews it. */
-export function clampNoticeResult(result: unknown, max: number): unknown {
-  const json = JSON.stringify(result) ?? "null";
-  if (json.length <= max) return result;
-  return { truncated: middleTruncate(json, max) };
-}
-
-/** The assistant row of the pair: empty args, all information in the result. */
+/** The assistant row of a prelude pair: one synthetic call, all
+ *  information in the paired result. `harness_notice` pairs carry empty
+ *  args; tool-outcome pairs echo the original call's name and args. */
 export interface PreludeCallRow {
   readonly role: "assistant";
   readonly content: null;
@@ -97,7 +102,7 @@ export interface PreludeCallRow {
     {
       readonly id: string;
       readonly type: "function";
-      readonly function: { readonly name: typeof HARNESS_NOTICE_TOOL; readonly arguments: "{}" };
+      readonly function: { readonly name: string; readonly arguments: string };
     },
   ];
 }
@@ -130,21 +135,8 @@ export function createPreludeSink(): PreludeSink {
     push(sessionId: string, kind: string, body: string): void {
       queue(sessionId).push({ kind, body });
     },
-    pushResult(sessionId, kind, body, tool, result): void {
-      queue(sessionId).push({
-        kind,
-        body,
-        tool,
-        // Bound the attached result HERE, at the sink: the exemption
-        // below means serializePrelude will not clamp this notice, so
-        // the sink owes the bound instead. A settle flood (dozens of
-        // jobs settling behind a busy turn) must not stack dozens of
-        // full tool outputs into ONE prelude pair — each result keeps
-        // its head+tail (middle-truncated, marker intact), and the full
-        // text still rides the wake prompt and the audit row.
-        result: clampNoticeResult(result, NOTICE_RESULT_MAX_CHARS),
-        exemptFromClamp: true,
-      });
+    pushResult(sessionId, notice): void {
+      queue(sessionId).push(notice);
     },
     drain(sessionId: string): PreludeNotice[] | undefined {
       const q = queues.get(sessionId);
@@ -159,27 +151,61 @@ export function createPreludeSink(): PreludeSink {
 }
 
 /**
- * Frame the drained notices as the synthetic call/result pair. Returns
+ * Frame the drained notices as transcript rows. A notice that IS a tool
+ * outcome becomes the inverse of its detach: a SYNTHETIC call (the
+ * original call's name + arguments) paired to the call's TRUE result —
+ * the client's standard pairing renders it through the same component
+ * any live call uses, and the model sees a well-formed tool round.
+ * Ordinary notices share one `harness_notice` pair as before. Returns
  * undefined for an empty queue — the caller appends nothing.
  */
-export function deliverPrelude(notices: PreludeNotice[]): DeliveredPrelude | undefined {
+export function deliverPrelude(notices: PreludeNotice[]): DeliveredPrelude[] | undefined {
   if (notices.length === 0) return undefined;
-  const toolCallId = `call_hn_${newSessionId()}`;
-  const payload: PreludePayload = { hint: HARNESS_NOTICE_HINT, notices };
-  return {
-    call: {
-      role: "assistant",
-      content: null,
-      tool_calls: [
-        {
-          id: toolCallId,
-          type: "function",
-          function: { name: HARNESS_NOTICE_TOOL, arguments: "{}" },
-        },
-      ],
-    },
-    result: { role: "tool", tool_call_id: toolCallId, content: serializePrelude(payload) },
-  };
+  const out: DeliveredPrelude[] = [];
+  const plain: PreludeNotice[] = [];
+  for (const n of notices) {
+    if (n.tool === undefined) {
+      plain.push(n);
+      continue;
+    }
+    const toolCallId = `call_bg_${newSessionId()}`;
+    out.push({
+      call: {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: toolCallId,
+            type: "function",
+            function: {
+              name: n.tool,
+              arguments: n.argsJson ?? "{}",
+            },
+          },
+        ],
+      },
+      result: { role: "tool", tool_call_id: toolCallId, content: JSON.stringify(n.result ?? {}) },
+    });
+  }
+  if (plain.length > 0) {
+    const toolCallId = `call_hn_${newSessionId()}`;
+    const payload: PreludePayload = { hint: HARNESS_NOTICE_HINT, notices: plain };
+    out.push({
+      call: {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: toolCallId,
+            type: "function",
+            function: { name: HARNESS_NOTICE_TOOL, arguments: "{}" },
+          },
+        ],
+      },
+      result: { role: "tool", tool_call_id: toolCallId, content: serializePrelude(payload) },
+    });
+  }
+  return out;
 }
 
 /**

@@ -179,12 +179,19 @@ function build(over: { opts?: Partial<JobManagerOptions>; deps?: Partial<JobMana
     kind: string;
     body: string;
     tool?: string;
+    argsJson?: string | null;
     result?: unknown;
   }> = [];
   const preludeSink = (() => {
     const queued = new Map<
       string,
-      Array<{ kind: string; body: string; tool?: string; result?: unknown }>
+      Array<{
+        kind: string;
+        body: string;
+        tool?: string;
+        argsJson?: string | null;
+        result?: unknown;
+      }>
     >();
     return {
       push(sessionId: string, kind: string, body: string) {
@@ -196,14 +203,23 @@ function build(over: { opts?: Partial<JobManagerOptions>; deps?: Partial<JobMana
         }
         q.push({ kind, body });
       },
-      pushResult(sessionId: string, kind: string, body: string, tool: string, result: unknown) {
-        preludes.push({ sessionId, kind, body, tool, result });
+      pushResult(
+        sessionId: string,
+        notice: {
+          kind: string;
+          body: string;
+          tool: string;
+          argsJson: string | null;
+          result: unknown;
+        },
+      ) {
+        preludes.push({ sessionId, ...notice });
         let q = queued.get(sessionId);
         if (q === undefined) {
           q = [];
           queued.set(sessionId, q);
         }
-        q.push({ kind, body, tool, result });
+        q.push(notice);
       },
       drain(sessionId: string) {
         const q = queued.get(sessionId);

@@ -54,21 +54,22 @@ describe("deliverPrelude (the harness_notice pair)", () => {
   });
 
   it("frames the exact contractual pair: empty args, hint + notices in the result", () => {
-    const pair = deliverPrelude([{ kind: "background-jobs", body: "job finished: 3 files" }]);
-    expect(pair).toBeDefined();
+    const pairs = deliverPrelude([{ kind: "background-jobs", body: "job finished: 3 files" }]);
+    expect(pairs).toBeDefined();
+    const pair = pairs![0]!;
     // Call row: assistant, null content, exactly one harness_notice call.
-    expect(pair!.call.role).toBe("assistant");
-    expect(pair!.call.content).toBeNull();
-    expect(pair!.call.tool_calls).toHaveLength(1);
-    const call = pair!.call.tool_calls[0]!;
+    expect(pair.call.role).toBe("assistant");
+    expect(pair.call.content).toBeNull();
+    expect(pair.call.tool_calls).toHaveLength(1);
+    const call = pair.call.tool_calls[0]!;
     expect(call.type).toBe("function");
     expect(call.function.name).toBe(HARNESS_NOTICE_TOOL);
     expect(call.function.arguments).toBe("{}");
     expect(call.id).toMatch(/^call_hn_/);
     // Result row: answers the same id with the hint + notices payload.
-    expect(pair!.result.role).toBe("tool");
-    expect(pair!.result.tool_call_id).toBe(call.id);
-    const payload = JSON.parse(pair!.result.content) as PreludePayload;
+    expect(pair.result.role).toBe("tool");
+    expect(pair.result.tool_call_id).toBe(call.id);
+    const payload = JSON.parse(pair.result.content) as PreludePayload;
     expect(payload.hint).toBe(HARNESS_NOTICE_HINT);
     expect(payload.notices).toEqual([{ kind: "background-jobs", body: "job finished: 3 files" }]);
   });
@@ -76,9 +77,9 @@ describe("deliverPrelude (the harness_notice pair)", () => {
   it("mints a fresh call id per delivery (pair ids never collide)", () => {
     const a = deliverPrelude([{ kind: "k", body: "1" }])!;
     const b = deliverPrelude([{ kind: "k", body: "2" }])!;
-    expect(a.call.tool_calls[0]!.id).not.toBe(b.call.tool_calls[0]!.id);
-    expect(a.result.tool_call_id).toBe(a.call.tool_calls[0]!.id);
-    expect(b.result.tool_call_id).toBe(b.call.tool_calls[0]!.id);
+    expect(a[0]!.call.tool_calls[0]!.id).not.toBe(b[0]!.call.tool_calls[0]!.id);
+    expect(a[0]!.result.tool_call_id).toBe(a[0]!.call.tool_calls[0]!.id);
+    expect(b[0]!.result.tool_call_id).toBe(b[0]!.call.tool_calls[0]!.id);
   });
 
   it("keeps multiple notices in order within one pair", () => {
@@ -86,10 +87,42 @@ describe("deliverPrelude (the harness_notice pair)", () => {
       { kind: "a", body: "one" },
       { kind: "b", body: "two" },
     ])!;
-    const payload = JSON.parse(pair.result.content) as PreludePayload;
+    const payload = JSON.parse(pair[0]!.result.content) as PreludePayload;
     expect(payload.notices.map((n) => n.kind)).toEqual(["a", "b"]);
     expect(payload.notices.map((n) => n.body)).toEqual(["one", "two"]);
   });
+});
+it("a tool-outcome notice becomes its own synthetic call pair (the inverse of detach)", () => {
+  const pairs = deliverPrelude([
+    {
+      kind: "background jobs",
+      body: "job bg_1 finished · exit 0",
+      tool: "bash",
+      argsJson: '{"command":"sleep"}',
+      result: { stdout: "out", exitCode: 0 },
+    },
+  ])!;
+  expect(pairs).toHaveLength(1);
+  const pair = pairs[0]!;
+  // The synthetic call ECHOES the original call: same tool name, same args.
+  const call = pair.call.tool_calls[0]!;
+  expect(call.function.name).toBe("bash");
+  expect(call.function.arguments).toBe('{"command":"sleep"}');
+  expect(call.id).toMatch(/^call_bg_/);
+  // The result row carries the call's TRUE result, well-formed.
+  expect(pair.result.role).toBe("tool");
+  expect(pair.result.tool_call_id).toBe(call.id);
+  expect(JSON.parse(pair.result.content)).toEqual({ stdout: "out", exitCode: 0 });
+});
+
+it("mixed plain + tool-outcome notices: one pair each", () => {
+  const pairs = deliverPrelude([
+    { kind: "background jobs", body: "job bg_1", tool: "bash", argsJson: "{}", result: { ok: 1 } },
+    { kind: "lifecycle", body: "session detached" },
+  ])!;
+  expect(pairs).toHaveLength(2);
+  expect(pairs[0]!.call.tool_calls[0]!.function.name).toBe("bash");
+  expect(pairs[1]!.call.tool_calls[0]!.function.name).toBe(HARNESS_NOTICE_TOOL);
 });
 
 describe("serializePrelude (the safety clamp)", () => {
@@ -136,37 +169,38 @@ describe("serializePrelude (the safety clamp)", () => {
     expect(out).toContain("TRUNCATED");
   });
 
-  it("pushResult marks its notices exempt (the tool result is already capped)", () => {
+  it("pushResult marks its notices exempt and carries the call lineage", () => {
     const sink = createPreludeSink();
-    sink.pushResult("s1", "background jobs", "job bg_1 finished · exit 0", "bash", {
-      stdout: "out",
-      exitCode: 0,
+    sink.pushResult("s1", {
+      kind: "background jobs",
+      body: "job bg_1 finished · exit 0",
+      tool: "bash",
+      argsJson: '{"command":"sleep"}',
+      result: { stdout: "out", exitCode: 0 },
+      exemptFromClamp: true,
     });
-    expect(sink.drain("s1")![0]!.exemptFromClamp).toBe(true);
+    const notice = sink.drain("s1")![0]!;
+    expect(notice.exemptFromClamp).toBe(true);
+    expect(notice.tool).toBe("bash");
+    expect(notice.argsJson).toBe('{"command":"sleep"}');
+    // NO second truncation pass: the tool boundary owns the cap.
+    expect(notice.result).toEqual({ stdout: "out", exitCode: 0 });
   });
 
-  it("pushResult carries the tool name; the result is clamped at the sink", () => {
-    const sink = createPreludeSink();
-    const result = { stdout: "a".repeat(10_000), exitCode: 0 };
-    sink.pushResult("s1", "background jobs", "job bg_1 finished · exit 0", "bash", result);
-    const notices = sink.drain("s1")!;
-    expect(notices).toHaveLength(1);
-    expect(notices[0]!.kind).toBe("background jobs");
-    expect(notices[0]!.tool).toBe("bash");
-    // Sink-owned clamp: head+tail of the serialized payload (marker
-    // intact), never the whole 10k — the pair stays a screenful per job.
-    const clamped = notices[0]!.result as { truncated?: unknown };
-    expect(JSON.stringify(clamped).length).toBeLessThan(5_000);
-    expect(JSON.stringify(clamped)).toContain("TRUNCATED");
-  });
-
-  it("a tool-result notice survives deliverPrelude + serializePrelude intact", () => {
+  it("a tool-result notice survives deliverPrelude as its own pair (true result intact)", () => {
     const sink = createPreludeSink();
     const result = { exitCode: 0, stdout: "out".repeat(500) };
-    sink.pushResult("s1", "background jobs", "job bg_1 finished", "bash", result);
-    const delivered = deliverPrelude(sink.drain("s1")!);
-    const payload = JSON.parse(delivered!.result.content) as PreludePayload;
-    expect(payload.notices[0]!.tool).toBe("bash");
-    expect(payload.notices[0]!.result).toEqual(result);
+    sink.pushResult("s1", {
+      kind: "background jobs",
+      body: "job bg_1 finished",
+      tool: "bash",
+      argsJson: "{}",
+      result,
+      exemptFromClamp: true,
+    });
+    const pairs = deliverPrelude(sink.drain("s1")!)!;
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]!.call.tool_calls[0]!.function.name).toBe("bash");
+    expect(JSON.parse(pairs[0]!.result.content)).toEqual(result);
   });
 });
