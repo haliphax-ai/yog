@@ -631,10 +631,10 @@ describe("JobManager (fake clock)", () => {
     expect(preludes[0]!.body).toContain(`job ${v.jobId} finished`);
   });
 
-  it("a signal death queues the prelude but NEVER wakes — even idle (yog#146)", async () => {
+  it("a signal death WAKES the model — an external kill is a delivered outcome (yog#146)", async () => {
     const { manager, orch, preludes } = build();
     manager.wire();
-    orch.setBusy(false); // idle: the very state a lone kill would wake in
+    orch.setBusy(false); // idle: the state the kill must wake
     const ret = deferred();
     const v = (await consultThreshold(manager, {
       sessionId: "s1",
@@ -653,30 +653,87 @@ describe("JobManager (fake clock)", () => {
     await Promise.resolve();
     // Terminated: stamped, the outcome rides the prelude…
     expect(manager.job(v.jobId!)!.state).toBe("terminated");
+    expect(manager.job(v.jobId!)!.termReason).toBe("killed by signal");
     expect(preludes).toHaveLength(1);
     expect(preludes[0]!.body).toContain(`job ${v.jobId} terminated`);
-    // …but NO wake turn: the idle subscription never armed, and the
-    // settle-time delivery is suppressed.
-    expect(orch.hasIdleSub).toBe(false);
-    expect(orch.wakes).toHaveLength(0);
-    // A LATER finished job still wakes and carries the terminated job in
-    // its batch (the terminated outcome rides along).
-    const ret2 = deferred();
-    const v2 = (await consultThreshold(manager, {
+    // …and the wake FIRES (idle + settled = deliver at once), carrying the
+    // termination block (an external kill is an outcome the model reacts to).
+    expect(orch.wakes).toHaveLength(1);
+    expect(orch.wakes[0]!.sessionId).toBe("s1");
+    expect(orch.wakes[0]!.wake).toBe(true);
+    expect(orch.wakes[0]!.prompt).toContain(`job ${v.jobId}`);
+    expect(orch.wakes[0]!.prompt).toContain("termination: killed by signal");
+    // Delivered: nothing left pending behind the wake.
+  });
+
+  it("a signal death while BUSY rides the next turn (no wake while a foreign turn is live)", async () => {
+    const { manager, orch, preludes } = build();
+    manager.wire();
+    orch.setBusy(true);
+    const ret = deferred();
+    const v = (await consultThreshold(manager, {
       sessionId: "s1",
       tool: "bash",
       argsJson: null,
-      result: ret2.promise,
+      result: ret.promise,
     })) as { kind: string; jobId: string };
-    orch.setBusy(true);
-    await settleJob(v2.jobId!, ret2, { stdout: "out", exitCode: 0 });
+    await settleJob(v.jobId!, ret, {
+      stdout: "",
+      stderr: "Terminated",
+      exitCode: null,
+      signal: "SIGTERM",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    // Busy: stamped, queued, idle subscription armed — no wake yet.
+    expect(manager.job(v.jobId!)!.state).toBe("terminated");
+    expect(preludes).toHaveLength(1);
+    expect(orch.wakes).toHaveLength(0);
+    expect(orch.hasIdleSub).toBe(true);
+    // The tail settles → the pending termination delivers as the wake.
     orch.setBusy(false);
     orch.fireIdle("s1");
     await Promise.resolve();
     await Promise.resolve();
     expect(orch.wakes).toHaveLength(1);
-    expect(orch.wakes[0]!.prompt).toContain(v.jobId!); // the terminated job rides
-    expect(orch.wakes[0]!.prompt).toContain(v2.jobId!); // with the finished one
+    expect(orch.wakes[0]!.prompt).toContain("termination: killed by signal");
+  });
+
+  it("an idle abort AFTER a signal-death settle stays silent (the cascade wipes the pending)", async () => {
+    const { manager, orch, preludes } = build();
+    manager.wire();
+    orch.setBusy(true); // the kill lands while a foreign turn is live
+    const ret = deferred();
+    const v = (await consultThreshold(manager, {
+      sessionId: "s1",
+      tool: "bash",
+      argsJson: null,
+      result: ret.promise,
+    })) as { kind: string; jobId: string };
+    await settleJob(v.jobId!, ret, {
+      stdout: "",
+      stderr: "Terminated",
+      exitCode: null,
+      signal: "SIGTERM",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(orch.wakes).toHaveLength(0); // busy: pending
+    // The operator aborts (turn.abort): the cascade drops the pending
+    // termination — the user said stop, no wake may follow.
+    const count = abortSessionJobs(manager.operator(), "s1");
+    expect(count).toBe(1);
+    // The cascade wiped the pending termination (delivered) and the idle
+    // sub. (The fake unsubscriber removes the callback; the SET lingers,
+    // and hasIdleSub keys on the set — the sub is dead either way. The
+    // wake count below is the behavioral pin.)
+    orch.setBusy(false);
+    orch.fireIdle("s1");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(orch.wakes).toHaveLength(0);
   });
 
   it("the settle notice carries the settled result, clamped at the sink", async () => {

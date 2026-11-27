@@ -377,7 +377,7 @@ export class JobManager {
   // ── settle + pending + delivery ──────────────────────────────────────────
 
   /** The settle bookkeeping: stamp the state (a signal death is a
-   *  TERMINATION, not a finished outcome — yog#146), record the audit. */
+   *  TERMINATION — but a WAKING one, yog#146), record the audit. */
   #applySettlement(job: BackgroundJob, result: ToolResult | undefined, err: unknown): boolean {
     const signalDeath = isSignalDeath(result);
     job.endedAt = this.#sched.now();
@@ -419,11 +419,12 @@ export class JobManager {
     const terminated = this.#applySettlement(job, result, err);
     this.#pushOutcome(job, terminated);
     this.#emitJobEvent(job.sessionId, jobSettledEvent(job));
-    // A termination rides the NEXT turn's prelude (or a batch a finished
-    // job triggered) but NEVER counts as a wake trigger on its own: only
-    // genuinely finished outcomes arm the ladder here.
-    this.#markPending(job, !terminated);
-    if (!terminated) void this.#maybeDeliver(job.sessionId);
+    // A signal-death termination WAKES like any settled outcome (the model
+    // must react to an external kill — yog#146); only harness-initiated
+    // aborts stay silent, and they never reach this path (the abort stamps
+    // the job terminated first, so this settle early-returns above).
+    this.#markPending(job);
+    void this.#maybeDeliver(job.sessionId);
   }
 
   /** Publish one job-lifecycle envelope on the session's stream channel.
@@ -447,13 +448,9 @@ export class JobManager {
    * the delivery when the session's tail settles: the orchestrator's
    * `onIdle` fires when the tail settles with no newer turn chained, which
    * covers jobs that settle while a foreign turn (or the wake turn itself)
-   * is live.
-   */
-  /**
-   * Queue a settled job for delivery (once). A signal death (`wakeup` false)
-   * rides the NEXT wake turn's batch or the next turn's prelude — it never
-   * arms the ladder or the idle subscription by itself (yog#146: a killed
-   * job must not wake the model).
+   * is live. The `wakeup` flag stays a parameter because the harness
+   * seams may need a silent rider again — but no current caller passes
+   * false (yog#146: a settled job always counts as a wake trigger).
    */
   #markPending(job: BackgroundJob, wakeup = true): void {
     if (job.delivered) return;
@@ -563,12 +560,13 @@ function toMessage(err: unknown): string {
 }
 
 /**
- * A signal death (SIGTERM &c. — an operator kill, an external kill, the
- * harness sweeping children) is a TERMINATION, not a finished outcome: the
- * model must not wake for it on its own (yog#146 — terminated jobs ride the
- * next turn's prelude or a batch a finished job triggered, never wake
- * alone). Classified from the result's `signal` field; the worker threads
- * it (worker main: `close`'s signal arg).
+ * A signal death (SIGTERM &c. — an external kill, OOM, a stray `pkill`)
+ * is a TERMINATION, not a finished outcome — but a DELIVERED one: the
+ * model must react to the kill, so the termination wakes like any settled
+ * result (yog#146). Only harness-initiated aborts stay silent, and they
+ * never reach the classifier: the abort path stamps the job terminated
+ * before this classify runs. Classified from the result's `signal`
+ * field; the worker threads it (worker main: `close`'s signal arg).
  */
 function isSignalDeath(result: ToolResult | undefined): boolean {
   const signal = result?.signal;

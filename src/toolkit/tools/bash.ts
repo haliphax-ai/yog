@@ -271,7 +271,7 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
         runtimeMs,
         exitCode: resp.exitCode ?? null,
         // Death signal (SIGTERM &c.): rides the result so the jobs manager
-        // can classify a signal death as a TERMINATION — no wake turn.
+        // can classify a signal death as a TERMINATION — a waking one.
         signal: resp.signal ?? null,
       };
     } catch (err) {
