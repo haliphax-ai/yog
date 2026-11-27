@@ -276,7 +276,10 @@ export class JobManager {
       sessionId,
       tool: call.tool,
       argsJson: call.argsJson,
-      startedAt: this.#sched.now(),
+      // The call's TRUE wall-clock start (stamped by the registry when
+      // the tool run began, and carried on DetachCall): elapsed/duration
+      // is TOTAL runtime — threshold-to-settle is only the background tail.
+      startedAt: call.startedAt,
       state: "running",
     };
     this.#register(job, st);
