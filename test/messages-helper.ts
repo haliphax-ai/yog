@@ -329,6 +329,9 @@ interface OrchestratorFakeOptions {
   rateLimit?: TurnOptions["rateLimit"];
   /** Per-session prelude notices, drained at hydrate like serve.ts. */
   prelude?: PreludeSink;
+  /** Mirror the daemon's skills injection: unshift a system row onto the
+   *  hydrated messages after hydrate (before the engine runs). */
+  skillsInject?: boolean;
 }
 
 /** The turn row as addTurn resolves it (id is what the fake needs). */
@@ -393,7 +396,8 @@ async function openFakeTurn(
   req: TurnRequest,
 ): Promise<{
   messages: ChatCompletionMessageParam[];
-  firstOwn: ChatCompletionMessageParam;
+  promptValue: string;
+  pairCount: number;
   turnRowId: number | null;
 }> {
   const { opts, capture, sessionId } = scope;
@@ -423,11 +427,12 @@ async function openFakeTurn(
   })) as TurnRowLike;
   capture.calls.push({ sessionId, messages, model });
   capture.usageBySession.set(sessionId, undefined);
-  const firstOwn =
-    prelude !== undefined
-      ? (prelude[0]!.call as ChatCompletionMessageParam)
-      : (messages[messages.length - 1] as ChatCompletionMessageParam);
-  return { messages, firstOwn, turnRowId: turnRowIdOf(turnRow) };
+  return {
+    messages,
+    promptValue: prompt,
+    pairCount: prelude?.length ?? 0,
+    turnRowId: turnRowIdOf(turnRow),
+  };
 }
 
 /** The fake's sink: capture ids/usage, persist once, publish on the bus. */
@@ -483,13 +488,35 @@ async function settleFakeTurn(
   scope: FakeTurnScope,
   s: {
     messages: ChatCompletionMessageParam[];
-    firstOwn: ChatCompletionMessageParam;
+    promptValue: string;
+    pairCount: number;
     turnRowId: number | null;
   },
   status: string,
 ): Promise<void> {
   const { opts, sessionId, live } = scope;
-  const batch = s.messages.slice(s.messages.indexOf(s.firstOwn));
+  let first = -1;
+  for (let i = s.messages.length - 1; i >= 0; i--) {
+    const m = s.messages[i] as { role?: unknown; content?: unknown };
+    if (m.role === "user" && m.content === s.promptValue) {
+      first = i;
+      break;
+    }
+  }
+  first = Math.max(0, first - 2 * s.pairCount);
+  const batch = s.messages.slice(first);
+  if (process.env["DEBUG_BATCH"] === "1") {
+    console.log(
+      "DEBUG settle first=",
+      first,
+      "len=",
+      s.messages.length,
+      "shapes=",
+      JSON.stringify(
+        s.messages.map((m: any) => `${m.role}:${String(m.content ?? "").slice(0, 10)}`),
+      ),
+    );
+  }
   await opts.store.appendMessages(sessionId, batch, s.turnRowId);
   await opts.store.finishTurn(sessionId, s.turnRowId, status, live.usage).catch(() => undefined);
 }
@@ -515,6 +542,9 @@ async function runFakeTurn(input: {
   const model = req.model ?? opts.modelId;
   const s = await openFakeTurn(scope, req);
   scope.turnRowId = s.turnRowId;
+  if (opts.skillsInject === true) {
+    s.messages.unshift({ role: "system", content: "sys" } as ChatCompletionMessageParam);
+  }
   const sink = fakeSink(scope);
   const turnOpts = fakeTurnOptions(scope);
   try {

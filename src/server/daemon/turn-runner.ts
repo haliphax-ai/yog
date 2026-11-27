@@ -22,6 +22,7 @@ import {
 import type { SseEnvelope } from "../sse.ts";
 import { tools } from "../../register.ts";
 import { availableSkillsBlock, type SkillManager } from "../../skills/index.ts";
+import type { ToolCallRecord } from "../../state/index.ts";
 import { logger } from "../../log.ts";
 import type { AgentFSState } from "../../state/index.ts";
 import type { ModelInfoCache } from "../modelInfo.ts";
@@ -61,6 +62,18 @@ function rateLimitPolicy(config: YogConfig): TurnOptions["rateLimit"] {
 }
 
 /** The engine sink: persist (best effort), log debug, publish on the bus. */
+/** The sink's bookkeeping: fold the wire turn id and the terminal usage
+ *  into `live` (the settle path reads both). */
+function foldLiveState(live: LiveTurnState, ev: TurnEvent): void {
+  if (ev.type === "turn.started") {
+    live.turnId = (ev.data as { turnId?: string }).turnId ?? live.turnId;
+  }
+  if (ev.type === "turn.finished") {
+    const u = (ev.data as { usage?: TurnUsage }).usage;
+    if (u != null) live.usage = u;
+  }
+}
+
 function turnSink(
   rt: TurnRuntime,
   sessionId: string,
@@ -69,14 +82,7 @@ function turnSink(
 ): TurnSink {
   return {
     async emit(ev: TurnEvent): Promise<void> {
-      const envelope = ev as unknown as SseEnvelope;
-      if (ev.type === "turn.started") {
-        live.turnId = (ev.data as { turnId?: string }).turnId ?? live.turnId;
-      }
-      if (ev.type === "turn.finished") {
-        const u = (ev.data as { usage?: TurnUsage }).usage;
-        if (u !== undefined && u !== null) live.usage = u;
-      }
+      foldLiveState(live, ev);
       if (rt.store !== undefined) {
         try {
           await rt.store.addEvent(
@@ -95,7 +101,7 @@ function turnSink(
       logger.child({ sessionId }).debug({ event: ev }, "turn event");
       (rt.bus as unknown as { emit: (ch: string, ev: SseEnvelope) => void }).emit(
         `session:${sessionId}`,
-        envelope,
+        ev as unknown as SseEnvelope,
       );
     },
   };
@@ -119,7 +125,7 @@ async function startTurnRow(
   sessionId: string,
   prompt: string,
   model: string,
-  wake: boolean,
+  wake: boolean | undefined,
 ): Promise<number | null> {
   if (rt.store === undefined) return null;
   try {
@@ -138,21 +144,46 @@ async function startTurnRow(
   }
 }
 
-/** Append the settled batch (everything from the turn's first own row on)
- *  to the transcript. The boundary is that row's identity-resolved index:
- *  prefix mutations after hydrate (the skills unshift) shift counts but
- *  never object identity. */
-async function persistBatch(
-  rt: TurnRuntime,
-  sessionId: string,
+/** Append the settled batch (the prelude pair rows, if any, plus everything
+ *  from the prompt row on) to the transcript. The boundary anchors on the
+ *  PROMPT ROW's value, scanned from the END, then extends back over the
+ *  contiguous prelude pair rows. Value beats both prior anchors: object
+ *  identity failed on the live daemon (the pair's call row vanished while
+ *  identity-anchored — yog#146) and index counts drift under the skills
+ *  unshift. */
+/** The batch's first index: the prompt row by value (scanned from the END —
+ *  the hydrate wrote it, so the value is this turn's), extended back over
+ *  the delivered prelude pairs (each is exactly [call, result]). */
+function batchStartOf(
   messages: ChatCompletionMessageParam[],
-  firstOwn: ChatCompletionMessageParam,
-  turnRowId: number | null,
-): Promise<void> {
-  const first = messages.indexOf(firstOwn);
-  if (rt.store === undefined || first < 0 || messages.length <= first) return;
+  promptValue: string,
+  pairCount: number,
+): number {
+  let first = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i] as { role?: unknown; content?: unknown };
+    if (m.role === "user" && m.content === promptValue) {
+      first = i;
+      break;
+    }
+  }
+  return Math.max(0, first - 2 * pairCount);
+}
+
+/** What persistBatch needs beyond the session: the boundary inputs and the
+ *  row the batch stamps. */
+interface BatchBoundary {
+  readonly messages: ChatCompletionMessageParam[];
+  readonly promptValue: string;
+  readonly pairCount: number;
+  readonly turnRowId: number | null;
+}
+
+async function persistBatch(rt: TurnRuntime, sessionId: string, b: BatchBoundary): Promise<void> {
+  const first = batchStartOf(b.messages, b.promptValue, b.pairCount);
+  if (rt.store === undefined || b.messages.length <= first) return;
   try {
-    await rt.store.appendMessages(sessionId, messages.slice(first), turnRowId);
+    await rt.store.appendMessages(sessionId, b.messages.slice(first), b.turnRowId);
   } catch {
     // persistence is best effort
   }
@@ -178,6 +209,8 @@ interface TurnOptionsInput {
   readonly usageBySession: UsageBySession;
   /** The harness-internal marker echoed on `turn.started` (wake turns). */
   readonly wake?: boolean;
+  /** The turn's prompt (the batch boundary anchors on its value). */
+  readonly prompt: string;
 }
 
 /**
@@ -187,33 +220,43 @@ interface TurnOptionsInput {
  * window, and the skills context (appended to the system prompt at the END
  * so everything before it stays cache-stable).
  */
+/** Drop the keys whose value is `undefined` (the conditional spreads the
+ *  option object used to hand-build, one `? :` per field). */
+function withoutUndefined<T extends object>(obj: T): Partial<T> {
+  return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined)) as Partial<T>;
+}
+
 async function buildTurnOptions(rt: TurnRuntime, input: TurnOptionsInput): Promise<TurnOptions> {
   const { sessionId, model, ctx, live, usageBySession } = input;
-  const skillInstructions =
-    rt.skills !== undefined ? await rt.skills.getInstructions(sessionId) : "";
-  const availableSkills =
-    rt.skills !== undefined ? await availableSkillsBlock(rt.skills, sessionId) : "";
-  return {
+  const [skillInstructions, availableSkills] =
+    rt.skills !== undefined
+      ? await Promise.all([
+          rt.skills.getInstructions(sessionId),
+          availableSkillsBlock(rt.skills, sessionId),
+        ])
+      : ["", ""];
+  const options = withoutUndefined<TurnOptions>({
     sessionId,
-    ...(rt.state !== undefined
-      ? { recorder: { record: (rec) => rt.state!.recordToolCall(rec) } }
-      : {}),
-    ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
     isAborted: () => ctx.signal?.aborted === true,
     abortReason: "turn aborted by operator",
-    onUsage: (u) => {
+    onUsage: (u: TurnUsage) => {
       live.usage = u;
       usageBySession.set(sessionId, u);
     },
     maxRounds: rt.config.maxRoundsPerTurn,
     rateLimit: rateLimitPolicy(rt.config),
-    ...(rt.modelInfo !== undefined
-      ? { contextWindow: rt.modelInfo.getContextWindow(model) ?? undefined }
-      : {}),
-    ...(skillInstructions !== "" ? { skillInstructions } : {}),
-    ...(availableSkills !== "" ? { availableSkills } : {}),
-    ...(input.wake ? { wake: true } : {}),
-  };
+    recorder:
+      rt.state !== undefined
+        ? { record: (rec: ToolCallRecord) => rt.state!.recordToolCall(rec) }
+        : undefined,
+    contextWindow:
+      rt.modelInfo !== undefined ? (rt.modelInfo.getContextWindow(model) ?? undefined) : undefined,
+    skillInstructions: skillInstructions === "" ? undefined : skillInstructions,
+    availableSkills: availableSkills === "" ? undefined : availableSkills,
+    wake: input.wake === true ? true : undefined,
+    signal: ctx.signal,
+  });
+  return options;
 }
 
 /**
@@ -243,23 +286,19 @@ export function makeExecuteTurn(rt: TurnRuntime, usageBySession: UsageBySession)
     // transcript and this turn's prompt row, and persists under this
     // turn's id (the batch slice starts before the pair). An unwound turn
     // keeps its delivered pair — a notice never re-delivers.
-    const turnRowId = await startTurnRow(rt, sessionId, prompt, model, wake);
-    const { messages, firstOwn } = await hydrateMessages(rt, sessionId, prompt, turnRowId);
-    if (messages.length > 2) {
-      // Something extra (a prelude notice pair) landed between the prior
-      // transcript and the prompt row; log it for daemon forensics.
-      logger.child({ sessionId }).debug({ extraRows: messages.length - 2 }, "turn prelude");
-    }
-
-    const turnOpts = await buildTurnOptions(rt, {
-      sessionId,
-      model,
-      ctx,
-      live,
+    const { messages, promptValue, pairCount, turnOpts, sink, turnRowId } = await assembleTurn(
+      rt,
       usageBySession,
-      wake,
-    });
-    const sink = turnSink(rt, sessionId, live, turnRowId);
+      {
+        sessionId,
+        model,
+        ctx,
+        live,
+        usageBySession,
+        wake,
+        prompt,
+      },
+    );
 
     // (The engine heals announced-but-unanswered tool calls before
     // throwing, so the batch persisted in the catch below already
@@ -269,15 +308,23 @@ export function makeExecuteTurn(rt: TurnRuntime, usageBySession: UsageBySession)
     try {
       await new TurnEngine(sink).run(client, model, messages, tools, turnOpts);
       // On success, persist everything this turn produced: the batch
-      // starts at the turn's first own row (the prelude head or the
-      // prompt) — identity-resolved at settle time, so post-hydrate
-      // prefix mutations cannot shift the window.
-      await persistBatch(rt, sessionId, messages, firstOwn, turnRowId);
+      // starts at the prelude head (when a pair was delivered) and runs
+      // through the prompt and every round the engine appended.
+      await persistBatch(rt, sessionId, {
+        messages,
+        promptValue,
+        pairCount,
+        turnRowId,
+      });
       // Settle the row as finished — the bookkeeping record of a complete
       // turn, never a gate on the stream's success.
       await settleTurnRow(rt, sessionId, turnRowId, "finished", live);
     } catch (err) {
-      await settleFailedTurn({ rt, sessionId, messages, firstOwn, turnRowId, live }, ctx, err);
+      await settleFailedTurn(
+        { rt, sessionId, messages, promptValue, pairCount, turnRowId, live },
+        ctx,
+        err,
+      );
     }
     return { turnId: live.turnId };
   };
@@ -302,8 +349,10 @@ interface TurnSettlement {
   readonly sessionId: string;
   /** The turn's batch (prompt + completed rounds), as the engine left it. */
   readonly messages: ChatCompletionMessageParam[];
-  /** The turn's first own row (identity anchors the batch boundary). */
-  readonly firstOwn: ChatCompletionMessageParam;
+  /** The turn's prompt value (the batch boundary anchors on it). */
+  readonly promptValue: string;
+  /** Delivered prelude pairs (each is [call, result] before the prompt). */
+  readonly pairCount: number;
   /** The turn row to stamp `turn_id` onto (null when persistence is off). */
   readonly turnRowId: number | null;
   readonly live: LiveTurnState;
@@ -316,7 +365,7 @@ async function settleFailedTurn(
   err: unknown,
 ): Promise<void> {
   const status = isOperatorAbort(ctx, err) ? "aborted" : "error";
-  await persistBatch(s.rt, s.sessionId, s.messages, s.firstOwn, s.turnRowId);
+  await persistBatch(s.rt, s.sessionId, s);
   await settleTurnRow(s.rt, s.sessionId, s.turnRowId, status, s.live);
 }
 
@@ -334,8 +383,8 @@ async function hydrateMessages(
   turnRowId: number | null,
 ): Promise<{
   messages: ChatCompletionMessageParam[];
-  firstOwn: ChatCompletionMessageParam;
-  prelude: DeliveredPrelude[] | undefined;
+  promptValue: string;
+  pairCount: number;
 }> {
   const prior =
     rt.store !== undefined
@@ -351,22 +400,47 @@ async function hydrateMessages(
     ]),
     { role: "user", content: prompt },
   ];
-  if (prelude !== undefined && notices !== undefined)
+  if (prelude !== undefined && notices !== undefined) {
     publishPrelude(rt, sessionId, prelude, notices, turnRowId);
-  // The batch boundary is the FIRST row of this turn's own contribution —
-  // the prelude head when a pair was delivered, else the prompt: the engine
-  // may PREPEND to `messages` after hydrate (the skills-context injection
-  // unshifts a system row when the transcript has none — yog#146), which
-  // shifts every index AND the window of any count captured at hydrate
-  // time — the settled batch then re-persists the prior transcript's tail
-  // (or drops the pair, if the anchor is the prompt alone). Capture that
-  // row object; the caller resolves its index by identity at settle time
-  // (indexOf is exact under any prefix mutation).
-  const firstOwn =
-    prelude !== undefined
-      ? (prelude[0]!.call as unknown as ChatCompletionMessageParam)
-      : (messages[messages.length - 1] as ChatCompletionMessageParam);
-  return { messages, firstOwn, prelude };
+    logger.child({ sessionId }).debug({ pairs: prelude.length }, "turn prelude");
+  }
+  // The batch boundary anchors on the PROMPT ROW by VALUE (role=user +
+  // content=prompt): the settled batch starts there and extends BACK over
+  // the prelude pair rows (their synthetic ids are server-generated —
+  // call_bg_/call_hn_ — never model-made). Value beats both prior anchors:
+  // object identity failed on the live daemon (yog#146: the pair's call
+  // row vanished while identity-anchored) and index counts drift under the
+  // skills unshift. The prompt value is unique in the turn (the hydrate
+  // wrote it); scanning from the END lands on THIS turn's row even when a
+  // prior turn's prompt carried the same text.
+  return { messages, promptValue: prompt, pairCount: prelude?.length ?? 0 };
+}
+
+/** One turn's assembled inputs: the hydrated conversation and the options. */
+interface TurnInputs {
+  readonly messages: ChatCompletionMessageParam[];
+  readonly promptValue: string;
+  readonly pairCount: number;
+  readonly turnOpts: TurnOptions;
+  readonly sink: TurnSink;
+  readonly turnRowId: number | null;
+}
+
+async function assembleTurn(
+  rt: TurnRuntime,
+  usageBySession: UsageBySession,
+  input: TurnOptionsInput,
+): Promise<TurnInputs> {
+  const turnRowId = await startTurnRow(rt, input.sessionId, input.prompt, input.model, input.wake);
+  const { messages, promptValue, pairCount } = await hydrateMessages(
+    rt,
+    input.sessionId,
+    input.prompt,
+    turnRowId,
+  );
+  const turnOpts = await buildTurnOptions(rt, input);
+  const sink = turnSink(rt, input.sessionId, input.live, turnRowId);
+  return { messages, promptValue, pairCount, turnOpts, sink, turnRowId };
 }
 
 /**

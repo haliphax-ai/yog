@@ -107,10 +107,13 @@ export interface PreludeCallRow {
   ];
 }
 
-/** The tool row of the pair: the serialized, clamped payload. */
+/** The tool row of the pair: the serialized, clamped payload. `name` rides
+ *  it (the original tool) so an orphan result still labels with the tool,
+ *  not the synthetic call id (yog#146). */
 export interface PreludeToolRow {
   readonly role: "tool";
   readonly tool_call_id: string;
+  readonly name?: string;
   readonly content: string;
 }
 
@@ -184,7 +187,16 @@ export function deliverPrelude(notices: PreludeNotice[]): DeliveredPrelude[] | u
           },
         ],
       },
-      result: { role: "tool", tool_call_id: toolCallId, content: JSON.stringify(n.result ?? {}) },
+      // The name rides the result row: a client that pairs it with the
+      // call renders ⚙️/bash normally, and one that misses the call row
+      // (an orphan result) still labels the outcome with the TOOL, not the
+      // synthetic call id (yog#146 — the id is already on the row above).
+      result: {
+        role: "tool",
+        tool_call_id: toolCallId,
+        name: n.tool,
+        content: JSON.stringify(n.result ?? {}),
+      },
     });
   }
   if (plain.length > 0) {
