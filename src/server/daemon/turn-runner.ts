@@ -138,17 +138,21 @@ async function startTurnRow(
   }
 }
 
-/** Append the settled batch (`messages.slice(startLen)`) to the transcript. */
+/** Append the settled batch (everything from the turn's first own row on)
+ *  to the transcript. The boundary is that row's identity-resolved index:
+ *  prefix mutations after hydrate (the skills unshift) shift counts but
+ *  never object identity. */
 async function persistBatch(
   rt: TurnRuntime,
   sessionId: string,
   messages: ChatCompletionMessageParam[],
-  startLen: number,
+  firstOwn: ChatCompletionMessageParam,
   turnRowId: number | null,
 ): Promise<void> {
-  if (rt.store === undefined || messages.length <= startLen) return;
+  const first = messages.indexOf(firstOwn);
+  if (rt.store === undefined || first < 0 || messages.length <= first) return;
   try {
-    await rt.store.appendMessages(sessionId, messages.slice(startLen), turnRowId);
+    await rt.store.appendMessages(sessionId, messages.slice(first), turnRowId);
   } catch {
     // persistence is best effort
   }
@@ -240,13 +244,11 @@ export function makeExecuteTurn(rt: TurnRuntime, usageBySession: UsageBySession)
     // turn's id (the batch slice starts before the pair). An unwound turn
     // keeps its delivered pair — a notice never re-delivers.
     const turnRowId = await startTurnRow(rt, sessionId, prompt, model, wake);
-    const { messages, startLen } = await hydrateMessages(rt, sessionId, prompt, turnRowId);
-    if (startLen < messages.length - 1) {
+    const { messages, firstOwn } = await hydrateMessages(rt, sessionId, prompt, turnRowId);
+    if (messages.length > 2) {
       // Something extra (a prelude notice pair) landed between the prior
       // transcript and the prompt row; log it for daemon forensics.
-      logger
-        .child({ sessionId })
-        .debug({ startLen, extraRows: messages.length - 1 - startLen }, "turn prelude");
+      logger.child({ sessionId }).debug({ extraRows: messages.length - 2 }, "turn prelude");
     }
 
     const turnOpts = await buildTurnOptions(rt, {
@@ -267,14 +269,15 @@ export function makeExecuteTurn(rt: TurnRuntime, usageBySession: UsageBySession)
     try {
       await new TurnEngine(sink).run(client, model, messages, tools, turnOpts);
       // On success, persist everything this turn produced: the batch
-      // starts at this turn's user prompt (`startLen` was captured before
-      // it, so the slice includes it).
-      await persistBatch(rt, sessionId, messages, startLen, turnRowId);
+      // starts at the turn's first own row (the prelude head or the
+      // prompt) — identity-resolved at settle time, so post-hydrate
+      // prefix mutations cannot shift the window.
+      await persistBatch(rt, sessionId, messages, firstOwn, turnRowId);
       // Settle the row as finished — the bookkeeping record of a complete
       // turn, never a gate on the stream's success.
       await settleTurnRow(rt, sessionId, turnRowId, "finished", live);
     } catch (err) {
-      await settleFailedTurn({ rt, sessionId, messages, startLen, turnRowId, live }, ctx, err);
+      await settleFailedTurn({ rt, sessionId, messages, firstOwn, turnRowId, live }, ctx, err);
     }
     return { turnId: live.turnId };
   };
@@ -299,8 +302,8 @@ interface TurnSettlement {
   readonly sessionId: string;
   /** The turn's batch (prompt + completed rounds), as the engine left it. */
   readonly messages: ChatCompletionMessageParam[];
-  /** Where the batch starts (`messages.slice(startLen)` is this turn's). */
-  readonly startLen: number;
+  /** The turn's first own row (identity anchors the batch boundary). */
+  readonly firstOwn: ChatCompletionMessageParam;
   /** The turn row to stamp `turn_id` onto (null when persistence is off). */
   readonly turnRowId: number | null;
   readonly live: LiveTurnState;
@@ -313,7 +316,7 @@ async function settleFailedTurn(
   err: unknown,
 ): Promise<void> {
   const status = isOperatorAbort(ctx, err) ? "aborted" : "error";
-  await persistBatch(s.rt, s.sessionId, s.messages, s.startLen, s.turnRowId);
+  await persistBatch(s.rt, s.sessionId, s.messages, s.firstOwn, s.turnRowId);
   await settleTurnRow(s.rt, s.sessionId, s.turnRowId, status, s.live);
 }
 
@@ -331,7 +334,7 @@ async function hydrateMessages(
   turnRowId: number | null,
 ): Promise<{
   messages: ChatCompletionMessageParam[];
-  startLen: number;
+  firstOwn: ChatCompletionMessageParam;
   prelude: DeliveredPrelude[] | undefined;
 }> {
   const prior =
@@ -350,14 +353,20 @@ async function hydrateMessages(
   ];
   if (prelude !== undefined && notices !== undefined)
     publishPrelude(rt, sessionId, prelude, notices, turnRowId);
-  // The batch boundary is the LAST row of the hydrate output (the prompt):
-  // the engine may PREPEND to `messages` after hydrate (the skills-context
-  // injection unshifts a system row when the transcript has none — yog#146),
-  // so a hydrate-time count drifts and the settled batch re-persists the
-  // prior transcript's tail. The prompt is the array's final row at this
-  // point by construction, so `length - 1` is the exact, mutation-proof
-  // boundary.
-  return { messages, startLen: messages.length - 1, prelude };
+  // The batch boundary is the FIRST row of this turn's own contribution —
+  // the prelude head when a pair was delivered, else the prompt: the engine
+  // may PREPEND to `messages` after hydrate (the skills-context injection
+  // unshifts a system row when the transcript has none — yog#146), which
+  // shifts every index AND the window of any count captured at hydrate
+  // time — the settled batch then re-persists the prior transcript's tail
+  // (or drops the pair, if the anchor is the prompt alone). Capture that
+  // row object; the caller resolves its index by identity at settle time
+  // (indexOf is exact under any prefix mutation).
+  const firstOwn =
+    prelude !== undefined
+      ? (prelude[0]!.call as unknown as ChatCompletionMessageParam)
+      : (messages[messages.length - 1] as ChatCompletionMessageParam);
+  return { messages, firstOwn, prelude };
 }
 
 /**

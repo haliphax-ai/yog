@@ -345,7 +345,7 @@ function turnRowIdOf(turnRow: TurnRowLike): number | null {
  * `SessionOrchestrator` (abort fan-out, per-session FIFO), with serve.ts's
  * `executeTurn` semantics — executeTurn owns the turn row, the sink
  * persists each event once and publishes it on the bus, the settled batch
- * (`messages.slice(startLen)`) lands in one `appendMessages`, and the row
+ * (everything from the prompt row on) lands in one `appendMessages`, and the row
  * settles `finished` / `aborted` / `error` (the failure batch is
  * engine-healed first — yog#42).
  */
@@ -391,7 +391,11 @@ interface LiveFakeTurn {
 async function openFakeTurn(
   scope: FakeTurnScope,
   req: TurnRequest,
-): Promise<{ messages: ChatCompletionMessageParam[]; startLen: number; turnRowId: number | null }> {
+): Promise<{
+  messages: ChatCompletionMessageParam[];
+  firstOwn: ChatCompletionMessageParam;
+  turnRowId: number | null;
+}> {
   const { opts, capture, sessionId } = scope;
   const prompt = String(req.prompt ?? "");
   const model = req.model ?? opts.modelId;
@@ -419,7 +423,11 @@ async function openFakeTurn(
   })) as TurnRowLike;
   capture.calls.push({ sessionId, messages, model });
   capture.usageBySession.set(sessionId, undefined);
-  return { messages, startLen: prior.length, turnRowId: turnRowIdOf(turnRow) };
+  const firstOwn =
+    prelude !== undefined
+      ? (prelude[0]!.call as ChatCompletionMessageParam)
+      : (messages[messages.length - 1] as ChatCompletionMessageParam);
+  return { messages, firstOwn, turnRowId: turnRowIdOf(turnRow) };
 }
 
 /** The fake's sink: capture ids/usage, persist once, publish on the bus. */
@@ -473,11 +481,15 @@ function fakeTurnOptions(scope: FakeTurnScope): TurnOptions {
  */
 async function settleFakeTurn(
   scope: FakeTurnScope,
-  s: { messages: ChatCompletionMessageParam[]; startLen: number; turnRowId: number | null },
+  s: {
+    messages: ChatCompletionMessageParam[];
+    firstOwn: ChatCompletionMessageParam;
+    turnRowId: number | null;
+  },
   status: string,
 ): Promise<void> {
   const { opts, sessionId, live } = scope;
-  const batch = s.messages.slice(s.startLen);
+  const batch = s.messages.slice(s.messages.indexOf(s.firstOwn));
   await opts.store.appendMessages(sessionId, batch, s.turnRowId);
   await opts.store.finishTurn(sessionId, s.turnRowId, status, live.usage).catch(() => undefined);
 }
