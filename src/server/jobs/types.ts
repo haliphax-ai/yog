@@ -112,9 +112,7 @@ export interface JobSettleNotice {
 export interface PreludeSinkLike {
   push(sessionId: string, kind: string, body: string): void;
   pushResult(sessionId: string, notice: JobSettleNotice): void;
-  drain(
-    sessionId: string,
-  ):
+  drain(sessionId: string):
     | Array<{
         kind: string;
         body: string;
