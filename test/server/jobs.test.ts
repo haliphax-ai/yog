@@ -612,7 +612,7 @@ describe("JobManager (fake clock)", () => {
     expect(preludes[0]!.body).toContain("exit 0");
   });
 
-  it("the settle notice stays a bounded one-liner (no result payload)", async () => {
+  it("the settle notice carries the settled result, clamped at the sink", async () => {
     const { manager, orch, preludes } = build();
     manager.wire();
     orch.setBusy(true);
@@ -627,15 +627,15 @@ describe("JobManager (fake clock)", () => {
     await settleJob(v.jobId!, ret, big);
     await Promise.resolve();
     await Promise.resolve();
-    // The notice body stays one bounded line: no settled result rides it
-    // (a 60k-char result on 203 jobs once shipped a 3.1 MB notice payload
-    // that killed the next wake turn with a context-overflow 400). The
-    // result streams ride the wake prompt instead.
-    expect(preludes[0]!.tool).toBeUndefined();
-    expect(preludes[0]!.result).toBeUndefined();
+    // The notice IS a tool result: the client renders the bash chunk
+    // through the shared component. The SINK clamps the payload (4k
+    // serialized chars, head+tail) — a 60k stdout cannot stack a 3 MB
+    // pair into one turn's hydrate.
+    expect(preludes[0]!.tool).toBe("bash");
     expect(preludes[0]!.body).toContain(`job ${v.jobId} finished`);
-    expect(preludes[0]!.body).toContain("exit 0");
-    expect(preludes[0]!.body.length).toBeLessThan(200);
+    // (The fake sink records the manager's raw passthrough; the clamp
+    // itself is pinned in prelude.test.ts.)
+    expect((preludes[0]!.result as ToolResult).stdout).toBe("z".repeat(60_000));
   });
 
   it("audit row per settled job (completion forensics)", async () => {

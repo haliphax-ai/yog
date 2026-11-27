@@ -74,6 +74,20 @@ export const HARNESS_NOTICE_TOOL = "harness_notice" as const;
  * PRODUCER at push time; this module owns only the mechanism.
  */
 export const PRELUDE_MAX_CHARS = 4_000;
+/** The per-notice cap on an attached tool result (serialized chars, the
+ *  same unit PRELUDE_MAX_CHARS speaks): the sink clamps in this module,
+ *  one budget for the whole pair. 4k chars ≈ a screenful per job —
+ *  enough for the component preview, far under a context risk. */
+export const NOTICE_RESULT_MAX_CHARS = 4_000;
+
+/** Clamp an attached result to `max` serialized chars: whole when small,
+ *  otherwise a {"truncated": …} envelope keeping the payload's own shape
+ *  (head + tail, middle cut) so the client component still previews it. */
+export function clampNoticeResult(result: unknown, max: number): unknown {
+  const json = JSON.stringify(result) ?? "null";
+  if (json.length <= max) return result;
+  return { truncated: middleTruncate(json, max) };
+}
 
 /** The assistant row of the pair: empty args, all information in the result. */
 export interface PreludeCallRow {
@@ -121,9 +135,14 @@ export function createPreludeSink(): PreludeSink {
         kind,
         body,
         tool,
-        result,
-        // Background jobs notices carry an already-capped tool result:
-        // exempt from the clamp. The exemption is per-notice, not global.
+        // Bound the attached result HERE, at the sink: the exemption
+        // below means serializePrelude will not clamp this notice, so
+        // the sink owes the bound instead. A settle flood (dozens of
+        // jobs settling behind a busy turn) must not stack dozens of
+        // full tool outputs into ONE prelude pair — each result keeps
+        // its head+tail (middle-truncated, marker intact), and the full
+        // text still rides the wake prompt and the audit row.
+        result: clampNoticeResult(result, NOTICE_RESULT_MAX_CHARS),
         exemptFromClamp: true,
       });
     },

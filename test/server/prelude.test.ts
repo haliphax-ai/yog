@@ -145,7 +145,7 @@ describe("serializePrelude (the safety clamp)", () => {
     expect(sink.drain("s1")![0]!.exemptFromClamp).toBe(true);
   });
 
-  it("pushResult carries the tool name and settled result on the notice, verbatim", () => {
+  it("pushResult carries the tool name; the result is clamped at the sink", () => {
     const sink = createPreludeSink();
     const result = { stdout: "a".repeat(10_000), exitCode: 0 };
     sink.pushResult("s1", "background jobs", "job bg_1 finished · exit 0", "bash", result);
@@ -153,8 +153,11 @@ describe("serializePrelude (the safety clamp)", () => {
     expect(notices).toHaveLength(1);
     expect(notices[0]!.kind).toBe("background jobs");
     expect(notices[0]!.tool).toBe("bash");
-    // No truncation at the notice layer — the tool boundary owns that.
-    expect(notices[0]!.result).toEqual(result);
+    // Sink-owned clamp: head+tail of the serialized payload (marker
+    // intact), never the whole 10k — the pair stays a screenful per job.
+    const clamped = notices[0]!.result as { truncated?: unknown };
+    expect(JSON.stringify(clamped).length).toBeLessThan(5_000);
+    expect(JSON.stringify(clamped)).toContain("TRUNCATED");
   });
 
   it("a tool-result notice survives deliverPrelude + serializePrelude intact", () => {

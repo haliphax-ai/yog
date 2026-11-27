@@ -379,17 +379,19 @@ export class JobManager {
     // the client's notice-block path (live via the idle watch, or on the
     // next transcript sync). The wake prompt's own header is the
     // model-facing summary; this is the log-side signal that a job
-    // SETTLED. The notice body stays a bounded one-liner: no settled
-    // result rides it. A settled result is NOT size-safe here — a detached
-    // bash job can legally return up to ~50k serialized chars, and 203 of
-    // them once shipped a 3.1 MB notice payload (turn 631, session
-    // fe74e3b7) that killed the next wake turn with a 400. Result streams
-    // ride the wake prompt only (per-job budget, batch-capped by the
-    // manager).
-    this.#preludeView.push(
+    // SETTLED. The settled result rides the notice — through the client's
+    // SAME tool-result component every live call uses (bash jobs get the
+    // bash chunk, not a plain cyan line). The SINK clamps the attached
+    // result (NOTICE_RESULT_MAX_CHARS: head+tail, marker intact), so a
+    // settle flood cannot stack unbounded outputs into one pair — the
+    // 3.1 MB notice pileup that killed turn 631. The FULL text still
+    // rides the wake prompt and the audit row.
+    this.#preludeView.pushResult(
       job.sessionId,
       "background jobs",
       `job ${job.id} finished · ${settleNoticeResult(job.result)} · ${settleSeconds(job.startedAt, job.endedAt)}s`,
+      job.tool,
+      job.result,
     );
     this.#markPending(job);
     void this.#maybeDeliver(job.sessionId);
