@@ -6,6 +6,8 @@ export interface BashResult extends ToolResult {
   stderr: string | null;
   runtimeMs: number | null;
   exitCode: number | null;
+  /** The death signal when the child was killed; null on a normal exit. */
+  signal?: string | null;
 }
 
 export interface BashArgs extends Record<string, unknown> {
@@ -44,6 +46,7 @@ function nullResult(start: number, error: string): BashResult {
     stderr: null,
     runtimeMs: Math.round(performance.now() - start),
     exitCode: null,
+    signal: null,
     error,
   };
 }
@@ -156,6 +159,8 @@ export interface BashExecutionResult {
   stdout?: string;
   stderr?: string;
   exitCode?: number | null;
+  /** The death signal when the child was killed; null on a normal exit. */
+  signal?: string | null;
   state?: { cwd: string; env: string; functions: string };
   error?: string;
 }
@@ -265,6 +270,9 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
         stderr: capped[1],
         runtimeMs,
         exitCode: resp.exitCode ?? null,
+        // Death signal (SIGTERM &c.): rides the result so the jobs manager
+        // can classify a signal death as a TERMINATION — no wake turn.
+        signal: resp.signal ?? null,
       };
     } catch (err) {
       return nullResult(start, err instanceof Error ? err.message : String(err));

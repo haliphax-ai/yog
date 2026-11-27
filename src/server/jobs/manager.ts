@@ -230,27 +230,33 @@ export class JobManager {
   #policy(): ToolDetachPolicy {
     return {
       thresholdMs: this.#opts.detachMs,
-      onThreshold: async (call: DetachCall): Promise<DetachVerdict> => {
-        const sessionId = call.sessionId;
-        if (sessionId === undefined) {
-          // Non-session callers (the CLI path): nothing manages them.
-          return { kind: "terminate", reason: "background jobs are session-scoped" };
-        }
-        const st = this.#session(sessionId);
-        // Capacity = live + undelivered pendings (both hold the job's
-        // result in memory and both are owed a wake): a slot frees at
-        // settle, but the job stays under the cap until DELIVERED — or a
-        // busy session piles pendings past its slots and floods the next
-        // wake turn.
-        if (st.running + st.pending.length >= this.#opts.maxJobsPerSession) {
-          return await this.#terminateVerdict(sessionId, "no free background-job slot");
-        }
-        if (this.#totalUnsettled() >= this.#opts.maxJobsTotal) {
-          return await this.#terminateVerdict(sessionId, "max concurrent jobs");
-        }
-        return await this.#detachVerdict(call, sessionId, st);
-      },
+      onThreshold: (call: DetachCall) => this.#thresholdVerdict(call),
     };
+  }
+
+  /**
+   * The policy verdict at every threshold. Free slot → register + rekey +
+   * stamp pid + arm timers and answer `detach`; slots full → terminate
+   * (bash: session-keyed kill; generic: abandon).
+   */
+  async #thresholdVerdict(call: DetachCall): Promise<DetachVerdict> {
+    const sessionId = call.sessionId;
+    if (sessionId === undefined) {
+      // Non-session callers (the CLI path): nothing manages them.
+      return { kind: "terminate", reason: "background jobs are session-scoped" };
+    }
+    const st = this.#session(sessionId);
+    // Capacity = live + undelivered pendings (both hold the job's result
+    // in memory and both are owed a wake): a slot frees at settle, but the
+    // job stays under the cap until DELIVERED — or a busy session piles
+    // pendings past its slots and floods the next wake turn.
+    if (st.running + st.pending.length >= this.#opts.maxJobsPerSession) {
+      return await this.#terminateVerdict(sessionId, "no free background-job slot");
+    }
+    if (this.#totalUnsettled() >= this.#opts.maxJobsTotal) {
+      return await this.#terminateVerdict(sessionId, "max concurrent jobs");
+    }
+    return await this.#detachVerdict(call, sessionId, st);
   }
 
   /** No free capacity: kill the call via the session key (bash) / abandon. */
@@ -370,41 +376,54 @@ export class JobManager {
 
   // ── settle + pending + delivery ──────────────────────────────────────────
 
-  /** The retained result promise settled: record the outcome, maybe deliver. */
-  #settle(jobId: string, result: ToolResult | undefined, err: unknown): void {
-    const job = this.#jobs.get(jobId);
-    if (job === undefined || job.state !== "running") return;
+  /** The settle bookkeeping: stamp the state (a signal death is a
+   *  TERMINATION, not a finished outcome — yog#146), record the audit. */
+  #applySettlement(job: BackgroundJob, result: ToolResult | undefined, err: unknown): boolean {
+    const signalDeath = isSignalDeath(result);
     job.endedAt = this.#sched.now();
-    this.#cancelCap(jobId);
-    job.state = "finished";
-    job.result =
-      err !== undefined
-        ? { error: err instanceof Error ? err.message : String(err) }
-        : (result ?? {});
+    this.#cancelCap(job.id);
+    job.state = signalDeath ? "terminated" : "finished";
+    job.termReason = signalDeath ? "killed by signal" : undefined;
+    job.result = err !== undefined ? { error: toMessage(err) } : (result ?? {});
     const st = this.#session(job.sessionId);
     st.running = Math.max(0, st.running - 1);
     this.#recordAudit(job);
-    // The human-facing completion signal: the notice IS the job's tool
-    // outcome, delivered as the INVERSE of its detach — a synthetic call
-    // (the original call's name + arguments) paired to the call's TRUE
-    // result. The client's standard pairing renders the real tool
-    // component (bash jobs get the bash chunk), and the model sees a
-    // well-formed tool round. No user-message parsing anywhere.
+    return signalDeath;
+  }
+
+  /** The delivered outcome pair: the notice IS the job's tool outcome,
+   *  delivered as the INVERSE of its detach — a synthetic call (the
+   *  original call's name + arguments) paired to the call's TRUE result.
+   *  The client's standard pairing renders the real tool component (bash
+   *  jobs get the bash chunk), and the model sees a well-formed tool
+   *  round. No user-message parsing anywhere. */
+  #pushOutcome(job: BackgroundJob, terminated: boolean): void {
+    const outcome = terminated ? "terminated" : "finished";
     this.#preludeView.pushResult(job.sessionId, {
       kind: "background jobs",
       // The body is just the completion signal; the exit code and TRUE
       // total runtime live in the paired result (the client's bash chunk
-      // header already renders both) — repeating them here duplicated the
-      // result and quoted background-only time.
-      body: `job ${job.id} finished`,
+      // header already renders both).
+      body: `job ${job.id} ${outcome}`,
       tool: job.tool,
       argsJson: job.argsJson,
       result: job.result,
       exemptFromClamp: true,
     });
+  }
+
+  /** The retained result promise settled: record the outcome, maybe deliver. */
+  #settle(jobId: string, result: ToolResult | undefined, err: unknown): void {
+    const job = this.#jobs.get(jobId);
+    if (job === undefined || job.state !== "running") return;
+    const terminated = this.#applySettlement(job, result, err);
+    this.#pushOutcome(job, terminated);
     this.#emitJobEvent(job.sessionId, jobSettledEvent(job));
-    this.#markPending(job);
-    void this.#maybeDeliver(job.sessionId);
+    // A termination rides the NEXT turn's prelude (or a batch a finished
+    // job triggered) but NEVER counts as a wake trigger on its own: only
+    // genuinely finished outcomes arm the ladder here.
+    this.#markPending(job, !terminated);
+    if (!terminated) void this.#maybeDeliver(job.sessionId);
   }
 
   /** Publish one job-lifecycle envelope on the session's stream channel.
@@ -430,11 +449,17 @@ export class JobManager {
    * covers jobs that settle while a foreign turn (or the wake turn itself)
    * is live.
    */
-  #markPending(job: BackgroundJob): void {
+  /**
+   * Queue a settled job for delivery (once). A signal death (`wakeup` false)
+   * rides the NEXT wake turn's batch or the next turn's prelude — it never
+   * arms the ladder or the idle subscription by itself (yog#146: a killed
+   * job must not wake the model).
+   */
+  #markPending(job: BackgroundJob, wakeup = true): void {
     if (job.delivered) return;
     const st = this.#session(job.sessionId);
     if (!st.pending.includes(job.id)) st.pending.push(job.id);
-    this.#subscribeIdle(job.sessionId);
+    if (wakeup) this.#subscribeIdle(job.sessionId);
   }
 
   /** Subscribe the tail-settles delivery (one live subscription/session). */
@@ -511,8 +536,7 @@ export class JobManager {
   /** Arm the ladder timer at the current rung (never two at once). */
   #armLadder(sessionId: string): void {
     const st = this.#session(sessionId);
-    const live = [...this.#jobs.values()].some((j) => j.sessionId === sessionId && !j.delivered);
-    if (!live || st.ladderTimer !== undefined) return;
+    if (st.ladderTimer !== undefined || queueCleared([...this.#jobs.values()], sessionId)) return;
     const ms = rungDelayMs(this.#opts.wakeLadderMs, st.rung);
     st.ladderTimer = this.#sched.after(ms, () => {
       st.ladderTimer = undefined;
@@ -532,6 +556,23 @@ export class JobManager {
     // a hung job occupies its slot and the ladder tops out at the ceiling.
     this.#armLadder(sessionId);
   }
+}
+
+function toMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * A signal death (SIGTERM &c. — an operator kill, an external kill, the
+ * harness sweeping children) is a TERMINATION, not a finished outcome: the
+ * model must not wake for it on its own (yog#146 — terminated jobs ride the
+ * next turn's prelude or a batch a finished job triggered, never wake
+ * alone). Classified from the result's `signal` field; the worker threads
+ * it (worker main: `close`'s signal arg).
+ */
+function isSignalDeath(result: ToolResult | undefined): boolean {
+  const signal = result?.signal;
+  return typeof signal === "string" && signal.length > 0;
 }
 
 /** The audit row one settled job produces (shape per ToolCallRecord). */

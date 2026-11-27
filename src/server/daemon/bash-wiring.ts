@@ -34,6 +34,7 @@ function executorResult(resp: WorkerResponse): BashExecutionResult {
       stdout: resp.stdout,
       stderr: resp.stderr,
       exitCode: resp.exitCode,
+      signal: resp.signal ?? null,
       ...(resp.state !== undefined ? { state: resp.state } : {}),
     };
   }

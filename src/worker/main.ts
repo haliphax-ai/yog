@@ -112,13 +112,18 @@ async function runBash(
     };
 
     child.on("error", (err) => settle({ ok: false, error: err.message }));
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       void (async () => {
         settle({
           ok: true,
           stdout: Buffer.concat(out).toString("utf8"),
           stderr: Buffer.concat(errOut).toString("utf8"),
           exitCode: code,
+          // Death signal: non-null exactly when the child was killed
+          // (SIGTERM from an operator/tool timeout/external kill). The
+          // jobs manager classifies on this — a signal death is NOT a
+          // finished outcome (no wake turn for it, yog#146).
+          signal: signal ?? null,
           state: await readState(stateDir),
           // Settle-time forensics: the wrapper child's ids so the agent can
           // `kill -- -<pid>` the tree even after a job detaches.

@@ -631,6 +631,54 @@ describe("JobManager (fake clock)", () => {
     expect(preludes[0]!.body).toContain(`job ${v.jobId} finished`);
   });
 
+  it("a signal death queues the prelude but NEVER wakes — even idle (yog#146)", async () => {
+    const { manager, orch, preludes } = build();
+    manager.wire();
+    orch.setBusy(false); // idle: the very state a lone kill would wake in
+    const ret = deferred();
+    const v = (await consultThreshold(manager, {
+      sessionId: "s1",
+      tool: "bash",
+      argsJson: null,
+      result: ret.promise,
+    })) as { kind: string; jobId: string };
+    await settleJob(v.jobId!, ret, {
+      stdout: "",
+      stderr: "Terminated",
+      exitCode: null,
+      signal: "SIGTERM",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    // Terminated: stamped, the outcome rides the prelude…
+    expect(manager.job(v.jobId!)!.state).toBe("terminated");
+    expect(preludes).toHaveLength(1);
+    expect(preludes[0]!.body).toContain(`job ${v.jobId} terminated`);
+    // …but NO wake turn: the idle subscription never armed, and the
+    // settle-time delivery is suppressed.
+    expect(orch.hasIdleSub).toBe(false);
+    expect(orch.wakes).toHaveLength(0);
+    // A LATER finished job still wakes and carries the terminated job in
+    // its batch (the terminated outcome rides along).
+    const ret2 = deferred();
+    const v2 = (await consultThreshold(manager, {
+      sessionId: "s1",
+      tool: "bash",
+      argsJson: null,
+      result: ret2.promise,
+    })) as { kind: string; jobId: string };
+    orch.setBusy(true);
+    await settleJob(v2.jobId!, ret2, { stdout: "out", exitCode: 0 });
+    orch.setBusy(false);
+    orch.fireIdle("s1");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(orch.wakes).toHaveLength(1);
+    expect(orch.wakes[0]!.prompt).toContain(v.jobId!); // the terminated job rides
+    expect(orch.wakes[0]!.prompt).toContain(v2.jobId!); // with the finished one
+  });
+
   it("the settle notice carries the settled result, clamped at the sink", async () => {
     const { manager, orch, preludes } = build();
     manager.wire();

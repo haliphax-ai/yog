@@ -14,7 +14,9 @@ export type JobTermReason =
   | "no free background-job slot"
   | "max concurrent jobs"
   | "operator abort"
-  | "detach policy failed";
+  | "detach policy failed"
+  /** The child died by signal (an external kill — SIGTERM &c.). */
+  | "killed by signal";
 
 /** One background job (in-memory row — nothing survives a restart). */
 export interface BackgroundJob {

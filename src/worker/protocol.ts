@@ -97,6 +97,10 @@ export interface BashRunOk {
   readonly stdout: string;
   readonly stderr: string;
   readonly exitCode: number | null;
+  /** The death signal when the child was killed (SIGTERM &c.); null on a
+   *  normal exit. The jobs manager classifies a signal death as a
+   *  TERMINATION — no wake turn for it (yog#146). */
+  readonly signal?: string | null;
   /**
    * Snapshot of the persistent shell state after the run, read back from the
    * state dir. Present only when `stateDir` was provided and the files
