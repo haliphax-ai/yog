@@ -64,7 +64,7 @@ export function buildWakePrompt(
   budget: number,
 ): string | undefined {
   if (jobs.length === 0) return undefined;
-  const header = `[background jobs] ${jobs.length} finished: results are attached below. Use them to continue your work; do not re-run the tools.`;
+  const header = `[background jobs] ${jobs.length} delivered: results are attached below. Use them to continue your work; do not re-run the tools.`;
   return [header, ...jobs.map((job) => jobBlock(job, budget))].join("\n\n");
 }
 

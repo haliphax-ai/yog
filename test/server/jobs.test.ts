@@ -490,7 +490,7 @@ describe("JobManager (fake clock)", () => {
     expect(orch.wakes).toHaveLength(1);
     expect(orch.wakes[0]!.prompt).toContain(a.jobId!);
     expect(orch.wakes[0]!.prompt).toContain(b.jobId!);
-    expect(orch.wakes[0]!.prompt).toContain("2 finished");
+    expect(orch.wakes[0]!.prompt).toContain("2 delivered");
   });
 
   it("batch slice: a wake delivers at most maxJobsPerWake jobs; overflow rides the next wake", async () => {
@@ -517,7 +517,7 @@ describe("JobManager (fake clock)", () => {
     expect(orch.wakes).toHaveLength(1);
     expect(orch.wakes[0]!.prompt).toContain(ids[0]!);
     expect(orch.wakes[0]!.prompt).toContain(ids[1]!);
-    expect(orch.wakes[0]!.prompt).toContain("2 finished");
+    expect(orch.wakes[0]!.prompt).toContain("2 delivered");
     expect(orch.wakes[0]!.prompt).not.toContain(ids[2]!);
     // The ladder re-arm lands on a later microtask (it follows the wake
     // turn's awaited model lookup): let it settle before moving the clock.
@@ -528,7 +528,7 @@ describe("JobManager (fake clock)", () => {
     expect(orch.wakes).toHaveLength(2);
     expect(orch.wakes[1]!.prompt).toContain(ids[2]!);
     expect(orch.wakes[1]!.prompt).toContain(ids[3]!);
-    expect(orch.wakes[1]!.prompt).toContain("2 finished");
+    expect(orch.wakes[1]!.prompt).toContain("2 delivered");
   });
 
   it("wake prompt truncates per-job streams against the tool-output budget", async () => {
@@ -701,7 +701,7 @@ describe("JobManager (fake clock)", () => {
   });
 
   it("an idle abort AFTER a signal-death settle stays silent (the cascade wipes the pending)", async () => {
-    const { manager, orch, preludes } = build();
+    const { manager, orch } = build();
     manager.wire();
     orch.setBusy(true); // the kill lands while a foreign turn is live
     const ret = deferred();
