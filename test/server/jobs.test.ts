@@ -286,6 +286,7 @@ async function consultThreshold(
     sessionId?: string;
     tool: string;
     argsJson: string | null;
+    startedAt?: number;
     result: Promise<ToolResult>;
   },
 ): Promise<{ kind: string; jobId?: string; reason?: string }> {
@@ -294,7 +295,10 @@ async function consultThreshold(
   const { toolDetachPolicy } = await import("../../src/toolkit/index.ts");
   const policy = toolDetachPolicy();
   expect(policy).toBeDefined();
-  return (await policy!.onThreshold(call)) as { kind: string; jobId?: string };
+  return (await policy!.onThreshold({ startedAt: 0, ...call })) as {
+    kind: string;
+    jobId?: string;
+  };
 }
 
 describe("JobManager (fake clock)", () => {
@@ -625,7 +629,6 @@ describe("JobManager (fake clock)", () => {
     expect(preludes).toHaveLength(1);
     expect(preludes[0]!.kind).toBe("background jobs");
     expect(preludes[0]!.body).toContain(`job ${v.jobId} finished`);
-    expect(preludes[0]!.body).toContain("exit 0");
   });
 
   it("the settle notice carries the settled result, clamped at the sink", async () => {

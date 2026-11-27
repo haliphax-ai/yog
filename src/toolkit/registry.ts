@@ -311,13 +311,22 @@ export class ToolRegistry {
     // A thrown tool run becomes a failure result (never a turn unwind),
     // matching the no-abort path below. Abort rejections are the only
     // exceptions that propagate: they trigger the engine's heal path.
+    // The call's true wall-clock start: a detached job reports TOTAL
+    // runtime (threshold-to-settle is only its background tail).
+    const startedAt = Date.now();
     const settledP: Promise<ToolResult> = runP.catch((err: unknown) =>
       tool.failure(err instanceof Error ? (err.message as string) : String(err)),
     );
     void settledP.catch(() => undefined);
     ctx.onStart?.(call);
     try {
-      return await executeDetachable(settledP, ctx, name, rawArgs, call);
+      return await executeDetachable(settledP, ctx, call, {
+        ...(ctx.sessionId !== undefined ? { sessionId: ctx.sessionId } : {}),
+        tool: name,
+        argsJson: rawArgs,
+        startedAt,
+        result: settledP,
+      });
     } finally {
       ctx.onEnd?.(call);
     }
@@ -334,9 +343,8 @@ export class ToolRegistry {
 async function executeDetachable(
   settledP: Promise<ToolResult>,
   ctx: ToolExecuteContext,
-  name: string,
-  rawArgs: string | null,
   call: ToolCall,
+  detach: DetachCall,
 ): Promise<ToolResult> {
   const policy = toolDetachPolicy();
   if (policy !== undefined) {
@@ -350,12 +358,7 @@ async function executeDetachable(
       ctx.signal !== undefined || ctx.isAborted !== undefined
         ? raceAgainstAbort(settledP, ctx, () => isAbortedNow(ctx))
         : settledP;
-    return await raceAgainstDetach(abortRaced, settledP, policy, ctx, {
-      ...(ctx.sessionId !== undefined ? { sessionId: ctx.sessionId } : {}),
-      tool: name,
-      argsJson: rawArgs,
-      result: settledP,
-    });
+    return await raceAgainstDetach(abortRaced, settledP, policy, ctx, detach);
   }
   if (ctx.signal !== undefined || ctx.isAborted !== undefined) {
     return await raceAgainstAbort(settledP, ctx, () => isAbortedNow(ctx));

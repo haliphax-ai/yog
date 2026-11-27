@@ -22,6 +22,12 @@ export interface DetachCall {
   /** Raw JSON arguments exactly as the registry received them. */
   readonly argsJson: string | null;
   /**
+   * The call's true wall-clock start (ms epoch): a detached job's
+   * duration is TOTAL runtime — threshold-to-settle is only its
+   * background tail, and quoting that as elapsed misreports the row.
+   */
+  readonly startedAt: number;
+  /**
    * The call's result promise — already capped (`capToolResult` applied),
    * so a detached build log cannot nuke context at delivery time. The
    * policy caller retains this promise: it is the job's eventual result.

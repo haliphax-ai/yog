@@ -388,7 +388,11 @@ export class JobManager {
     // well-formed tool round. No user-message parsing anywhere.
     this.#preludeView.pushResult(job.sessionId, {
       kind: "background jobs",
-      body: `job ${job.id} finished · ${settleNoticeResult(job.result)} · ${settleSeconds(job.startedAt, job.endedAt)}s`,
+      // The body is just the completion signal; the exit code and TRUE
+      // total runtime live in the paired result (the client's bash chunk
+      // header already renders both) — repeating them here duplicated the
+      // result and quoted background-only time.
+      body: `job ${job.id} finished`,
       tool: job.tool,
       argsJson: job.argsJson,
       result: job.result,
