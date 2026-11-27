@@ -207,6 +207,61 @@ describe("harness_notice prelude delivery (turn runner)", () => {
   });
 
   it(
+    "pins the pair's turn_events under the delivering turn, not the previous one",
+    { timeout: 30_000 },
+    async () => {
+      const bus = new EventEmitter();
+      bus.setMaxListeners(0);
+      const prelude = createPreludeSink();
+      const fake = orchestratorFromModel(ackClientFactory(), {
+        store,
+        bus,
+        registry: tools,
+        modelId: "fake-model",
+        prelude,
+      });
+      const daemon = await buildDaemon(fake, prelude, bus);
+      try {
+        const sid = await newSession(daemon.url);
+        await runTurnToEnd(daemon.url, sid, { prompt: "first" });
+        prelude.push(sid, "kind-x", "notice body");
+        const second = await runTurnToEnd(daemon.url, sid, { prompt: "second" });
+        const turns = await store.listTurns(sid);
+        const prev = turns[0] as { id: number };
+        const delivering = turns[1] as { id: number };
+        // The pair rode the batch: the transcript rows carry the
+        // delivering turn's id (not the previous turn's).
+        const transcript = await store.getTranscript(sid);
+        const call = transcript.find(
+          (m: any) =>
+            m.role === "assistant" &&
+            Array.isArray(m.tool_calls) &&
+            m.tool_calls[0]?.function?.name === HARNESS_NOTICE_TOOL,
+        ) as any;
+        expect(call.turnId).toBe(delivering.id);
+        expect(call.turnId).not.toBe(prev.id);
+        // The persisted event frames (publishPrelude) sit under the
+        // delivering turn too — the replay-on-connect path filters by
+        // turn id, so a misplaced row is invisible to reconnects.
+        const events = await store.listEvents(sid);
+        const pairEvents = events.filter((e: any) => e.turn_id === delivering.id);
+        expect(pairEvents.some((e: any) => e.type === "turn.started")).toBe(true);
+        // The previous turn holds ONLY its own events — no stray
+        // harness_notice pair rows.
+        const prevEvents = events.filter((e: any) => e.turn_id === prev.id);
+        expect(
+          prevEvents.some(
+            (e: any) => e.type === "tool.call" && JSON.stringify(e.payload).includes("call_hn_"),
+          ),
+        ).toBe(false);
+        void second;
+      } finally {
+        await daemon.close();
+      }
+    },
+  );
+
+  it(
     "keeps the delivered pair when the turn unwinds (never re-delivers)",
     { timeout: 30_000 },
     async () => {

@@ -371,6 +371,8 @@ interface FakeTurnScope {
   sessionId: string;
   ctx: { signal?: AbortSignal };
   live: LiveFakeTurn;
+  /** The open turn row (events persist under it, like the real sink). */
+  turnRowId: number | null;
 }
 
 /** Everything one fake turn needs, shared by its helper functions. */
@@ -422,7 +424,7 @@ async function openFakeTurn(
 
 /** The fake's sink: capture ids/usage, persist once, publish on the bus. */
 function fakeSink(scope: FakeTurnScope): TurnSink {
-  const { opts, sessionId, live } = scope;
+  const { opts, sessionId, live, turnRowId } = scope;
   return {
     async emit(ev: TurnEvent): Promise<void> {
       if (ev.type === "turn.started") {
@@ -431,11 +433,15 @@ function fakeSink(scope: FakeTurnScope): TurnSink {
         const u = (ev.data as { usage?: TurnUsage }).usage;
         if (u) live.usage = u;
       }
-      await opts.store.addEvent(sessionId, {
-        type: ev.type,
-        payload: JSON.stringify(ev.data),
-        version: ev.version,
-      });
+      await opts.store.addEvent(
+        sessionId,
+        {
+          type: ev.type,
+          payload: JSON.stringify(ev.data),
+          version: ev.version,
+        },
+        turnRowId ?? undefined,
+      );
       opts.bus.emit(`session:${sessionId}`, ev as unknown as Record<string, unknown>);
     },
   };
@@ -492,9 +498,11 @@ async function runFakeTurn(input: {
     sessionId,
     ctx,
     live: { turnId: null, usage: undefined },
+    turnRowId: null,
   };
   const model = req.model ?? opts.modelId;
   const s = await openFakeTurn(scope, req);
+  scope.turnRowId = s.turnRowId;
   const sink = fakeSink(scope);
   const turnOpts = fakeTurnOptions(scope);
   try {

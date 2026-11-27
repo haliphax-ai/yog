@@ -61,7 +61,12 @@ function rateLimitPolicy(config: YogConfig): TurnOptions["rateLimit"] {
 }
 
 /** The engine sink: persist (best effort), log debug, publish on the bus. */
-function turnSink(rt: TurnRuntime, sessionId: string, live: LiveTurnState): TurnSink {
+function turnSink(
+  rt: TurnRuntime,
+  sessionId: string,
+  live: LiveTurnState,
+  turnRowId: number | null,
+): TurnSink {
   return {
     async emit(ev: TurnEvent): Promise<void> {
       const envelope = ev as unknown as SseEnvelope;
@@ -74,11 +79,15 @@ function turnSink(rt: TurnRuntime, sessionId: string, live: LiveTurnState): Turn
       }
       if (rt.store !== undefined) {
         try {
-          await rt.store.addEvent(sessionId, {
-            type: ev.type,
-            payload: JSON.stringify(ev.data),
-            version: ev.version,
-          });
+          await rt.store.addEvent(
+            sessionId,
+            {
+              type: ev.type,
+              payload: JSON.stringify(ev.data),
+              version: ev.version,
+            },
+            turnRowId ?? undefined,
+          );
         } catch {
           // persistence is best effort
         }
@@ -230,7 +239,8 @@ export function makeExecuteTurn(rt: TurnRuntime, usageBySession: UsageBySession)
     // transcript and this turn's prompt row, and persists under this
     // turn's id (the batch slice starts before the pair). An unwound turn
     // keeps its delivered pair — a notice never re-delivers.
-    const { messages, startLen } = await hydrateMessages(rt, sessionId, prompt);
+    const turnRowId = await startTurnRow(rt, sessionId, prompt, model, wake);
+    const { messages, startLen } = await hydrateMessages(rt, sessionId, prompt, turnRowId);
     if (startLen < messages.length - 1) {
       // Something extra (a prelude notice pair) landed between the prior
       // transcript and the prompt row; log it for daemon forensics.
@@ -239,7 +249,6 @@ export function makeExecuteTurn(rt: TurnRuntime, usageBySession: UsageBySession)
         .debug({ startLen, extraRows: messages.length - 1 - startLen }, "turn prelude");
     }
 
-    const turnRowId = await startTurnRow(rt, sessionId, prompt, model, wake);
     const turnOpts = await buildTurnOptions(rt, {
       sessionId,
       model,
@@ -248,7 +257,7 @@ export function makeExecuteTurn(rt: TurnRuntime, usageBySession: UsageBySession)
       usageBySession,
       wake,
     });
-    const sink = turnSink(rt, sessionId, live);
+    const sink = turnSink(rt, sessionId, live, turnRowId);
 
     // (The engine heals announced-but-unanswered tool calls before
     // throwing, so the batch persisted in the catch below already
@@ -319,6 +328,7 @@ async function hydrateMessages(
   rt: TurnRuntime,
   sessionId: string,
   prompt: string,
+  turnRowId: number | null,
 ): Promise<{
   messages: ChatCompletionMessageParam[];
   startLen: number;
@@ -339,7 +349,7 @@ async function hydrateMessages(
     { role: "user", content: prompt },
   ];
   if (prelude !== undefined && notices !== undefined)
-    publishPrelude(rt, sessionId, prelude, notices);
+    publishPrelude(rt, sessionId, prelude, notices, turnRowId);
   return { messages, startLen: prior.length, prelude };
 }
 
@@ -356,6 +366,7 @@ function publishPrelude(
   sessionId: string,
   prelude: DeliveredPrelude[],
   notices: PreludeNotice[],
+  turnRowId: number | null,
 ): void {
   const events: Array<{ type: "tool.call" | "tool.result"; data: Record<string, unknown> }> = [];
   for (const p of prelude) {
@@ -382,7 +393,11 @@ function publishPrelude(
   void notices;
   for (const ev of events) {
     void rt.store
-      ?.addEvent(sessionId, { type: ev.type, payload: JSON.stringify(ev.data), version: 1 })
+      ?.addEvent(
+        sessionId,
+        { type: ev.type, payload: JSON.stringify(ev.data), version: 1 },
+        turnRowId ?? undefined,
+      )
       .catch(() => undefined);
     (rt.bus as unknown as { emit?: (ch: string, ev: unknown) => void })?.emit?.(
       `session:${sessionId}`,

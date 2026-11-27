@@ -193,6 +193,35 @@ describe("listTurnUsages", () => {
     store.close();
   });
 
+  it("addEvent with an explicit turnId pins the row (never the infer-latest turn)", async () => {
+    const store = await SessionStore.open(join(dir, "pin.db"));
+    const session = (await store.createSession()) as any;
+    const first = (await store.addTurn(session.id, {
+      role: "user",
+      content: "q1",
+      status: "running",
+    })) as any;
+    const second = (await store.addTurn(session.id, {
+      role: "user",
+      content: "q2",
+      status: "running",
+    })) as any;
+    await store.addEvent(
+      session.id,
+      { type: "tool.call", payload: JSON.stringify({ id: "c1", name: "bash" }) },
+      first.id,
+    );
+    const events = await store.listEvents(session.id);
+    expect(events).toHaveLength(1);
+    expect(events[0].turn_id).toBe(first.id);
+    expect(events[0].turn_id).not.toBe(second.id);
+    // No explicit id keeps the infer-latest fallback (existing callers).
+    await store.addEvent(session.id, { type: "message.delta", payload: "x" });
+    const after = await store.listEvents(session.id);
+    expect(after[1].turn_id).toBe(second.id);
+    store.close();
+  });
+
   it("omits turns that have neither usage nor duration", async () => {
     const store = await SessionStore.open(join(dir, "empty.db"));
     const session = (await store.createSession()) as any;

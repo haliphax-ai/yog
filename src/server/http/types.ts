@@ -38,7 +38,11 @@ export interface StoreBoundary {
     sessionId: string,
     turn: { role: string; content: string; status: string; model?: string },
   ): unknown;
-  addEvent?(sessionId: string, event: { type: string; payload: string; version?: number }): unknown;
+  addEvent?(
+    sessionId: string,
+    event: { type: string; payload: string; version?: number },
+    turnId?: number,
+  ): unknown;
   listTurns?(sessionId: string): unknown[];
   listEvents?(sessionId: string): unknown[];
   getTranscript?(
