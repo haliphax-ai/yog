@@ -36,7 +36,16 @@ import {
   type UsageBySession,
   unwireBashTool,
   wireBashTool,
+  createPreludeSink,
+  registerJobsCliCommand,
 } from "./daemon/index.ts";
+import {
+  jobsBoundary,
+  JobManager,
+  type JobManagerDeps,
+  type JobManagerOptions,
+} from "./jobs/index.ts";
+import { defaultWorkers } from "../config.ts";
 
 /** Options accepted by {@link createDaemon}. */
 export interface DaemonOptions {
@@ -130,15 +139,46 @@ async function composeDaemon(
   // terminal cut (abort/error) even when no turn.finished is emitted.
   const usageBySession: UsageBySession = new Map();
   const modelId = config.model;
+  // Per-session prelude notices: drained by the next turn each session
+  // starts (in-band `harness_notice` pair); purged on session purge.
+  const prelude = createPreludeSink();
 
   // --- orchestrator drives every turn through executeTurn (cross-session
   // parallelism, per-session FIFO, abort fan-out) ---
-  const executeTurn = makeExecuteTurn({ config, modelId, bus, ...runtime }, usageBySession);
+  const executeTurn = makeExecuteTurn(
+    { config, modelId, bus, prelude, ...runtime },
+    usageBySession,
+  );
   const orchestrator = new SessionOrchestrator({
     store: runtime.store,
     pool: runtime.pool,
     executeTurn,
   });
+
+  // --- background jobs (yog#91): the JobManager owns the detach seam's
+  // other half — slots, the wake ladder, the cap, wake-turn delivery ---
+  const jobs = buildJobManager(config, modelId, {
+    pool: runtime.pool,
+    orchestrator,
+    prelude,
+    scheduler: runtime.scheduler,
+    recordSettled:
+      runtime.state !== undefined ? (rec) => runtime.state!.recordToolCall(rec) : undefined,
+    modelFor: (sessionId) => lastTurnModel(runtime.store, sessionId),
+    // Job lifecycle rides the same bus the turn events stream on: the
+    // client's drawer renders live rows from job.started/job.settled
+    // instead of polling jobs.get every 2s.
+    jobEvents: (sessionId, envelope) =>
+      (bus as unknown as { emit: (ch: string, ev: unknown) => void }).emit(`session:${sessionId}`, {
+        id: 0,
+        type: envelope.type,
+        version: 1,
+        ts: Date.now(),
+        data: envelope.data,
+      }),
+  });
+  jobs.wire();
+  registerJobsCliCommand(jobs);
 
   const compaction = buildCompaction(config, runtime, modelId);
   const shake = buildShake(runtime);
@@ -154,6 +194,7 @@ async function composeDaemon(
         "transcript",
         "abort",
         "rate-limit-retry",
+        "background-jobs",
         ...(runtime.skills !== undefined ? ["skills"] : []),
       ],
       messageTypes: [...MESSAGE_TYPES],
@@ -170,7 +211,9 @@ async function composeDaemon(
     ...(shake !== undefined ? { shake } : {}),
     ...(runtime.skills !== undefined ? { skills: runtime.skills } : {}),
     onUsageFor: (sessionId: string) => usageBySession.get(sessionId),
+    prelude,
     onAbortKillTool: (sessionId: string) => abortBash(sessionId),
+    jobs: jobsBoundary(jobs),
   };
 
   const server = createHttpServer(deps);
@@ -181,6 +224,7 @@ async function composeDaemon(
   // unmount, state), then exit.
   const shutdown = async (): Promise<void> => {
     await closeServer(server).catch(() => {});
+    jobs.close();
     unwireBashTool();
     await runtime.close();
   };
@@ -239,6 +283,45 @@ function buildShake(
     return createShakeRunner({ store: runtime.store, registry: tools });
   } catch (err) {
     logger.warn(`[yog] warning: shake unavailable (${(err as Error).message}); continuing`);
+    return undefined;
+  }
+}
+
+/**
+ * Background-jobs manager: resolve the config-derived options (the slot
+ * default mirrors the worker pool's `max(1, cpus - 1)`, handed down as a
+ * plain value by the config module) and inject the runtime boundaries.
+ */
+function buildJobManager(config: YogConfig, modelId: string, deps: JobManagerDeps): JobManager {
+  const slots = config.bgMaxJobsPerSession ?? defaultWorkers();
+  const opts: JobManagerOptions = {
+    detachMs: config.bgDetachMs,
+    maxJobsPerSession: slots,
+    maxJobsTotal: config.bgMaxJobsTotal ?? slots * 4,
+    wakeLadderMs: config.bgWakeLadderMs,
+    jobMaxMs: config.bgJobMaxMs,
+    jobTtlMs: config.bgJobTtlMs ?? 24 * 60 * 60 * 1000,
+    toolOutputLimit: config.toolOutputLimit ?? 50_000,
+    // A wake turn delivers at most a handful of jobs: the per-job streams
+    // are already budget-capped, but the BATCH size is the multiplier that
+    // overflowed the context window (3.2 MB prompt, turn 635).
+    maxJobsPerWake: config.bgMaxJobsPerWake ?? 8,
+    modelId,
+  };
+  return new JobManager(opts, deps);
+}
+
+/** The session's last turn's model id (wake turns reuse it). */
+async function lastTurnModel(
+  store: { listTurns?(sessionId: string): Promise<unknown> } | undefined,
+  sessionId: string,
+): Promise<string | undefined> {
+  if (store?.listTurns === undefined) return undefined;
+  try {
+    const turns = (await store.listTurns(sessionId)) as Array<{ model?: unknown }>;
+    const last = turns.at(-1);
+    return typeof last?.model === "string" ? last.model : undefined;
+  } catch {
     return undefined;
   }
 }

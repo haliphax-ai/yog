@@ -32,6 +32,14 @@ export interface ToolContext {
    * never reads configuration).
    */
   stateDir?: string;
+  /**
+   * Job id stamped when the call detaches into a background job (yog#90):
+   * the registry mutates the live context it built, so a still-running
+   * tool observes the stamp. Observable behavior: the bash tool skips its
+   * saveState write-back (the detached job's shell state is scratch-only),
+   * and the registry's abort race disarms itself.
+   */
+  detached?: string;
 }
 
 export interface ToolSpec<

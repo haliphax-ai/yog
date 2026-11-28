@@ -303,6 +303,12 @@ async function newSession(): Promise<string> {
   return ((await json(res)) as { session: { id: string } }).session.id;
 }
 
+/** The `turn.start` reply's queued flag (the FIFO-wait signal). */
+async function queuedOf(startRes: Response): Promise<boolean> {
+  const body = (await dataOf(startRes)) as { queued?: boolean };
+  return body?.queued === true;
+}
+
 /** Start a turn on an open stream; returns the stream handle + start response. */
 async function startTurn(sessionId: string) {
   const stream = await openStream(base, sessionId);
@@ -332,6 +338,29 @@ async function waitForTranscript(
 }
 
 describe("turn.abort message", () => {
+  it("the turn.start reply reports queued only when an earlier turn is live", async () => {
+    const sid = await newSession();
+    const first = await startTurn(sid);
+    expect(first.startRes.status).toBe(202);
+    expect(await queuedOf(first.startRes)).toBe(false); // nothing was live before it
+
+    // A second submit while the first is in flight: queued behind it.
+    const second = await startTurn(sid);
+    expect(await queuedOf(second.startRes)).toBe(true);
+
+    // Drain: abort kills every live handle in the FIFO chain.
+    await abortTurn(sid);
+    await first.stream.collectUntil((fs) => fs.some((f) => f.event === "turn.aborted"), 3_000);
+    first.stream.abort();
+    second.stream.abort();
+    await waitForTranscript(sid, (ms) => ms.some((m) => m.role === "assistant"));
+
+    // The queue drained: a fresh submit is not queued.
+    const third = await startTurn(sid);
+    expect(await queuedOf(third.startRes)).toBe(false);
+    third.stream.abort();
+  });
+
   it("aborts an in-flight turn, heals the transcript, and reports success", async () => {
     const sid = await newSession();
     const { stream, startRes } = await startTurn(sid);
@@ -505,5 +534,41 @@ describe("turn.abort message", () => {
     } finally {
       activeClientFactory = hangingToolCallClient;
     }
+  });
+
+  it("persists the aborted turn's events once — turn.get replays a single copy", async () => {
+    // yog#146 — the client-side "aborted turn rendered twice": a client
+    // that settles on the live turn.aborted AND falls back to turn.get
+    // recovery re-renders every persisted event. The persistence contract
+    // the recovery path serves is: exactly one copy of each event under
+    // the aborted turn's row id (the engine heals + persists once; the
+    // adapter is the sole turn.aborted writer).
+    const sid = await newSession();
+    const { stream, startRes } = await startTurn(sid);
+    expect(startRes.status).toBe(202);
+    await new Promise((r) => setTimeout(r, 150));
+
+    const res = await abortTurn(sid);
+    expect((await dataOf(res)).status).toBe("aborted");
+    await stream.collectUntil((fs) => fs.some((f) => f.event === "turn.aborted"), 5_000);
+    stream.abort();
+
+    const turns = await store.listTurns(sid);
+    const last = turns.at(-1);
+    const turnId = Number(last?.id);
+    expect(turnId).toBeGreaterThan(0);
+    const events = await store.listEvents(sid);
+    const own = events.filter((e: any) => e.turn_id === turnId);
+    // Each event persists exactly once (the engine sink emits turn.started;
+    // the adapter is the sole turn.aborted writer; the healed tool stub
+    // lives on the transcript, not the event log, in this rig) — a doubled
+    // row would replay twice through turn.get recovery.
+    const counts = new Map<string, number>();
+    for (const e of own) counts.set(e.type, (counts.get(e.type) ?? 0) + 1);
+    for (const [, n] of counts) expect(n).toBe(1);
+    expect(own.some((e: any) => e.type === "turn.started")).toBe(true);
+    expect(own.some((e: any) => e.type === "turn.aborted")).toBe(true);
+    // And the whole stored turn is one replayable copy — no doubled rows.
+    expect(own.length).toBe(new Set(own.map((e: any) => `${e.type}:${e.seq}`)).size);
   });
 });

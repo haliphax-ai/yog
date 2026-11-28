@@ -14,4 +14,10 @@ export {
   stateRoot,
   type AgentId,
 } from "./agents.ts";
+export {
+  RUNS_DIR_NAME,
+  SCRATCH_MAX_AGE_MS,
+  runScratchDir,
+  sweepRunScratchDirs,
+} from "./scratch.ts";
 export { newSessionId } from "./session.ts";

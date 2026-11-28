@@ -128,6 +128,40 @@ describe("SessionOrchestrator per-session FIFO", () => {
   });
 });
 
+describe("SessionOrchestrator abortTurn — the FIFO chain", () => {
+  it("aborts the RUNNING head even when a newer turn is queued behind it", async () => {
+    const started: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((res) => {
+      release = res;
+    });
+    const executeTurn = async (_sessionId: string, req: TurnRequest) => {
+      started.push(String(req.prompt));
+      if (req.prompt === "wake") await gate; // the head hangs mid-flight
+      return { ok: true };
+    };
+    const orchestrator = new SessionOrchestrator({ executeTurn });
+
+    // A wake turn occupies the head; the user's submit queues behind it.
+    const wake = orchestrator.runTurn("s1", { prompt: "wake" });
+    const user = orchestrator.runTurn("s1", { prompt: "user" });
+
+    // Let the queue settle into its stable state, then abort.
+    await delay(20);
+    expect(started).toEqual(["wake"]); // FIFO: only the head is running
+    const aborted = await orchestrator.abortTurn("s1");
+    expect(aborted).toBe(true);
+
+    // BOTH handles reject (the head unwound, the queued turn skipped) —
+    // aborting only the newest handle would leave the wake turn looping.
+    await expect(wake.promise).rejects.toMatchObject({ name: "AbortError" });
+    await expect(user.promise).rejects.toMatchObject({ name: "AbortError" });
+    release();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+});
+
 describe("SessionOrchestrator abortTurn", () => {
   it("aborts an in-flight turn and signals executeTurn", async () => {
     let sawSignal = false;

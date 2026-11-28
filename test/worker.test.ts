@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -217,6 +217,46 @@ describe("WorkerClient", () => {
   });
 });
 
+describe("WorkerClient pid ops", () => {
+  it("bash.pid returns null ids when the worker is idle", async () => {
+    const client = await startWorker();
+    await expect(client.bashPid()).resolves.toEqual({ pid: null, pgid: null });
+  });
+
+  it("bash.pid reports the running child without queueing, and BashRunOk carries settle-time pid/pgid", async () => {
+    const client = await startWorker();
+    // A long child: the pid request must answer while the script runs.
+    // Barrier on the NON-destructive pid probe: a non-null pid is proof
+    // the bash child is up (the same pattern the workpool abort test
+    // uses). The probe loop is NOT the test's time budget — vi.waitFor
+    // owns the deadline, so a loaded runner can never exhaust both.
+    const pending = client.runBash("sleep 10");
+    const ids = await vi.waitFor(
+      async () => {
+        const probe = await client.bashPid();
+        expect(probe.pid).not.toBeNull();
+        expect(probe.pgid).not.toBeNull();
+        return probe;
+      },
+      { timeout: 20_000, interval: 100 },
+    );
+    // pgid === pid: the wrapper child is its own process group leader,
+    // so `kill -- -<pid>` addresses the whole tree.
+    expect(ids.pid).toBeGreaterThan(0);
+    expect(ids.pgid).toBe(ids.pid);
+    // The settle response carries the same ids for forensics.
+    let r: WorkerResponse | undefined;
+    const r0 = pending.then((v) => (r = v));
+    await expect(client.bashPid())
+      .resolves.toEqual({ pid: null, pgid: null })
+      .catch(() => {});
+    await expect(client.abortBash()).resolves.toBe(true);
+    await r0;
+    expectOk(r!);
+    expect(r!.pid).toBe(ids.pid);
+    expect(r!.pgid).toBe(ids.pgid);
+  }, 30_000);
+});
 describe("WorkerClient abort", () => {
   it("abortBash returns false when the worker is idle", async () => {
     const client = await startWorker();

@@ -10,6 +10,7 @@ import { SessionOrchestrator, type TurnRequest } from "../src/server/orchestrato
 import { TurnEngine } from "../src/turn/index.ts";
 import type { TurnEvent, TurnOptions, TurnSink, TurnUsage } from "../src/turn/index.ts";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions.mjs";
+import { deliverPrelude, type PreludeSink } from "../src/server/daemon/prelude.ts";
 import type OpenAI from "openai";
 import type { ToolRegistry } from "../src/toolkit/index.ts";
 
@@ -326,6 +327,11 @@ interface OrchestratorFakeOptions {
    * backoff ladder; production wires config.rateLimit* here.
    */
   rateLimit?: TurnOptions["rateLimit"];
+  /** Per-session prelude notices, drained at hydrate like serve.ts. */
+  prelude?: PreludeSink;
+  /** Mirror the daemon's skills injection: unshift a system row onto the
+   *  hydrated messages after hydrate (before the engine runs). */
+  skillsInject?: boolean;
 }
 
 /** The turn row as addTurn resolves it (id is what the fake needs). */
@@ -342,7 +348,7 @@ function turnRowIdOf(turnRow: TurnRowLike): number | null {
  * `SessionOrchestrator` (abort fan-out, per-session FIFO), with serve.ts's
  * `executeTurn` semantics — executeTurn owns the turn row, the sink
  * persists each event once and publishes it on the bus, the settled batch
- * (`messages.slice(startLen)`) lands in one `appendMessages`, and the row
+ * (everything from the prompt row on) lands in one `appendMessages`, and the row
  * settles `finished` / `aborted` / `error` (the failure batch is
  * engine-healed first — yog#42).
  */
@@ -368,6 +374,8 @@ interface FakeTurnScope {
   sessionId: string;
   ctx: { signal?: AbortSignal };
   live: LiveFakeTurn;
+  /** The open turn row (events persist under it, like the real sink). */
+  turnRowId: number | null;
 }
 
 /** Everything one fake turn needs, shared by its helper functions. */
@@ -386,26 +394,50 @@ interface LiveFakeTurn {
 async function openFakeTurn(
   scope: FakeTurnScope,
   req: TurnRequest,
-): Promise<{ messages: ChatCompletionMessageParam[]; startLen: number; turnRowId: number | null }> {
+): Promise<{
+  messages: ChatCompletionMessageParam[];
+  promptValue: string;
+  pairCount: number;
+  turnRowId: number | null;
+}> {
   const { opts, capture, sessionId } = scope;
   const prompt = String(req.prompt ?? "");
   const model = req.model ?? opts.modelId;
   const prior = (await opts.store.getTranscript(sessionId)) as ChatCompletionMessageParam[];
-  const messages: ChatCompletionMessageParam[] = [...prior, { role: "user", content: prompt }];
+  // Drain the prelude queue exactly like serve.ts's hydrateMessages: the
+  // notice pair lands between the prior transcript and the prompt row.
+  const notices = opts.prelude?.drain(sessionId);
+  const prelude = notices !== undefined ? deliverPrelude(notices) : undefined;
+  const messages: ChatCompletionMessageParam[] = [
+    ...prior,
+    ...(prelude ?? []).flatMap((p) => [
+      p.call as ChatCompletionMessageParam,
+      p.result as ChatCompletionMessageParam,
+    ]),
+    { role: "user", content: prompt },
+  ];
   const turnRow = (await opts.store.addTurn(sessionId, {
     role: "user",
     content: prompt,
     status: "running",
     model,
+    // The jobs manager stamps its wake turns; the marker rides the row
+    // exactly like the real executeTurn.
+    wake: req.wake === true,
   })) as TurnRowLike;
   capture.calls.push({ sessionId, messages, model });
   capture.usageBySession.set(sessionId, undefined);
-  return { messages, startLen: prior.length, turnRowId: turnRowIdOf(turnRow) };
+  return {
+    messages,
+    promptValue: prompt,
+    pairCount: prelude?.length ?? 0,
+    turnRowId: turnRowIdOf(turnRow),
+  };
 }
 
 /** The fake's sink: capture ids/usage, persist once, publish on the bus. */
 function fakeSink(scope: FakeTurnScope): TurnSink {
-  const { opts, sessionId, live } = scope;
+  const { opts, sessionId, live, turnRowId } = scope;
   return {
     async emit(ev: TurnEvent): Promise<void> {
       if (ev.type === "turn.started") {
@@ -414,11 +446,15 @@ function fakeSink(scope: FakeTurnScope): TurnSink {
         const u = (ev.data as { usage?: TurnUsage }).usage;
         if (u) live.usage = u;
       }
-      await opts.store.addEvent(sessionId, {
-        type: ev.type,
-        payload: JSON.stringify(ev.data),
-        version: ev.version,
-      });
+      await opts.store.addEvent(
+        sessionId,
+        {
+          type: ev.type,
+          payload: JSON.stringify(ev.data),
+          version: ev.version,
+        },
+        turnRowId ?? undefined,
+      );
       opts.bus.emit(`session:${sessionId}`, ev as unknown as Record<string, unknown>);
     },
   };
@@ -450,11 +486,37 @@ function fakeTurnOptions(scope: FakeTurnScope): TurnOptions {
  */
 async function settleFakeTurn(
   scope: FakeTurnScope,
-  s: { messages: ChatCompletionMessageParam[]; startLen: number; turnRowId: number | null },
+  s: {
+    messages: ChatCompletionMessageParam[];
+    promptValue: string;
+    pairCount: number;
+    turnRowId: number | null;
+  },
   status: string,
 ): Promise<void> {
   const { opts, sessionId, live } = scope;
-  const batch = s.messages.slice(s.startLen);
+  let first = -1;
+  for (let i = s.messages.length - 1; i >= 0; i--) {
+    const m = s.messages[i] as { role?: unknown; content?: unknown };
+    if (m.role === "user" && m.content === s.promptValue) {
+      first = i;
+      break;
+    }
+  }
+  first = Math.max(0, first - 2 * s.pairCount);
+  const batch = s.messages.slice(first);
+  if (process.env["DEBUG_BATCH"] === "1") {
+    console.log(
+      "DEBUG settle first=",
+      first,
+      "len=",
+      s.messages.length,
+      "shapes=",
+      JSON.stringify(
+        s.messages.map((m: any) => `${m.role}:${String(m.content ?? "").slice(0, 10)}`),
+      ),
+    );
+  }
   await opts.store.appendMessages(sessionId, batch, s.turnRowId);
   await opts.store.finishTurn(sessionId, s.turnRowId, status, live.usage).catch(() => undefined);
 }
@@ -475,9 +537,14 @@ async function runFakeTurn(input: {
     sessionId,
     ctx,
     live: { turnId: null, usage: undefined },
+    turnRowId: null,
   };
   const model = req.model ?? opts.modelId;
   const s = await openFakeTurn(scope, req);
+  scope.turnRowId = s.turnRowId;
+  if (opts.skillsInject === true) {
+    s.messages.unshift({ role: "system", content: "sys" } as ChatCompletionMessageParam);
+  }
   const sink = fakeSink(scope);
   const turnOpts = fakeTurnOptions(scope);
   try {

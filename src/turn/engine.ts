@@ -78,7 +78,12 @@ export class TurnEngine {
     // usage seen anywhere in the turn, carried on the terminal error event.
     let lastUsage: TurnUsage | undefined;
     try {
-      await emit("turn.started", { turnId, model: modelId, ts: Date.now() });
+      await emit("turn.started", {
+        turnId,
+        model: modelId,
+        ts: Date.now(),
+        ...(opts.wake ? { wake: true } : {}),
+      });
 
       // Abort probe: checked at every await boundary so an abort arriving
       // mid-tool-call or mid-stream still unwinds the turn deterministically.

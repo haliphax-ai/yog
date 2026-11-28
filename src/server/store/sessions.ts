@@ -135,10 +135,16 @@ export class SessionStore {
     sessionId: string,
     turn: { role: string; content: string; status: string; model?: string } & {
       revive?: boolean;
+      /** Background-jobs wake turn (no human prompt behind it). */
+      wake?: boolean;
     },
   ): Promise<any> {
     const now = Date.now();
-    const requestJson = JSON.stringify({ prompt: turn.content, model: turn.model ?? "unknown" });
+    const requestJson = JSON.stringify({
+      prompt: turn.content,
+      model: turn.model ?? "unknown",
+      ...(turn.wake && { wake: true }),
+    });
     const finished = turn.status === "running" ? null : now;
     const inserted = await this.db("turns").insert({
       session_id: sessionId,
@@ -177,11 +183,12 @@ export class SessionStore {
   async addEvent(
     sessionId: string,
     event: { type: string; payload: string; version?: number },
+    turnId?: number,
   ): Promise<any> {
-    const turn = await this.db("turns")
-      .where("session_id", sessionId)
-      .orderBy("id", "desc")
-      .first("id");
+    const scoped = this.db("turns").where("session_id", sessionId);
+    const turn = await (
+      turnId === undefined ? scoped.orderBy("id", "desc") : scoped.where("id", turnId)
+    ).first("id");
     if (!turn) {
       throw new Error(`cannot add event: session ${sessionId} has no turns`);
     }
@@ -347,9 +354,7 @@ export class SessionStore {
     seq: number,
     patch: { content?: string | null; tool_calls_json?: string | null },
   ): Promise<void> {
-    const update: Record<string, unknown> = {};
-    if (patch.content !== undefined) update.content = patch.content;
-    if (patch.tool_calls_json !== undefined) update.tool_calls_json = patch.tool_calls_json;
+    const update = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
     if (Object.keys(update).length === 0) return;
     await this.db("session_messages").where({ session_id: sessionId, seq }).update(update);
   }

@@ -59,9 +59,13 @@ with a persistent shell and the harness's descriptors:
   between calls. Each call starts in the agent's HOME (`agentHome`),
   re-applies the prior snapshot (the prior cwd is `cd`ed into before the
   command runs), and the resulting state is snapshotted (`export -p` +
-  `declare -f` + `pwd -P`) into the session's harness dir under the state
-  root (`<stateRoot>/harness/<sessionId>`, keyed by session: never the
-  agent's HOME and never a single shared dir) after every call. The agent
+  `declare -f` + `pwd -P`) into a per-call scratch dir under the session's
+  harness root (`<stateRoot>/harness/<sessionId>/runs/<uuid>`; keyed by
+  session, never the agent's HOME and never a single shared dir). The
+  snapshot is mirrored to the agentfs db (the rewindable home) and the
+  scratch dir is deleted when the call settles — a live child writes only
+  its own dir, so a future detached call can never last-writer-wins
+  against a foreground one. The agent
   rc (`BASH_ENV`, falling back to `~/.bashrc`) is sourced before each
   command as the home baseline. PATH is layered per run (none of the layers
   are persisted — each call re-derives them from the session's current
@@ -90,9 +94,15 @@ Every response also carries `error?: string`:
 
 The bash tool runs in a dedicated worker process (JSONL over stdio, serial
 execution because the shell is stateful, SIGTERM forwarded to the running
-child so teardown never leaves a shell behind). The pool soft-pins
-sessions: the first worker that serves a session becomes its preferred
-member while it is free.
+child so teardown never leaves a shell behind). The pool soft-pins runs:
+the first worker that serves a run key becomes its preferred member while
+it is free. Runs are keyed by the session id; the worker protocol also
+exposes the running child's process ids out of band (`bash.pid`, mirroring
+`bash.abort`: it answers the current child without queueing behind the
+serial chain), and a settle response carries `pid`/`pgid` — the wrapper
+child is its own process group leader (`detached` spawn), so
+`kill -- -<pid>` takes the whole process tree. This is the agent's kill
+path for long-running work that detaches into a background job.
 
 ### Tool output limiting
 
@@ -125,6 +135,86 @@ and add it to the registry:
 const registry = new ToolRegistry([bashTool, myTool]);
 // runTurn(client, modelId, messages, registry)
 ```
+
+### Background-job detach seam (inert until armed)
+
+The registry consults a module-level detach policy at a wall-clock
+threshold, so any tool call (not just bash) can detach into a background
+job instead of holding the turn hostage. Until a policy is armed
+(`setToolDetachPolicy` from the composition root — the same injection
+pattern as the output budgets), the seam is inert: no timer, no behavior
+change.
+
+When the background-jobs manager arms it (shipped: `JobManager`,
+`src/server/jobs/`), a call still running after the threshold (default
+60s, config `bgDetachMs`) races the policy:
+
+- **detach** (a session slot is free) — the engine's await resolves with a
+  synthetic `{"backgroundJobId": …}` tool result (the transcript gets a
+  normal tool row; no dangling call, no healer involvement), while the
+  real result keeps running for the manager to deliver later as a wake
+  turn. A detached call is immune to `turn.abort` by construction (the
+  registry's abort race disarms), and the bash tool skips its shell-state
+  write-back (background scratch state never touches the live mirror).
+  The live bash run is retargeted under `bg:<jobId>` in the worker pool,
+  so a later session-keyed abort can never kill it; the job's row carries
+  the wrapper child's `pid` (`kill -- -<pid>` addresses the whole process
+  group).
+- **terminate** (no free job slot) — the call is killed via the caller's
+  kill hook (bash: the existing session-keyed abort) or simply abandoned
+  (generic tools), and the turn gets a `terminated: …` error row. No job
+  row is registered.
+
+### Background jobs: slots, ladder, cap, wake turns
+
+The manager is per-session, in-memory only (a restart drops every job,
+timer, and rung — completion forensics survive in the agentfs audit
+rows):
+
+- **Slots** — `bgMaxJobsPerSession` per session (default: the worker-pool
+  size, `max(1, cpus - 1)`), plus `bgMaxJobsTotal` daemon-wide across all
+  sessions (default 4× the slot default). A hung job occupies its slot
+  until the cap; a race with no capacity kills the call immediately
+  ("no free background-job slot" / "max concurrent jobs").
+- **Wake ladder** — `bgWakeLadderMs` (default 10s → 30m ceiling). A job
+  finishing while the session is idle delivers at once as a _wake turn_
+  (an ordinary turn: own row, events, SSE, hydration; a dormant session
+  is revived). Jobs finishing during a live turn ride the next wake,
+  batched into one shared prompt. The rung advances only when a wake
+  fires with nothing finished and resets only when the queue clears.
+- **Cap** — `bgJobMaxMs` (default 6h) terminates a still-running job
+  ("max runtime"); the termination rides a wake turn like any result.
+- **`turn.abort` while idle** — kills every job for the session, wipes
+  timers, resets the rung, and queues a `background-jobs` prelude notice
+  (delivered in-band as the synthetic `harness_notice` pair on the next
+  turn). **No wake turn.** `turn.abort` while generating only kills the
+  foreground call; detached jobs survive.
+- **`session.detach {purge: true}`** — kills the session's jobs first (no
+  zombie wakes against a purged session).
+
+Agents inspect and manage their jobs through `yog jobs` (the agent-CLI
+command) and the `jobs.get` message type. `yog jobs` has no session
+context, so it lists every job on the daemon — one row per job (`id`,
+`sessionId`, `tool`, `state`, runtime-or-elapsed, `pid`, `-` when the pid
+is not yet stamped); `yog jobs <id>` shows one job's detail, the settled
+result included, or `unknown job: <id>` for a dead/restarted-away id.
+The kill path for a runaway background bash job is `kill -- -<pid>` inside
+a foreground call — the wrapper child owns its process group, so the
+signal takes the whole tree while the job's slot frees at its settle.
+Clients list or read the same rows over the messages channel with
+`jobs.get` (`{ jobId? }`): session-scoped list, or one job's detail;
+`404 unknown_job` for an id that is not live on this server, `500
+internal` when the daemon was built without the manager.
+
+The idle-abort termination notice is delivered as the synthetic
+`harness_notice` tool-call/result pair on the next turn: the assistant row
+carries one call named `harness_notice` with empty args, and its result is
+`{ hint, notices: [{ kind, body }] }` (kind `background-jobs` here). The
+name is reserved and never advertised in `tools` — clients and models
+should treat the pair as harness-internal state, not a callable tool.
+
+Tool authors need not know about the seam; only the bash tool observes
+`ctx.detached` (to skip persistence).
 
 ## Skills
 
@@ -160,9 +250,11 @@ The harness opens an AgentFS database (per agent id under the configured
   actions are queryable in SQL.
 - The persistent bash shell state (cwd/env/functions) is mirrored into the
   database per session (`session:<id>:shell`), making the harness home
-  rewindable. Both the `harness/<sessionId>` directories and these mirror
-  rows are pruned at daemon startup once untouched for 7 days; there is no
-  scheduled reaper.
+  rewindable. The per-call scratch dirs under `harness/<sessionId>/runs/`
+  are the snapshot's working copy, deleted at call settle; whatever
+  survives is wiped at daemon startup (nothing resumes across a restart)
+  and a 24h reaper prunes leaks. The mirror rows are pruned at daemon
+  startup once untouched for 7 days.
 - Snapshot state with `cp .agentfs/yog.db snapshot.db` (the SDK
   checkpoints WAL on `snapshotTo`); restore by pointing `statePath` at the
   copy.

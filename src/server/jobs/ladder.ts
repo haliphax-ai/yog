@@ -1,0 +1,66 @@
+/**
+ * Wake-ladder arithmetic (yog#91), extracted from the manager so each
+ * ladder rule stays a small, individually readable predicate:
+ *
+ * - the effective delay is the rung's ms clamped to the ceiling rung;
+ * - the rung advances (toward the ceiling) when a wake fires with nothing
+ *   finished since the last wake;
+ * - the rung resets to 0 only when the queue clears;
+ * - a wake turn that settles with jobs still pending re-arms at the
+ *   current rung (hot-loop guard).
+ */
+import type { BackgroundJob } from "./types.ts";
+
+/** The ladder delay for a rung (clamped to the ceiling rung). */
+export function rungDelayMs(ladder: readonly number[], rung: number): number {
+  return ladder[Math.min(rung, ladder.length - 1)]!;
+}
+
+/** The next rung after a wake with nothing finished (ceiling-clamped). */
+export function advanceRung(ladder: readonly number[], rung: number): number {
+  return Math.min(rung + 1, ladder.length - 1);
+}
+
+/**
+ * True when the session's queue is clear: no undelivered job remains
+ * (pending, running, or otherwise unsettled). The rung resets only on
+ * this. A RUNNING job keeps the queue non-clear: a wake that fires while
+ * the only job is still executing must NOT advance the rung — the ladder
+ * exists to re-invoke the model about live work, and burning rungs on
+ * no-op wakes (the sleep-300 ladder test) pushed the next wake past the
+ * job's own settle, so no ladder wake ever reached the model.
+ */
+export function queueCleared(jobs: readonly BackgroundJob[], sessionId: string): boolean {
+  return !jobs.some((j) => j.sessionId === sessionId && !j.delivered);
+}
+
+/** The session's undelivered, settled jobs in pending order. */
+export function collectPending(
+  lookup: (id: string) => BackgroundJob | undefined,
+  pendingIds: readonly string[],
+): BackgroundJob[] {
+  return pendingIds
+    .map((id) => lookup(id))
+    .filter((j): j is BackgroundJob => j !== undefined && j.delivered !== true);
+}
+
+/**
+ * Slice a settled batch to the per-wake cap (the context-window guard,
+ * yog#100 follow-up): the first `cap` jobs deliver on this wake; the
+ * rest stay pending (in pending order) and ride the next wake turn.
+ * Pure: no mutation — the caller takes both halves explicitly.
+ */
+export function sliceToWakeCap(
+  jobs: readonly BackgroundJob[],
+  pendingIds: readonly string[],
+  cap: number,
+): { delivered: BackgroundJob[]; pending: string[] } {
+  const max = Math.max(1, cap);
+  if (jobs.length <= max) return { delivered: [...jobs], pending: [...pendingIds] };
+  const delivered = jobs.slice(0, max);
+  const deliveredIds = new Set(delivered.map((j) => j.id));
+  const overflow = jobs.filter((j) => !deliveredIds.has(j.id));
+  const pending = overflow.map((j) => j.id);
+  for (const id of pendingIds) if (!deliveredIds.has(id)) pending.push(id);
+  return { delivered, pending };
+}

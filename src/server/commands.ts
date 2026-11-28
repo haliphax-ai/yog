@@ -9,7 +9,10 @@
  * call, and `argField` the data field free-text line args land in. The
  * slash name is client-side sugar and never sent to the server.
  *
- * Descriptors live next to their implementations (compaction, shake,
+ * Descriptors live next to their implementations (compaction, shake, jobs)
+ * and the composition root concatenates by what actually wired, so
+ * presence in the list IS availability — a command the daemon cannot serve
+ * is never advertised.
  * skills) and the composition root concatenates by what actually wired, so
  * presence in the list IS availability — a command the daemon cannot serve
  * is never advertised.

@@ -17,6 +17,8 @@ export type {
   BashRunErr,
   BashRunOk,
   BashRunRequest,
+  BashPidRequest,
+  BashPidOk,
   ShellSnapshot,
   WorkerRequest,
   WorkerResponse,

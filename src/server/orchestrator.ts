@@ -73,6 +73,9 @@ export class SessionOrchestrator {
   private readonly tails = new Map<string, Promise<void>>();
   /** Live turn per session: abort controller + handle (queued or in-flight). */
   private readonly turns = new Map<string, TurnHandle>();
+  /** EVERY live handle per session (a FIFO chain can hold several —
+   *  a wake turn mid-flight plus user submits queued behind it). */
+  private readonly liveTurns = new Map<string, Set<TurnHandle>>();
 
   constructor(deps: SessionOrchestratorDeps = {}) {
     this.deps = deps;
@@ -123,6 +126,7 @@ export class SessionOrchestrator {
       },
     };
     this.turns.set(sessionId, handle);
+    this.#trackLive(sessionId, handle);
 
     // The queued unit of work: runs only after this session's previous turn
     // settles, and is skipped entirely if aborted while still queued.
@@ -152,16 +156,48 @@ export class SessionOrchestrator {
     // then drop the registry entry so the map doesn't grow unbounded.
     turn.then(
       (value) => {
-        if (this.turns.get(sessionId) === handle) this.turns.delete(sessionId);
+        this.#retireTurn(sessionId, handle);
         settle({ ok: true, value });
       },
       (error) => {
-        if (this.turns.get(sessionId) === handle) this.turns.delete(sessionId);
+        this.#retireTurn(sessionId, handle);
         settle({ ok: false, error });
       },
     );
 
     return handle;
+  }
+
+  /**
+   * True when the session has a live turn handle (queued or in-flight).
+   * The background-jobs manager gates "finished while a foreign turn is
+   * active → mark pending" on this: a settle observed while `isBusy` rides
+   * the next wake instead of delivering now.
+   */
+  isBusy(sessionId: string): boolean {
+    return this.turns.has(sessionId);
+  }
+
+  /**
+   * Call `cb` when the session's current tail settles with no newer turn
+   * chained on behind it (the session went idle). Used by the background-
+   * jobs manager to deliver results the moment the tail settles; a turn
+   * submitted between the tail's settle and the callback's effects simply
+   * makes the delivery take the pending path instead (no gate is lost —
+   * `isBusy` is re-checked at delivery time). Returns an unsubscribe.
+   */
+  onIdle(sessionId: string, cb: () => void): () => void {
+    const tail = this.tails.get(sessionId) ?? Promise.resolve();
+    let live = true;
+    void tail.then(() => {
+      if (!live) return;
+      // A newer turn chained on since: its own tail will fire onIdle.
+      if (this.tails.get(sessionId) !== undefined) return;
+      cb();
+    });
+    return () => {
+      live = false;
+    };
   }
 
   /**
@@ -180,15 +216,39 @@ export class SessionOrchestrator {
     sessionId: string,
     killTool?: (sessionId: string) => Promise<boolean> | boolean,
   ): Promise<boolean> {
-    const handle = this.turns.get(sessionId);
-    if (!handle) return false;
+    // The executing turn first (its engine loop is live), then every
+    // queued one — a FIFO chain can hold several; aborting only the
+    // newest let the still-running head keep looping tools (the
+    // "aborted but generation continues" report).
+    const live = [...(this.liveTurns.get(sessionId) ?? [])];
+    if (live.length === 0) return false;
     try {
       if (killTool) await killTool(sessionId);
     } catch {
       // Tool kill is best effort: the turn unwinds regardless.
     }
-    handle.abort(abortTurnReason());
+    for (const handle of live) handle.abort(abortTurnReason());
     return true;
+  }
+
+  /** Track a handle as live for the session's abort surface. */
+  #trackLive(sessionId: string, handle: TurnHandle): void {
+    let set = this.liveTurns.get(sessionId);
+    if (set === undefined) {
+      set = new Set();
+      this.liveTurns.set(sessionId, set);
+    }
+    set.add(handle);
+  }
+
+  /** A turn settled: drop it from every registry it might occupy. */
+  #retireTurn(sessionId: string, handle: TurnHandle): void {
+    const set = this.liveTurns.get(sessionId);
+    if (set !== undefined) {
+      set.delete(handle);
+      if (set.size === 0) this.liveTurns.delete(sessionId);
+    }
+    if (this.turns.get(sessionId) === handle) this.turns.delete(sessionId);
   }
 }
 

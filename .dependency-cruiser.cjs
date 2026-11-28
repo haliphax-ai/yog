@@ -21,6 +21,9 @@
  *   src/state/**      agentfs-backed home/state (the only agentfs-SDK importer)
  *   src/skills/**     leaf domain: agent-skills subsystem (uses host for
  *                     file I/O, like every other leaf)
+ *   src/schedule/**   absolute leaf domain: cancelable timeouts with an
+ *                     injectable clock + timer impl (imports nothing under
+ *                     src/, not even host)
  *
  * Dependency invariants added with the compaction/shake work (#17-#19):
  *
@@ -33,9 +36,12 @@
  *     exposes a single public door: modules outside a domain may only import
  *     its index.ts barrel (domain-entry-only:*), and leaf domains never
  *     reach up into orchestration/infra (the *-leaf rule family).
- *     single public door: modules outside a domain may only import its
- *     index.ts barrel (domain-entry-only:*), and leaf domains never reach
- *     up into orchestration/infra (the *-leaf rule family).
+ *   - src/schedule/** is an absolute leaf: the cancelable-timeout primitive
+ *     imports nothing under src/ (schedule-leaf) — deterministic time needs
+ *     a dependency-free floor, and consumers get the Scheduler injected.
+ *   - src/server/jobs/** is a leaf below orchestration: the background-jobs
+ *     manager never imports the HTTP adapter, the turn engine, the entry,
+ *     the manifest, or config (jobs-leaf) — everything arrives injected.
  *   - The OpenAI SDK is a transport concern: value imports (client
  *     construction) live only in the server daemon's transport module
  *     (src/server/daemon/openai.ts); the rest of src/ may only import
@@ -73,9 +79,26 @@
 // Subdomain folders (server/daemon, vfs/ops, toolkit/tools) stay internal to
 // their domain: each module inside them is matched by the domain-wide
 // entry-only rule, and the domain composes them through its own
-// sub-barrel so no importer reaches past the domain door.
-const DOMAINS = ["vfs", "toolkit", "worker", "state", "server", "skills", "turn"];
-
+// sub-barrel so no importer reaches past the domain door. server/jobs is
+// listed as its own domain instead: it is a leaf below orchestration (like
+// skills), with a jobs-leaf rule of its own.
+const DOMAINS = [
+  "vfs",
+  "toolkit",
+  "worker",
+  "state",
+  "server",
+  "jobs",
+  "skills",
+  "turn",
+  "schedule",
+];
+// Subdomains that expose a type-only door: modules outside the owning folder
+// may reach into their internals only as `import type` shapes — values are
+// always injected from the composition point. Generated per entry like
+// DOMAINS (see the subdomain-type-only rule family below);
+// tsPreCompilationDeps is what classifies those edges.
+const TYPE_ONLY_SUBDOMAINS = [["server", "daemon"]];
 module.exports = {
   options: {
     exclude: { path: "(\\.git|dist|coverage|sys|sys-test|.harness|\\.serena)" },
@@ -212,6 +235,20 @@ module.exports = {
       },
     },
 
+    // The background-jobs domain is a leaf below orchestration: it serves
+    // the composition root and (via the HTTP adapter's injected boundary)
+    // the message channel, but never reaches up into the adapter, the turn
+    // engine, the entry, the manifest, or config (the manager receives
+    // plain injected values, like every other leaf).
+    {
+      name: "jobs-leaf",
+      severity: "error",
+      from: { path: "^src/server/jobs/" },
+      to: {
+        path: "^src/(server/http/|turn/|turn\\.ts|index\\.ts|register\\.ts|mount\\.ts|config\\.ts)",
+      },
+    },
+
     // The state layer is a leaf below tools/vfs — it never reaches up.
     {
       name: "state-leaf",
@@ -242,6 +279,16 @@ module.exports = {
       },
     },
 
+    // The schedule domain is an absolute leaf: deterministic time needs a
+    // dependency-free floor. It imports nothing under src/ — not host, not
+    // config, not log. Consumers receive the Scheduler via injection.
+    {
+      name: "schedule-leaf",
+      severity: "error",
+      from: { path: "^src/schedule/" },
+      to: { path: "^src/(?!schedule/)" },
+    },
+
     // Configuration is loaded once at the composition root (the CLI entry and
     // the server domain) and handed down as plain values. No other layer may
     // import the config module — consumers receive injected config, so layers
@@ -260,6 +307,20 @@ module.exports = {
       severity: "error",
       from: { path: `^src/(?!${domain}/)` },
       to: { path: `^src/${domain}/(?!index\\.ts$)` },
+    })),
+
+    // Type-only subdomain doors: modules outside the owning folder may reach
+    // into these subdomains only for `import type` shapes — values are always
+    // injected from the composition point. Same value/type split as
+    // openai-client-in-transport-only, generated per entry like DOMAINS.
+    ...TYPE_ONLY_SUBDOMAINS.map(([domain, sub]) => ({
+      name: `subdomain-type-only:${domain}/${sub}`,
+      severity: "error",
+      from: { path: `^src/(?!${domain}/${sub}/)` },
+      to: {
+        path: `^src/${domain}/${sub}/(?!index\\.ts$)`,
+        dependencyTypesNot: ["type-only"],
+      },
     })),
 
     // The wiring manifest is composed only at the composition points: the

@@ -18,6 +18,12 @@ export interface TurnOptions {
   /** Session id stamped on audit rows. */
   sessionId?: string;
   /** Best-effort audit recorder (failures never abort the turn). */
+  /**
+   * Harness-internal turn marker (a background-jobs wake turn): echoed on
+   * `turn.started` so clients can label the generating spinner honestly
+   * instead of implying the user's own prompt is generating.
+   */
+  wake?: boolean;
   recorder?: { record(rec: ToolCallRecord): Promise<void> };
   /**
    * Abort sentinel probed at every await point (round boundary, tool call).

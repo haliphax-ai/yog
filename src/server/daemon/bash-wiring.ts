@@ -7,6 +7,7 @@
  * store (the agent state db), the skill-PATH source (the skills registry),
  * and the abort kill switch — this module adapts one to the other.
  */
+import { rm } from "../../host.ts";
 import type { WorkerResponse } from "../../worker/index.ts";
 import type {
   BashExecutionResult,
@@ -20,8 +21,7 @@ import {
   setShellStateProvider,
   setSkillPathProvider,
 } from "../../toolkit/index.ts";
-import type { AgentFSState } from "../../state/index.ts";
-import { harnessStateDir } from "../../state/index.ts";
+import { runScratchDir, type AgentFSState } from "../../state/index.ts";
 import type { SkillManager } from "../../skills/index.ts";
 import type { WorkerPool } from "../workpool.ts";
 import type { YogConfig } from "../../config.ts";
@@ -34,6 +34,7 @@ function executorResult(resp: WorkerResponse): BashExecutionResult {
       stdout: resp.stdout,
       stderr: resp.stderr,
       exitCode: resp.exitCode,
+      signal: resp.signal ?? null,
       ...(resp.state !== undefined ? { state: resp.state } : {}),
     };
   }
@@ -42,8 +43,13 @@ function executorResult(resp: WorkerResponse): BashExecutionResult {
 
 /**
  * The pool-backed executor. The script id doubles as the abort key (a
- * session's current script is the one an abort kills) and keys the
- * persistent-shell state dir (`<stateRoot>/harness/<sessionId>`).
+ * session's current script is the one an abort kills). Every call runs in
+ * its own scratch state dir (`<stateRoot>/harness/<sid>/runs/<uuid>`,
+ * {@link runScratchDir}), seeded from the `restore` snapshot the
+ * shell-state store loaded, and the dir is deleted when the call settles
+ * — the call's EXIT capture can never last-writer-wins against a live
+ * neighbor, and nothing accumulates. An explicit `stateDir` (tests,
+ * direct callers) passes through untouched and skips the settle delete.
  */
 function poolExecutor(
   pool: WorkerPool,
@@ -51,18 +57,33 @@ function poolExecutor(
   cliBinDir: string,
 ): (script: string, opts?: BashRequestOpts) => Promise<BashExecutionResult> {
   return async (script, opts) => {
+    const sessionId = opts?.scriptId ?? "daemon";
+    // Per-call scratch state dir (`runs/<uuid>`), seeded by the worker from
+    // the snapshot the shell-state store loaded. The call's EXIT capture
+    // writes only here — the live per-session files are never a spawn
+    // target (a live child cannot be redirected: last-writer-wins). The
+    // dir is deleted below once the response settles; the agentfs mirror
+    // stays the persistent record.
+    const scratchDir = opts?.stateDir ?? runScratchDir(sessionId, config.stateRoot);
     try {
-      const sessionId = opts?.scriptId ?? "daemon";
       const resp = await pool.run(sessionId, script, {
-        stateDir: opts?.stateDir ?? harnessStateDir(sessionId, config.stateRoot),
+        stateDir: scratchDir,
         ...(opts?.restore !== undefined ? { restore: opts.restore } : {}),
         ...(opts?.extraPath !== undefined && opts.extraPath.length > 0
           ? { extraPath: opts.extraPath }
           : {}),
         ...(cliBinDir !== "" ? { cliBin: cliBinDir } : {}),
       });
+      // Steady state: one dir per in-flight call. Delete at settle, success
+      // or failure; a failed settle delete is a leak the reaper sweeps.
+      if (opts?.stateDir === undefined) {
+        await rm(scratchDir, { recursive: true, force: true }).catch(() => {});
+      }
       return executorResult(resp);
     } catch (err) {
+      if (opts?.stateDir === undefined) {
+        await rm(scratchDir, { recursive: true, force: true }).catch(() => {});
+      }
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   };

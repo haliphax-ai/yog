@@ -22,7 +22,8 @@ client contract.
 Capabilities carry three orthogonal surfaces. `messageTypes` is the **wire
 surface** (what the messages channel dispatches), `features` the **behavior
 surface** (transport and policy capabilities a client can branch on:
-`messages`, `stream`, `transcript`, `abort`, `rate-limit-retry`, `skills`),
+`messages`, `stream`, `transcript`, `abort`, `rate-limit-retry`,
+`background-jobs`, `skills`),
 and `commands` the **user-facing projection** of the dispatch table — the
 slash commands a human may type. The projection is deliberately narrower
 than `messageTypes`: protocol primitives (`turn.start`, `turn.abort`,
@@ -70,21 +71,25 @@ common. If a surface needs to act on a resource, an interaction is authored
 on that surface with its own semantics — never exposed, projected, or
 aliased from the other surface's command. Today the operator surface
 advertises `compact`/`handoff` (`compaction.run`) and `shake`
-(`transcript.shake`); skills interactions are agent-facing only. A client
+(`transcript.shake`); skills and background jobs are agent-facing only —
+`jobs.get` stays a wire-type read (the jobs _drawer_ is the client's own
+view of it, so a `/jobs` descriptor would only collide with the drawer's
+client-local command). A client
 can offer every advertised command with no bespoke code: build
 `{ type, data: { ...data, [argField]: rest } }` and print the reply.
 
-| Type                                                              | `data`                                              | Response `data`                                                                                                                                        |
-| ----------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `session.get`                                                     | none                                                | `{ session }`                                                                                                                                          |
-| `session.detach`                                                  | `{ purge?: boolean }`                               | `{ session }`, or `{ ok, deleted, id }` with `purge: true` (advisory detach; hard delete with purge)                                                   |
-| `transcript.get`                                                  | `{ afterSeq?, limit? }`                             | the rehydration dump `{ session, messages, turns? }`                                                                                                   |
-| `turn.get`                                                        | `{ turnId }`                                        | terminal turn state `{ turn }` (recovery/replay)                                                                                                       |
-| `turn.abort`                                                      | none                                                | `{ ok, status, aborted: { requested, sessionId, activeToolCall }, session }`                                                                           |
-| `compaction.run`                                                  | `{ kind: "compact" / "handoff", guidance? }`        | `{ ok, kind, summary, model, truncated, sessionId }`; all-or-nothing — on error the reply carries no `sessionId` and the original session is untouched |
-| `transcript.shake`                                                | none                                                | `{ ok, argsTruncated, resultsTruncated, contextSize, session }`                                                                                        |
-| `turn.start`                                                      | `{ prompt, model?, abortOnDisconnect?, streamId? }` | `202 { accepted: true }`; events on the stream (a dormant session is implicitly revived)                                                               |
-| `skills.list` / `skills.load` / `skills.unload` / `skills.status` | `{ name }` for load/unload                          | the skills subsystem's reply (500 `internal` when the daemon was built without it)                                                                     |
+| Type                                                              | `data`                                              | Response `data`                                                                                                                                                                       |
+| ----------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session.get`                                                     | none                                                | `{ session }`                                                                                                                                                                         |
+| `session.detach`                                                  | `{ purge?: boolean }`                               | `{ session }`, or `{ ok, deleted, id }` with `purge: true` (advisory detach; hard delete with purge)                                                                                  |
+| `transcript.get`                                                  | `{ afterSeq?, limit? }`                             | the rehydration dump `{ session, messages, turns? }`                                                                                                                                  |
+| `turn.get`                                                        | `{ turnId }`                                        | terminal turn state `{ turn }` (recovery/replay)                                                                                                                                      |
+| `turn.abort`                                                      | none                                                | `{ ok, status, aborted: { requested, sessionId, activeToolCall, backgroundJobs? }, session }`                                                                                         |
+| `compaction.run`                                                  | `{ kind: "compact" / "handoff", guidance? }`        | `{ ok, kind, summary, model, truncated, sessionId }`; all-or-nothing — on error the reply carries no `sessionId` and the original session is untouched                                |
+| `transcript.shake`                                                | none                                                | `{ ok, argsTruncated, resultsTruncated, contextSize, session }`                                                                                                                       |
+| `turn.start`                                                      | `{ prompt, model?, abortOnDisconnect?, streamId? }` | `202 { accepted, queued? }`; events on the stream (a dormant session is implicitly revived). `queued: true` when another turn on this session is live — this one runs after it (FIFO) |
+| `skills.list` / `skills.load` / `skills.unload` / `skills.status` | `{ name }` for load/unload                          | the skills subsystem's reply (500 `internal` when the daemon was built without it)                                                                                                    |
+| `jobs.get`                                                        | `{ jobId? }`                                        | session-scoped background jobs: a list (or one job's detail with `jobId`); 404 `unknown_job` when the id is not live on this server                                                   |
 
 Turn-start data is `{ "prompt": "...", "model": "..." }`. `prompt` is
 required; `model` defaults to the server's model. **Clients never send
@@ -128,9 +133,11 @@ the engine to unwind.
 4. The turn row settles with status `aborted`.
 
 The response is `{ ok, status, session: { id }, aborted: { requested,
-status, activeToolCall } }`. `status` is `aborted` when a live turn was
-unwound and `idle` when the session had nothing to abort (still `ok: true`;
-idempotent). `aborted.activeToolCall` names the tool call that was killed,
+status, activeToolCall, backgroundJobs? } }`. `status` is `aborted` when a
+live turn was unwound and `idle` when the session had nothing to abort
+(still `ok: true`; idempotent). An idle abort with background jobs on the
+session kills all of them (no wake turn follows); the reply then carries
+the additive `aborted.backgroundJobs` count. `aborted.activeToolCall` names the tool call that was killed,
 if any. Aborts are session-scoped: other sessions' turns are untouched.
 Abort is a capability: `GET /v1/capabilities` advertises it under
 `features`. Backoff waits are abortable too: a `turn.abort` during a 429
@@ -221,12 +228,31 @@ state: `session.detach` with `purge: true` deletes immediately, and dormant
 sessions past the 30-day retention window are pruned at daemon startup.
 Both are followed by `404 unknown_session` everywhere.
 
+### Wake turns (background jobs)
+
+A background job that finishes delivers its result to the model as a _wake
+turn_ — an ordinary user turn driven by the daemon, indistinguishable in
+the transcript from any other turn: it has its own `turns[]` row (prompt =
+the `[background jobs] …` notice), its own events, and normal
+`finished`/`error` settlement. Multiple jobs finishing before a wake
+becomes possible share one prompt (one block per job). A dormant session's
+wake implicitly revives it, like any turn. Jobs are in-memory only: a
+daemon restart drops them (no phantom wakes), and a wake turn interrupted
+by the restart settles as `interrupted` like any running turn.
+
+The `harness_notice` synthetic pair (an idle abort's termination notice and
+future harness notices ride it) is contract, not internal: the assistant
+row carries one tool call named `harness_notice` with empty args (`"{}"`),
+answered by a tool row whose content is `{ hint, notices: [{ kind, body }] }`.
+The name is reserved — it is never advertised in `tools`, and a model
+imitating the call gets the registry's graceful unknown-tool error row.
+
 ## Errors
 
 Errors are `{ error: { code, message } }` JSON with a stable code→status
 mapping: `invalid_request`/`unknown_model` → 400, `unauthorized` → 401,
-`unknown_session` → 404, `rate_limited` → 429, `internal` → 500,
-`provider_error` → 502. There is no `session_closed`: dormancy never
+`unknown_session`/`unknown_job` → 404, `rate_limited` → 429, `internal` →
+500, `provider_error` → 502. There is no `session_closed`: dormancy never
 rejects a turn or a read. Set `apiToken` in the daemon's config to require
 `Authorization: Bearer <token>` (the client forwards it).
 

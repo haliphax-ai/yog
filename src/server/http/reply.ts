@@ -7,6 +7,7 @@ export const ERROR_STATUS: Record<string, number> = {
   invalid_request: 400,
   unknown_model: 400,
   unknown_session: 404,
+  unknown_job: 404,
   unauthorized: 401,
   provider_error: 502,
   rate_limited: 429,

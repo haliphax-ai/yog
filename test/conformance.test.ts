@@ -159,6 +159,7 @@ describe("conformance: capabilities", () => {
   });
   it("advertises commands only for wired subsystems", async () => {
     // The conformance daemon injects bare capabilities (no compaction,
+    // shake, jobs, or skills wiring), so the projection is empty.
     // shake, or skills wiring), so the projection is empty.
     const res = await fetch(`${base}/v1/capabilities`);
     const body = await json(res);
@@ -350,6 +351,15 @@ describe("conformance: error-code mapping", () => {
     const res = await sendMessage(base, "nope", "session.get");
     expect(res.status).toBe(404);
     expect((await json(res)).error.code).toBe("unknown_session");
+  });
+
+  it("jobs.get on a daemon without the manager → 500 internal (the mapped error)", async () => {
+    const id = await newSession();
+    // No manager is wired on the conformance daemon: the type still
+    // dispatches, so clients get a mapped error (like the skills types).
+    const res = await sendMessage(base, id, "jobs.get", { jobId: "bg_nope" });
+    expect(res.status).toBe(500);
+    expect((await json(res)).error.code).toBe("internal");
   });
 
   it("malformed turn.start body → 400 invalid_request", async () => {

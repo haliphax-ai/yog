@@ -6,6 +6,8 @@ export interface BashResult extends ToolResult {
   stderr: string | null;
   runtimeMs: number | null;
   exitCode: number | null;
+  /** The death signal when the child was killed; null on a normal exit. */
+  signal?: string | null;
 }
 
 export interface BashArgs extends Record<string, unknown> {
@@ -44,6 +46,7 @@ function nullResult(start: number, error: string): BashResult {
     stderr: null,
     runtimeMs: Math.round(performance.now() - start),
     exitCode: null,
+    signal: null,
     error,
   };
 }
@@ -156,6 +159,8 @@ export interface BashExecutionResult {
   stdout?: string;
   stderr?: string;
   exitCode?: number | null;
+  /** The death signal when the child was killed; null on a normal exit. */
+  signal?: string | null;
   state?: { cwd: string; env: string; functions: string };
   error?: string;
 }
@@ -242,7 +247,14 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
       const resp = await bashExecutor(args.command, executorOpts(ctx, restore, extraPath));
       const runtimeMs = Math.round(performance.now() - start);
 
-      if (resp.ok && resp.state) await saveState(sessionKey, resp.state);
+      // A detached call (yog#90) must not write shell state back to the
+      // mirror: its scratch dir is throwaway, and the frozen snapshot it
+      // started from is what the manager re-seeds future foreground runs
+      // with. The live per-session state stays exactly as the foreground
+      // left it.
+      if (resp.ok && resp.state && ctx?.detached === undefined) {
+        await saveState(sessionKey, resp.state);
+      }
 
       if (!resp.ok) return nullResult(start, resp.error ?? "bash call failed");
       // Limit the tool's own output: the budget (config `toolOutputLimit`,
@@ -258,6 +270,9 @@ export const bashTool: ToolSpec<BashArgs, BashResult> = {
         stderr: capped[1],
         runtimeMs,
         exitCode: resp.exitCode ?? null,
+        // Death signal (SIGTERM &c.): rides the result so the jobs manager
+        // can classify a signal death as a TERMINATION — a waking one.
+        signal: resp.signal ?? null,
       };
     } catch (err) {
       return nullResult(start, err instanceof Error ? err.message : String(err));

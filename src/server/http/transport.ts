@@ -11,6 +11,7 @@ import type {
 } from "./types.ts";
 import {
   handleCompactionRun,
+  handleJobsGet,
   handleSessionDetach,
   handleSkillsCommand,
   handleTranscriptShake,
@@ -202,6 +203,8 @@ export async function dispatchMessage(
     await handleTranscriptShake(st.deps, resolvers, session, ctx);
   } else if (type.startsWith("skills.")) {
     await handleSkillsCommand(st.deps, session, ctx);
+  } else if (type === "jobs.get") {
+    await handleJobsGet(st.deps, ctx);
   } else if (type === "turn.start") {
     await startTurn(st, res, session, data, requestId);
   } else {

@@ -40,8 +40,12 @@ src/
                     (serve.ts), the HTTP/SSE adapter domain (server/http/),
                     SSE framing, session orchestrator, worker pool, the
                     sqlite session store domain (server/store/), the
-                    daemon assembly (server/daemon/), compaction, /shake,
-                    the agent-CLI registry, and the models.dev cache.
+                    daemon assembly (server/daemon/ — runtime, bash wiring,
+                    prelude sink, skills + jobs CLI commands), the
+                    background-jobs manager domain (server/jobs/ — slots,
+                    wake ladder, cap, wake-turn delivery), compaction,
+                    /shake, the agent-CLI registry, and the models.dev
+                    cache.
   mount.ts          Mount/unmount helpers (accepts any FuseOps).
   host.ts           Host proxy: the only sanctioned path for descriptors
                     and tools to touch the host filesystem and subprocesses
@@ -56,14 +60,20 @@ src/
                     shim descriptors.
   toolkit/          Harness-tool plumbing: ToolSpec/ToolResult, the tool
                     registry, the bash tool (toolkit/tools/), output
-                    truncation, and token estimation profiles.
-  worker/           The bash worker process: JSONL protocol, persistent-
-                    shell wrapper, daemon-side client.
+                    truncation, token estimation profiles, and the
+                    detach seam (module-level background-job policy).
+  worker/           The bash worker process: JSONL protocol (bash.run /
+                    bash.abort / bash.pid), persistent-shell wrapper,
+                    daemon-side client.
   state/            The agentfs-backed state layer (the only module allowed
-                    to import the agentfs SDK) and session id generation.
+                    to import the agentfs SDK), session id generation, and
+                    the per-call scratch shell-state dirs (runs/).
   skills/           The agent-skills subsystem: frontmatter parsing,
                     discovery, load/unload, PATH injection, agent-CLI
                     commands.
+  schedule/         Cancelable-timeout primitive with an injectable clock +
+                    timer impl (deterministic time under test; absolute
+                    leaf domain).
 test/               Unit suites per layer, plus the external-client
                     conformance suites.
 docs/               Split documentation; start at docs/README.md.
