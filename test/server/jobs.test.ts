@@ -424,6 +424,38 @@ describe("JobManager (fake clock)", () => {
     expect(job!.termReason).toBe("max runtime");
   });
 
+  it("ladder: a wake over a RUNNING job holds the rung (live work re-wakes at the rung, not past it)", async () => {
+    const { manager, clock, orch } = build({ opts: { wakeLadderMs: [10, 20, 30] } });
+    manager.wire();
+    orch.setBusy(true);
+    const ret = deferred();
+    const v = (await consultThreshold(manager, {
+      sessionId: "s1",
+      tool: "bash",
+      argsJson: null,
+      result: ret.promise,
+    })) as { kind: string; jobId: string };
+
+    // The job is RUNNING (not settled): no-op wakes must hold the rung at
+    // 0 - the ladder exists to re-invoke the model about live work, and
+    // burning rungs on no-op wakes pushed the next wake past the job's own
+    // settle (the sleep-300 test: zero ladder wakes before the result).
+    clock.advance(clock.now + 10);
+    clock.advance(clock.now + 10);
+    clock.advance(clock.now + 10);
+    expect(orch.wakes).toHaveLength(0);
+    expect(manager.job(v.jobId!)!.state).toBe("running");
+
+    // Settle while busy; the idle tail delivers. The rung never advanced.
+    await settleJob(v.jobId!, ret, { stdout: "done", exitCode: 0 });
+    orch.setBusy(false);
+    orch.fireIdle("s1");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(orch.wakes).toHaveLength(1);
+    expect(orch.wakes[0]!.prompt).toContain(v.jobId!);
+  });
+
   it("ladder: advance on empty wake, hold on delivery, reset only on queue clear", async () => {
     const { manager, clock, orch } = build({ opts: { wakeLadderMs: [10, 20, 30] } });
     manager.wire();

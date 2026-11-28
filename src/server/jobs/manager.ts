@@ -541,16 +541,27 @@ export class JobManager {
     });
   }
 
-  /** A wake fired: advance the rung when nothing settled, then deliver. */
+  /**
+   * A wake fired: advance the rung when nothing settled, then deliver.
+   * "Nothing settled" means no RUNNING job either: the ladder exists to
+   * re-invoke the model about live work, so a wake over a still-running
+   * job holds the rung (the job's own settle will deliver). Advancing
+   * here burned rungs on no-op wakes (the sleep-300 ladder test) and the
+   * ladder never fired before the job's own settle.
+   */
   #onWake(sessionId: string): void {
     const st = this.#session(sessionId);
-    if (st.pending.length === 0) {
-      // Nothing finished since the last wake: advance toward the ceiling.
+    const live = [...this.#jobs.values()].some(
+      (j) => j.sessionId === sessionId && j.state === "running" && !j.delivered,
+    );
+    if (st.pending.length === 0 && !live) {
+      // Nothing settled AND nothing running since the last wake: advance
+      // toward the ceiling.
       st.rung = advanceRung(this.#opts.wakeLadderMs, st.rung);
     }
     void this.#maybeDeliver(sessionId);
-    // Keep waking at the (possibly advanced) rung while jobs are live —
-    // a hung job occupies its slot and the ladder tops out at the ceiling.
+    // Keep waking at the (possibly held) rung while jobs are live — a hung
+    // job occupies its slot and the ladder tops out at the ceiling.
     this.#armLadder(sessionId);
   }
 }

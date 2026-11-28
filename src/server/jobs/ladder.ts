@@ -23,7 +23,12 @@ export function advanceRung(ladder: readonly number[], rung: number): number {
 
 /**
  * True when the session's queue is clear: no undelivered job remains
- * (pending or running). The rung resets only on this.
+ * (pending, running, or otherwise unsettled). The rung resets only on
+ * this. A RUNNING job keeps the queue non-clear: a wake that fires while
+ * the only job is still executing must NOT advance the rung — the ladder
+ * exists to re-invoke the model about live work, and burning rungs on
+ * no-op wakes (the sleep-300 ladder test) pushed the next wake past the
+ * job's own settle, so no ladder wake ever reached the model.
  */
 export function queueCleared(jobs: readonly BackgroundJob[], sessionId: string): boolean {
   return !jobs.some((j) => j.sessionId === sessionId && !j.delivered);
